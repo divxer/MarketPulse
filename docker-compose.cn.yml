@@ -22,9 +22,9 @@ services:
     container_name: marketpulse
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "8088:8000"
     volumes:
-      - marketpulse_data:/data
+      - /volume1/docker/marketpulse/data:/data
     environment:
       APP_PASSWORD_HASH: ${APP_PASSWORD_HASH}
       SESSION_SECRET: ${SESSION_SECRET}
@@ -41,6 +41,3 @@ services:
       timeout: 5s
       start_period: 20s
       retries: 3
-
-volumes:
-  marketpulse_data:
