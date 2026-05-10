@@ -12,6 +12,22 @@ from marketpulse.data.types import Bar, Fundamentals, NewsItem, Quote
 from marketpulse.db.models import AiAnalysis
 
 
+_DATA_SEPARATOR = "\n\nDATA:\n"
+
+
+def _split_prompt(rendered: str) -> tuple[str, str]:
+    """Split a rendered prompt into (system, user_data).
+
+    The renderers in marketpulse.ai.prompts return a single string of the form
+    `<system>\n\nDATA:\n<json>`. The system part is sent as the API system prompt
+    (cacheable); the JSON data is sent as the user message body.
+    """
+    system, sep, data = rendered.partition(_DATA_SEPARATOR)
+    if not sep:
+        raise ValueError("rendered prompt missing DATA separator")
+    return system, data
+
+
 class _DataLike(Protocol):
     def get_quote(self, ticker: str) -> Quote: ...
     def get_history(self, ticker: str, period: str = ...) -> list[Bar]: ...
@@ -55,10 +71,8 @@ class AiService:
         prompt_text = prompts.render_analysis_prompt(
             quote=quote, fundamentals=fundamentals, news=news, bars=bars,
         )
-        response = self.ai.complete(
-            system=prompt_text.split("\n\nDATA:\n")[0],
-            user=prompt_text,
-        )
+        system, data = _split_prompt(prompt_text)
+        response = self.ai.complete(system=system, user=data)
         now = datetime.now(UTC)
         record = AiAnalysis(
             ticker=ticker,
@@ -86,9 +100,8 @@ class AiService:
         prompt_text = prompts.render_commentary_prompt(
             market_summary=market_summary, watchlist_perf=watchlist_perf,
         )
-        return self.ai.complete(
-            system=prompt_text.split("\n\nDATA:\n")[0], user=prompt_text,
-        )
+        system, data = _split_prompt(prompt_text)
+        return self.ai.complete(system=system, user=data)
 
     def _lookup_cache(self, ticker: str, version: str) -> AiAnalysis | None:
         stmt = (
