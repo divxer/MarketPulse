@@ -53,6 +53,7 @@ Portainer → **Stacks** → **Add stack**:
 - Repository URL: `https://github.com/<your-username>/MarketPulse`
 - Reference: `refs/heads/main`
 - Compose path: `docker-compose.prod.yml`
+  (in mainland China, use `docker-compose.cn.yml` instead — same compose but pulls the image through the `ghcr.1ms.run` mirror)
 - Authentication: tick if private repo (use your PAT)
 - **Environment variables** (paste these — values from your local `.env`):
   ```

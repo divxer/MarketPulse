@@ -1,0 +1,48 @@
+# China-friendly variant of docker-compose.prod.yml.
+#
+# Same as the prod compose but pulls the image through the 1ms.run mirror,
+# which proxies ghcr.io for users who can't reliably reach GitHub Container
+# Registry directly (e.g. NAS deployments in mainland China).
+#
+# Image is still built and pushed to the canonical ghcr.io/divxer/marketpulse
+# by GitHub Actions; 1ms.run mirrors it transparently.
+#
+# Use with Portainer Stacks (Web editor mode):
+#   - Paste this file's contents
+#   - Set APP_PASSWORD_HASH, SESSION_SECRET, ANTHROPIC_API_KEY in env vars
+#
+# Required environment variables:
+#   APP_PASSWORD_HASH      bcrypt hash for login (see DEPLOY.md)
+#   SESSION_SECRET         32+ bytes of random hex
+#   ANTHROPIC_API_KEY      Claude API key
+# Optional (have sensible defaults):
+#   WATCHLIST_RECAP_TIME, LOG_LEVEL, AI_MODEL, AI_CACHE_TTL_HOURS, NEWS_CACHE_TTL_DAYS
+
+services:
+  marketpulse:
+    image: ghcr.1ms.run/divxer/marketpulse:latest
+    container_name: marketpulse
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - marketpulse_data:/data
+    environment:
+      APP_PASSWORD_HASH: ${APP_PASSWORD_HASH}
+      SESSION_SECRET: ${SESSION_SECRET}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      DATABASE_URL: sqlite:////data/marketpulse.db
+      WATCHLIST_RECAP_TIME: ${WATCHLIST_RECAP_TIME:-16:30}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      AI_MODEL: ${AI_MODEL:-claude-sonnet-4-6}
+      AI_CACHE_TTL_HOURS: ${AI_CACHE_TTL_HOURS:-24}
+      NEWS_CACHE_TTL_DAYS: ${NEWS_CACHE_TTL_DAYS:-7}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+volumes:
+  marketpulse_data:
