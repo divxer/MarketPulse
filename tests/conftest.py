@@ -28,3 +28,4 @@ def db_session(db_url: str) -> Session:
         yield session
     finally:
         session.close()
+        db_base.reset_engine()

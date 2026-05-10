@@ -1,6 +1,6 @@
 from collections.abc import Iterator
 
-from sqlalchemy import create_engine
+from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from marketpulse.config import get_settings
@@ -10,7 +10,7 @@ class Base(DeclarativeBase):
     pass
 
 
-_engine = None
+_engine: Engine | None = None
 _SessionLocal: sessionmaker[Session] | None = None
 
 
@@ -22,16 +22,27 @@ def init_engine(database_url: str | None = None) -> None:
     _SessionLocal = sessionmaker(bind=_engine, autoflush=False, expire_on_commit=False)
 
 
-def get_engine():
+def get_engine() -> Engine:
     if _engine is None:
         init_engine()
+    if _engine is None:
+        raise RuntimeError("engine not initialized")
     return _engine
+
+
+def reset_engine() -> None:
+    global _engine, _SessionLocal
+    if _engine is not None:
+        _engine.dispose()
+    _engine = None
+    _SessionLocal = None
 
 
 def session_scope() -> Iterator[Session]:
     if _SessionLocal is None:
         init_engine()
-    assert _SessionLocal is not None
+    if _SessionLocal is None:
+        raise RuntimeError("session factory not initialized")
     db = _SessionLocal()
     try:
         yield db
