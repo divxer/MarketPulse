@@ -21,8 +21,23 @@ def create_app() -> FastAPI:
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-    from marketpulse.web.routes import health  # noqa: WPS433
+    from marketpulse.web.routes import auth, health  # noqa: WPS433
     app.include_router(health.router)
+    app.include_router(auth.router)
+
+    @app.exception_handler(Exception)
+    async def _redirect_unauth(request, exc):  # noqa: ANN001
+        from fastapi import HTTPException
+        from fastapi.responses import JSONResponse, RedirectResponse
+        if isinstance(exc, HTTPException) and exc.status_code == 401:
+            if request.url.path.startswith("/login") or request.url.path.startswith("/health"):
+                return JSONResponse({"detail": "unauthorized"}, status_code=401)
+            accept = request.headers.get("accept", "")
+            if "text/html" in accept or accept == "":
+                return RedirectResponse(url="/login", status_code=303)
+            return JSONResponse({"detail": "unauthorized"}, status_code=401)
+        raise exc
+
     return app
 
 
