@@ -14,12 +14,13 @@ RUN npm install && \
 FROM python:3.12-slim AS runtime
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    UV_LINK_MODE=copy \
-    PATH="/root/.local/bin:${PATH}"
+    UV_LINK_MODE=copy
 
+# Install uv into a system-wide location so the non-root `app` user can execute it.
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && curl -LsSf https://astral.sh/uv/install.sh | sh
+    && curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh \
+    && chmod +x /usr/local/bin/uv /usr/local/bin/uvx
 
 WORKDIR /app
 COPY pyproject.toml uv.lock .python-version ./
