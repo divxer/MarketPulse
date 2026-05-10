@@ -80,7 +80,8 @@ MarketPulse/
 │       │   └─ partials/
 │       │       ├─ watchlist_row.html
 │       │       ├─ recap_card.html
-│       │       └─ analysis_block.html
+│       │       ├─ analysis_block.html
+│       │       └─ analysis_error.html
 │       └─ static/
 │           └─ app.css                   # Tailwind output (built)
 ├─ tests/
@@ -160,6 +161,7 @@ dependencies = [
     "httpx>=0.27",
     "structlog>=24.4",
     "python-multipart>=0.0.20",
+    "tenacity>=9.0",
 ]
 
 [dependency-groups]
@@ -214,6 +216,7 @@ WATCHLIST_RECAP_TIME=16:30
 LOG_LEVEL=INFO
 AI_MODEL=claude-sonnet-4-6
 AI_CACHE_TTL_HOURS=24
+NEWS_CACHE_TTL_DAYS=7
 ```
 
 - [ ] **Step 6: Create empty package init files**
@@ -266,6 +269,7 @@ def test_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.watchlist_recap_time == "16:30"
     assert s.ai_model == "claude-sonnet-4-6"
     assert s.ai_cache_ttl_hours == 24
+    assert s.news_cache_ttl_days == 7
     assert s.log_level == "INFO"
 
 
@@ -302,6 +306,7 @@ class Settings(BaseSettings):
     log_level: str = Field("INFO", alias="LOG_LEVEL")
     ai_model: str = Field("claude-sonnet-4-6", alias="AI_MODEL")
     ai_cache_ttl_hours: int = Field(24, alias="AI_CACHE_TTL_HOURS")
+    news_cache_ttl_days: int = Field(7, alias="NEWS_CACHE_TTL_DAYS")
 
 
 @lru_cache(maxsize=1)
@@ -892,8 +897,20 @@ from collections.abc import Iterable
 from datetime import UTC, date, datetime, timedelta
 
 import yfinance as yf
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from marketpulse.data.types import Bar, Fundamentals, IndexQuote, MarketOverview, NewsItem, Quote
+from marketpulse.logging import get_logger
+
+log = get_logger(__name__)
+
+# Retry on transient network/HTTP errors only — never on programmer errors like ValueError.
+_retry = retry(
+    reraise=True,
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=0.5, max=4),
+    retry=retry_if_exception_type((OSError, RuntimeError, TimeoutError)),
+)
 
 
 class YFinanceClient:
@@ -902,6 +919,7 @@ class YFinanceClient:
     Replace via constructor injection in tests.
     """
 
+    @_retry
     def fetch_quote(self, ticker: str) -> Quote:
         t = yf.Ticker(ticker)
         info = t.fast_info
@@ -921,6 +939,7 @@ class YFinanceClient:
             fetched_at=datetime.now(UTC),
         )
 
+    @_retry
     def fetch_history(self, ticker: str, period: str = "60d") -> list[Bar]:
         hist = yf.Ticker(ticker).history(period=period, interval="1d")
         bars: list[Bar] = []
@@ -937,6 +956,7 @@ class YFinanceClient:
             )
         return bars
 
+    @_retry
     def fetch_news(self, ticker: str, limit: int = 10) -> list[NewsItem]:
         items = yf.Ticker(ticker).news or []
         out: list[NewsItem] = []
@@ -955,6 +975,7 @@ class YFinanceClient:
             )
         return out
 
+    @_retry
     def fetch_fundamentals(self, ticker: str) -> Fundamentals:
         info = yf.Ticker(ticker).info or {}
         return Fundamentals(
@@ -1366,11 +1387,13 @@ class _YFLike(Protocol):
 
 
 class DataService:
-    def __init__(self, session: Session, yf_client: _YFLike) -> None:
+    def __init__(
+        self, session: Session, yf_client: _YFLike, *, news_ttl_days: int = 7
+    ) -> None:
         self.session = session
         self.yf = yf_client
         self.price_cache = PriceCache(session)
-        self.news_cache = NewsCache(session, ttl_days=7)
+        self.news_cache = NewsCache(session, ttl_days=news_ttl_days)
 
     def get_quote(self, ticker: str) -> Quote:
         try:
@@ -1592,6 +1615,7 @@ This module is mock-replaced in tests; not unit-tested directly.
 from typing import Protocol
 
 import anthropic
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from marketpulse.config import get_settings
 
@@ -1600,12 +1624,27 @@ class AiClient(Protocol):
     def complete(self, *, system: str, user: str) -> str: ...
 
 
+# Retry only on transient API/network errors. Validation errors (bad input) shouldn't retry.
+_AI_RETRY_EXCEPTIONS = (
+    anthropic.APIConnectionError,
+    anthropic.APITimeoutError,
+    anthropic.RateLimitError,
+    anthropic.InternalServerError,
+)
+
+
 class AnthropicClient:
     def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
         settings = get_settings()
         self._client = anthropic.Anthropic(api_key=api_key or settings.anthropic_api_key)
         self._model = model or settings.ai_model
 
+    @retry(
+        reraise=True,
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, max=8),
+        retry=retry_if_exception_type(_AI_RETRY_EXCEPTIONS),
+    )
     def complete(self, *, system: str, user: str) -> str:
         msg = self._client.messages.create(
             model=self._model,
@@ -2932,7 +2971,8 @@ from marketpulse.recap.service import RecapService
 
 
 def get_data_service(db: Session = Depends(get_db)) -> DataService:
-    return DataService(db, YFinanceClient())
+    s = _get_settings()
+    return DataService(db, YFinanceClient(), news_ttl_days=s.news_cache_ttl_days)
 
 
 def get_ai_service(
@@ -3044,6 +3084,26 @@ def test_stock_analyze(client: TestClient, monkeypatch) -> None:
         assert "Fundamentals" in res.text
     finally:
         client.app.dependency_overrides.clear()
+
+
+def test_stock_analyze_failure_renders_error_fragment(client: TestClient, monkeypatch) -> None:
+    _login(client, monkeypatch)
+
+    class _BoomAi:
+        def analyze(self, ticker):
+            raise RuntimeError("anthropic unavailable")
+
+    from marketpulse.web.deps import get_ai_service, get_data_service
+    client.app.dependency_overrides[get_data_service] = lambda: _FakeData()
+    client.app.dependency_overrides[get_ai_service] = lambda: _BoomAi()
+    try:
+        res = client.post("/stock/AAPL/analyze")
+        assert res.status_code == 200
+        assert "AI analysis failed" in res.text
+        assert "anthropic unavailable" in res.text
+        assert "Retry" in res.text
+    finally:
+        client.app.dependency_overrides.clear()
 ```
 
 - [ ] **Step 2: Implement `marketpulse/web/routes/stock.py`**
@@ -3087,8 +3147,18 @@ def stock_analyze(
     ai: AiService = Depends(get_ai_service),
     _: None = Depends(require_auth),
 ):
+    from marketpulse.logging import get_logger
+    log = get_logger(__name__)
     ticker = ticker.upper()
-    result = ai.analyze(ticker)
+    try:
+        result = ai.analyze(ticker)
+    except Exception as exc:  # noqa: BLE001 — surface any failure as recoverable UI error
+        log.warning("analyze_failed", ticker=ticker, error=str(exc))
+        return templates.TemplateResponse(
+            request, "partials/analysis_error.html",
+            {"ticker": ticker, "error": str(exc)},
+            status_code=200,  # HTMX swaps the fragment regardless
+        )
     return templates.TemplateResponse(
         request, "partials/analysis_block.html",
         {"ticker": ticker, "result": result},
@@ -3139,6 +3209,16 @@ def stock_analyze(
 </article>
 ```
 
+`marketpulse/web/templates/partials/analysis_error.html`:
+```html
+<div class="mt-3 p-3 bg-red-50 border border-red-200 rounded text-sm">
+  <p class="text-red-700 font-medium">AI analysis failed</p>
+  <p class="text-red-600 text-xs mt-1">{{ error }}</p>
+  <button hx-post="/stock/{{ ticker }}/analyze" hx-target="#analysis" hx-swap="innerHTML"
+          class="mt-2 bg-slate-900 text-white px-3 py-1 rounded text-xs">Retry</button>
+</div>
+```
+
 - [ ] **Step 4: Wire router**
 
 Modify `marketpulse/web/main.py` to include `stock.router`.
@@ -3146,7 +3226,7 @@ Modify `marketpulse/web/main.py` to include `stock.router`.
 - [ ] **Step 5: Run tests**
 
 Run: `uv run pytest tests/web/test_stock.py -v`
-Expected: 2 PASS.
+Expected: 3 PASS.
 
 - [ ] **Step 6: Commit**
 
@@ -3405,7 +3485,7 @@ def run_daily_recap() -> None:
     gen = session_scope()
     db = next(gen)
     try:
-        data = DataService(db, YFinanceClient())
+        data = DataService(db, YFinanceClient(), news_ttl_days=settings.news_cache_ttl_days)
         ai = AiService(
             db, ai_client=AnthropicClient(), data=data,
             model=settings.ai_model, ttl_hours=settings.ai_cache_ttl_hours,
@@ -3419,10 +3499,11 @@ def run_daily_recap() -> None:
 
 def run_news_purge() -> None:
     log.info("news_purge_start")
+    settings = get_settings()
     gen = session_scope()
     db = next(gen)
     try:
-        NewsCache(db).purge_expired()
+        NewsCache(db, ttl_days=settings.news_cache_ttl_days).purge_expired()
     finally:
         db.close()
 
@@ -3845,7 +3926,9 @@ git tag -a v0.1.0 -m "MarketPulse v1 MVP"
 - ✅ Cache-first reads with stale fallback — Task 11
 - ✅ Prompt versioning invalidates AI cache — Task 14
 - ✅ Recap idempotency + partial-failure handling — Task 16
-- ✅ Visible-and-recoverable errors — Tasks 16, 21
+- ✅ Visible-and-recoverable errors — Tasks 16, 21, 24
+- ✅ Transient-error retries on yfinance + Anthropic — Tasks 8, 13 (tenacity, exponential backoff)
+- ✅ Configurable news cache TTL — Tasks 2, 11, 26
 - ✅ Structured JSON logging — Task 3
 - ✅ Health check — Task 19
 - ✅ Alembic migrations — Task 6
