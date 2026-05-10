@@ -17,7 +17,7 @@
 
 services:
   marketpulse:
-    image: registry.cn-beijing.aliyuncs.com/divxer/marketpulse:latest
+    image: crpi-wo56gda7tim6c1ik.cn-beijing.personal.cr.aliyuncs.com/divxer/marketpulse:latest
     container_name: marketpulse
     restart: unless-stopped
     ports:
