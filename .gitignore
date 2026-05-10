@@ -12,3 +12,8 @@ marketpulse/web/static/app.css
 dist/
 build/
 *.egg-info/
+.DS_Store
+.idea/
+.vscode/
+.coverage
+htmlcov/
