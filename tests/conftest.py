@@ -29,3 +29,18 @@ def db_session(db_url: str) -> Session:
     finally:
         session.close()
         db_base.reset_engine()
+
+
+@pytest.fixture()
+def client(db_url: str):
+    from fastapi.testclient import TestClient
+
+    from marketpulse.db import base as db_base
+    from marketpulse.db.base import Base
+    from marketpulse.web.main import create_app
+
+    db_base.init_engine(db_url)
+    Base.metadata.create_all(db_base.get_engine())
+    app = create_app()
+    with TestClient(app) as c:
+        yield c
