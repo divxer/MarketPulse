@@ -3,18 +3,19 @@ from typing import Any
 
 from marketpulse.data.types import Bar, Fundamentals, NewsItem, Quote
 
-ANALYSIS_PROMPT_VERSION = "analysis-v1"
-COMMENTARY_PROMPT_VERSION = "commentary-v1"
+ANALYSIS_PROMPT_VERSION = "analysis-v2-zh"
+COMMENTARY_PROMPT_VERSION = "commentary-v2-zh"
 
 _ANALYSIS_SYSTEM = (
-    "You are an equity research analyst. Produce a concise markdown report with three sections: "
-    "## Fundamentals, ## Technicals, ## Risks. Use only the data provided. "
-    "Do not invent figures. Do not give buy/sell recommendations."
+    "你是一名股票研究分析师。请用中文输出一份简明的 markdown 报告,包含三个部分:"
+    "## 基本面、## 技术面、## 风险。只使用所提供的数据,不要编造数字,"
+    "不要给出买入或卖出建议。股票代码、行业名称等专有名词可保留英文原文。"
 )
 
 _COMMENTARY_SYSTEM = (
-    "You are a market recap writer. In one paragraph (3-5 sentences), summarize today's market "
-    "for an investor watching this watchlist. Be factual, calm, and specific."
+    "你是一名盘后市场点评作者。请用中文写一段(3-5 句)简短点评,"
+    "面向正在关注这个自选股清单的投资者。要客观、冷静、具体,"
+    "提及具体的 ticker 和数字。股票代码保留英文原文。"
 )
 
 

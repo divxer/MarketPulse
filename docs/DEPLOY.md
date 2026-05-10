@@ -30,6 +30,19 @@ fly logs
 fly ssh console
 ```
 
+## Local development gotcha
+
+If you run `uv run uvicorn ...` from a shell where `ANTHROPIC_API_KEY=` (empty)
+is already exported (e.g. inside Claude Code's terminal), pydantic-settings
+reads OS env first and the empty value silently overrides `.env`. Workaround:
+
+```
+unset ANTHROPIC_API_KEY ANTHROPIC_BASE_URL
+uv run uvicorn marketpulse.web.main:app --reload
+```
+
+Or launch from a fresh terminal where those vars aren't pre-set.
+
 ## Backup
 
 ```
