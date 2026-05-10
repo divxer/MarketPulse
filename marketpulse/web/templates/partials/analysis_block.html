@@ -1,0 +1,7 @@
+<article class="prose prose-sm max-w-none mt-3 p-3 bg-slate-50 rounded">
+  <small class="text-slate-500">
+    Generated {% if result.cached %}(cached){% else %}(fresh){% endif %} •
+    model {{ result.model }} • prompt {{ result.prompt_version }}
+  </small>
+  <div>{{ result.response_markdown | replace("\n", "<br>") | safe }}</div>
+</article>

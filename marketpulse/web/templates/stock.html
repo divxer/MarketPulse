@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="bg-white rounded-md shadow-sm p-4">
+  <header class="flex items-baseline justify-between">
+    <h1 class="text-xl font-semibold">{{ ticker }}</h1>
+    <span class="text-2xl">{{ "%.2f"|format(quote.price) }}
+      <span class="{% if quote.change_pct >= 0 %}text-green-600{% else %}text-red-600{% endif %}">
+        {{ "%+.2f"|format(quote.change_pct) }}%
+      </span>
+    </span>
+  </header>
+  {% if quote.stale %}<p class="text-amber-600 text-xs">⚠ Showing cached data</p>{% endif %}
+
+  <h2 class="mt-6 font-semibold">Recent News</h2>
+  <ul class="mt-2 text-sm space-y-1">
+    {% for n in news %}
+    <li><a href="{{ n.url }}" class="text-blue-600">{{ n.headline }}</a>
+        <span class="text-slate-500">— {{ n.source }}</span></li>
+    {% endfor %}
+  </ul>
+
+  <div id="analysis" class="mt-6">
+    <button hx-post="/stock/{{ ticker }}/analyze" hx-target="#analysis" hx-swap="innerHTML"
+            class="bg-slate-900 text-white px-3 py-1 rounded">AI Deep Analysis</button>
+  </div>
+</section>
+{% endblock %}
