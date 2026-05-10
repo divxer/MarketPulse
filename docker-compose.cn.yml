@@ -18,6 +18,7 @@
 services:
   marketpulse:
     image: crpi-wo56gda7tim6c1ik.cn-beijing.personal.cr.aliyuncs.com/divxer/marketpulse:latest
+    pull_policy: always
     container_name: marketpulse
     restart: unless-stopped
     ports:

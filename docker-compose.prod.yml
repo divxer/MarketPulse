@@ -16,6 +16,7 @@
 services:
   marketpulse:
     image: ghcr.io/divxer/marketpulse:latest
+    pull_policy: always
     container_name: marketpulse
     restart: unless-stopped
     ports:
