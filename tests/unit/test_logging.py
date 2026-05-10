@@ -14,3 +14,5 @@ def test_logger_emits_json(capsys) -> None:
     assert payload["event"] == "hello"
     assert payload["ticker"] == "AAPL"
     assert payload["value"] == 1
+    assert payload["level"] == "info"
+    assert "timestamp" in payload
