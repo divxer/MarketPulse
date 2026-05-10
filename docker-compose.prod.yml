@@ -1,0 +1,43 @@
+# Production / NAS deployment compose — pulls pre-built image from GHCR.
+#
+# Use this in Portainer Stacks (Repository or Web editor mode). It does NOT
+# build from source; the image is built by GitHub Actions on every push to
+# main and tagged `:latest` (plus `:sha-<short>` and any `v*` tag).
+#
+# For local development / NAS-builds-from-source, use docker-compose.yml.
+#
+# Required environment variables (set in Portainer UI when creating the stack):
+#   APP_PASSWORD_HASH      bcrypt hash for login (see DEPLOY.md)
+#   SESSION_SECRET         32+ bytes of random hex
+#   ANTHROPIC_API_KEY      Claude API key
+# Optional (have sensible defaults):
+#   WATCHLIST_RECAP_TIME, LOG_LEVEL, AI_MODEL, AI_CACHE_TTL_HOURS, NEWS_CACHE_TTL_DAYS
+
+services:
+  marketpulse:
+    image: ghcr.io/divxer/marketpulse:latest
+    container_name: marketpulse
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - marketpulse_data:/data
+    environment:
+      APP_PASSWORD_HASH: ${APP_PASSWORD_HASH}
+      SESSION_SECRET: ${SESSION_SECRET}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      DATABASE_URL: sqlite:////data/marketpulse.db
+      WATCHLIST_RECAP_TIME: ${WATCHLIST_RECAP_TIME:-16:30}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      AI_MODEL: ${AI_MODEL:-claude-sonnet-4-6}
+      AI_CACHE_TTL_HOURS: ${AI_CACHE_TTL_HOURS:-24}
+      NEWS_CACHE_TTL_DAYS: ${NEWS_CACHE_TTL_DAYS:-7}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+volumes:
+  marketpulse_data:
