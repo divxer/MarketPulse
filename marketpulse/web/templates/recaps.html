@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="bg-white rounded-md shadow-sm p-4">
+  <h1 class="font-semibold mb-3">Recaps</h1>
+  <ul class="text-sm divide-y">
+    {% for r in rows %}
+    <li class="py-2 flex justify-between">
+      <a href="/recap/{{ r.recap_date }}" class="text-blue-600">{{ r.recap_date }}</a>
+      <span class="text-slate-500">{{ r.generation_status }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endblock %}
