@@ -65,16 +65,43 @@ class YFinanceClient:
         items = yf.Ticker(ticker).news or []
         out: list[NewsItem] = []
         for item in items[:limit]:
+            # yfinance returns either the legacy flat shape (title/link/publisher/
+            # providerPublishTime) or a newer nested shape under `content`. Probe
+            # both so we degrade gracefully if the upstream schema flips again.
+            content = item.get("content") or {}
+            headline = content.get("title") or item.get("title") or ""
+            summary = content.get("summary") or item.get("summary")
+            url = (
+                (content.get("canonicalUrl") or {}).get("url")
+                or (content.get("clickThroughUrl") or {}).get("url")
+                or item.get("link")
+                or ""
+            )
+            source = (
+                (content.get("provider") or {}).get("displayName")
+                or item.get("publisher")
+                or "unknown"
+            )
+            published = datetime.now(UTC)
+            pub_iso = content.get("pubDate") or content.get("displayTime")
             ts = item.get("providerPublishTime")
-            published = datetime.fromtimestamp(ts, tz=UTC) if ts else datetime.now(UTC)
+            if pub_iso:
+                try:
+                    published = datetime.fromisoformat(pub_iso.replace("Z", "+00:00"))
+                except ValueError:
+                    pass
+            elif ts:
+                published = datetime.fromtimestamp(ts, tz=UTC)
+            if not headline and not url:
+                continue  # drop items with no useful content
             out.append(
                 NewsItem(
                     ticker=ticker,
-                    headline=item.get("title", ""),
-                    url=item.get("link", ""),
+                    headline=headline,
+                    url=url,
                     published_at=published,
-                    source=item.get("publisher", "unknown"),
-                    summary=item.get("summary"),
+                    source=source,
+                    summary=summary,
                 )
             )
         return out
