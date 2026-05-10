@@ -1,4 +1,4 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -56,3 +56,55 @@ class PriceCache:
             Bar(date=r.date, open=r.open, high=r.high, low=r.low, close=r.close, volume=r.volume)
             for r in rows
         ]
+
+
+class NewsCache:
+    def __init__(self, session: Session, ttl_days: int = 7) -> None:
+        self.session = session
+        self.ttl_days = ttl_days
+
+    def upsert(self, items: list[NewsItem]) -> None:
+        if not items:
+            return
+        rows = [
+            {
+                "ticker": i.ticker,
+                "headline": i.headline,
+                "url": i.url,
+                "published_at": i.published_at,
+                "source": i.source,
+                "summary": i.summary,
+            }
+            for i in items
+        ]
+        stmt = sqlite_insert(NewsCacheEntry).values(rows)
+        stmt = stmt.on_conflict_do_nothing(index_elements=["ticker", "url"])
+        self.session.execute(stmt)
+        self.session.commit()
+
+    def recent(self, ticker: str, limit: int) -> list[NewsItem]:
+        cutoff = datetime.now(UTC) - timedelta(days=self.ttl_days)
+        stmt = (
+            select(NewsCacheEntry)
+            .where(NewsCacheEntry.ticker == ticker)
+            .where(NewsCacheEntry.published_at >= cutoff)
+            .order_by(NewsCacheEntry.published_at.desc())
+            .limit(limit)
+        )
+        rows = self.session.execute(stmt).scalars().all()
+        return [
+            NewsItem(
+                ticker=r.ticker,
+                headline=r.headline,
+                url=r.url,
+                published_at=r.published_at,
+                source=r.source,
+                summary=r.summary,
+            )
+            for r in rows
+        ]
+
+    def purge_expired(self) -> None:
+        cutoff = datetime.now(UTC) - timedelta(days=self.ttl_days)
+        self.session.query(NewsCacheEntry).filter(NewsCacheEntry.published_at < cutoff).delete()
+        self.session.commit()
