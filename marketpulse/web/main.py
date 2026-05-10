@@ -43,6 +43,19 @@ def create_app() -> FastAPI:
             return RedirectResponse(url="/login", status_code=303)
         return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
 
+    from marketpulse.scheduler.jobs import build_scheduler
+    scheduler = build_scheduler()
+
+    @app.on_event("startup")
+    def _start_scheduler() -> None:
+        if not scheduler.running:
+            scheduler.start()
+
+    @app.on_event("shutdown")
+    def _stop_scheduler() -> None:
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
+
     return app
 
 
