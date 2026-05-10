@@ -1,4 +1,3 @@
-import pytest
 from fastapi.testclient import TestClient
 
 from marketpulse.auth.password import hash_password

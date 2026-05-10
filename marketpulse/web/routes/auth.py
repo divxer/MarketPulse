@@ -22,7 +22,10 @@ def login(password: str = Form(...)):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="bad password")
     token = get_session_manager().issue()
     response = RedirectResponse(url="/", status_code=303)
-    response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 30)
+    response.set_cookie(
+        SESSION_COOKIE, token,
+        httponly=True, samesite="lax", max_age=60 * 60 * 24 * 30,
+    )
     return response
 
 

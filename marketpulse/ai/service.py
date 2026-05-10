@@ -11,7 +11,6 @@ from marketpulse.ai.types import AnalysisResult
 from marketpulse.data.types import Bar, Fundamentals, NewsItem, Quote
 from marketpulse.db.models import AiAnalysis
 
-
 _DATA_SEPARATOR = "\n\nDATA:\n"
 
 

@@ -1,5 +1,4 @@
 import json
-import logging
 
 from marketpulse.logging import configure_logging, get_logger
 
