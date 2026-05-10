@@ -32,9 +32,13 @@ COPY alembic.ini ./alembic.ini
 COPY scripts ./scripts
 COPY --from=css /app/marketpulse/web/static/app.css ./marketpulse/web/static/app.css
 
-RUN useradd -u 1001 -m app && chown -R app /app
+RUN useradd -u 1001 -m app && chown -R app /app \
+    && mkdir -p /data && chown 1001:1001 /data
 USER app
 
-ENV DATABASE_URL=sqlite:////data/marketpulse.db
+ENV DATABASE_URL=sqlite:////data/marketpulse.db \
+    PATH="/app/.venv/bin:${PATH}"
 EXPOSE 8000
-CMD ["sh", "-c", "uv run alembic upgrade head && uv run uvicorn marketpulse.web.main:app --host 0.0.0.0 --port 8000"]
+# Use .venv binaries directly so `uv run` doesn't trigger an implicit sync
+# that would re-download dev dependencies at every container start.
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn marketpulse.web.main:app --host 0.0.0.0 --port 8000"]
