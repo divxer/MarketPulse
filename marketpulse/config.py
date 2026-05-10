@@ -15,8 +15,8 @@ class Settings(BaseSettings):
     watchlist_recap_time: str = Field("16:30", alias="WATCHLIST_RECAP_TIME")
     log_level: str = Field("INFO", alias="LOG_LEVEL")
     ai_model: str = Field("claude-sonnet-4-6", alias="AI_MODEL")
-    ai_cache_ttl_hours: int = Field(24, alias="AI_CACHE_TTL_HOURS")
-    news_cache_ttl_days: int = Field(7, alias="NEWS_CACHE_TTL_DAYS")
+    ai_cache_ttl_hours: int = Field(24, alias="AI_CACHE_TTL_HOURS", ge=0)
+    news_cache_ttl_days: int = Field(7, alias="NEWS_CACHE_TTL_DAYS", ge=0)
 
 
 @lru_cache(maxsize=1)
