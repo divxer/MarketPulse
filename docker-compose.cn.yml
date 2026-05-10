@@ -1,11 +1,8 @@
 # China-friendly variant of docker-compose.prod.yml.
 #
-# Same as the prod compose but pulls the image through the 1ms.run mirror,
-# which proxies ghcr.io for users who can't reliably reach GitHub Container
-# Registry directly (e.g. NAS deployments in mainland China).
-#
-# Image is still built and pushed to the canonical ghcr.io/divxer/marketpulse
-# by GitHub Actions; 1ms.run mirrors it transparently.
+# Same as the prod compose but pulls the image from Aliyun ACR (Beijing region),
+# which is fast and stable from mainland China. The image is built and pushed
+# to BOTH ghcr.io (canonical) and Aliyun ACR by GitHub Actions on every push.
 #
 # Use with Portainer Stacks (Web editor mode):
 #   - Paste this file's contents
@@ -20,7 +17,7 @@
 
 services:
   marketpulse:
-    image: ghcr.1ms.run/divxer/marketpulse:latest
+    image: registry.cn-beijing.aliyuncs.com/divxer/marketpulse:latest
     container_name: marketpulse
     restart: unless-stopped
     ports:
