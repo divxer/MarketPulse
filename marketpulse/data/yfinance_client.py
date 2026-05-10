@@ -1,0 +1,107 @@
+from datetime import UTC, datetime
+
+import yfinance as yf
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+
+from marketpulse.data.types import Bar, Fundamentals, IndexQuote, MarketOverview, NewsItem, Quote
+from marketpulse.logging import get_logger
+
+log = get_logger(__name__)
+
+# Retry on transient network/HTTP errors only — never on programmer errors like ValueError.
+_retry = retry(
+    reraise=True,
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=0.5, max=4),
+    retry=retry_if_exception_type((OSError, RuntimeError, TimeoutError)),
+)
+
+
+class YFinanceClient:
+    """Thin wrapper around yfinance — the only module that imports yfinance.
+
+    Replace via constructor injection in tests.
+    """
+
+    @_retry
+    def fetch_quote(self, ticker: str) -> Quote:
+        t = yf.Ticker(ticker)
+        info = t.fast_info
+        hist = t.history(period="21d", interval="1d")
+        if hist.empty:
+            raise ValueError(f"no data for {ticker}")
+        last_close = float(hist["Close"].iloc[-1])
+        prev_close = float(hist["Close"].iloc[-2]) if len(hist) > 1 else last_close
+        change_pct = (last_close - prev_close) / prev_close * 100 if prev_close else 0.0
+        avg_vol = int(hist["Volume"].tail(20).mean()) if len(hist) >= 5 else 0
+        return Quote(
+            ticker=ticker,
+            price=float(info.last_price or last_close),
+            change_pct=change_pct,
+            volume=int(hist["Volume"].iloc[-1]),
+            avg_volume_20d=avg_vol,
+            fetched_at=datetime.now(UTC),
+        )
+
+    @_retry
+    def fetch_history(self, ticker: str, period: str = "60d") -> list[Bar]:
+        hist = yf.Ticker(ticker).history(period=period, interval="1d")
+        bars: list[Bar] = []
+        for idx, row in hist.iterrows():
+            bars.append(
+                Bar(
+                    date=idx.date() if hasattr(idx, "date") else idx,
+                    open=float(row["Open"]),
+                    high=float(row["High"]),
+                    low=float(row["Low"]),
+                    close=float(row["Close"]),
+                    volume=int(row["Volume"]),
+                )
+            )
+        return bars
+
+    @_retry
+    def fetch_news(self, ticker: str, limit: int = 10) -> list[NewsItem]:
+        items = yf.Ticker(ticker).news or []
+        out: list[NewsItem] = []
+        for item in items[:limit]:
+            ts = item.get("providerPublishTime")
+            published = datetime.fromtimestamp(ts, tz=UTC) if ts else datetime.now(UTC)
+            out.append(
+                NewsItem(
+                    ticker=ticker,
+                    headline=item.get("title", ""),
+                    url=item.get("link", ""),
+                    published_at=published,
+                    source=item.get("publisher", "unknown"),
+                    summary=item.get("summary"),
+                )
+            )
+        return out
+
+    @_retry
+    def fetch_fundamentals(self, ticker: str) -> Fundamentals:
+        info = yf.Ticker(ticker).info or {}
+        return Fundamentals(
+            ticker=ticker,
+            market_cap=info.get("marketCap"),
+            pe_ratio=info.get("trailingPE"),
+            eps=info.get("trailingEps"),
+            sector=info.get("sector"),
+            industry=info.get("industry"),
+        )
+
+    def fetch_market_overview(self) -> MarketOverview:
+        symbols = ("SPY", "QQQ", "DIA", "^VIX")
+        quotes: dict[str, IndexQuote] = {}
+        for sym in symbols:
+            q = self.fetch_quote(sym if sym != "^VIX" else "^VIX")
+            key = sym.lstrip("^").lower()
+            quotes[key] = IndexQuote(symbol=sym, price=q.price, change_pct=q.change_pct)
+        return MarketOverview(
+            spy=quotes["spy"],
+            qqq=quotes["qqq"],
+            dia=quotes["dia"],
+            vix=quotes["vix"],
+            fetched_at=datetime.now(UTC),
+        )
