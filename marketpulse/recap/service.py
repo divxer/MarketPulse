@@ -78,6 +78,11 @@ class RecapService:
         if existing:
             existing.generation_status = "pending"
             existing.error_message = None
+            existing.market_summary_json = None
+            existing.watchlist_performance_json = None
+            existing.news_summary_json = None
+            existing.ai_commentary_text = None
+            existing.generated_at = None
             self.session.commit()
             return existing
         rec = DailyRecap(recap_date=target, generation_status="pending")

@@ -81,3 +81,28 @@ def test_complete_failure_when_market_data_unavailable(db_session: Session) -> N
     result = svc.generate(date(2026, 5, 8))
     assert result.generation_status == "failed"
     assert "market is down" in (result.error_message or "")
+
+
+def test_failed_rerun_clears_stale_success_data(db_session: Session) -> None:
+    """If a previous run succeeded and the rerun fails, stale JSON must not persist."""
+    db_session.add(WatchlistItem(ticker="AAPL"))
+    db_session.commit()
+    good = FakeData()
+    svc = RecapService(db_session, data=good, ai=FakeAi())
+    first = svc.generate(date(2026, 5, 8))
+    assert first.generation_status == "success"
+    assert first.watchlist_performance_json is not None
+
+    bad = FakeData()
+    bad.fail_quote_for = set()  # noop; we'll fail at market overview instead
+
+    class BadData(FakeData):
+        def get_market_overview(self):
+            raise RuntimeError("market is down")
+
+    svc2 = RecapService(db_session, data=BadData(), ai=FakeAi())
+    second = svc2.generate(date(2026, 5, 8))
+    assert second.generation_status == "failed"
+    assert second.watchlist_performance_json is None
+    assert second.market_summary_json is None
+    assert second.ai_commentary_text is None
