@@ -1,4 +1,5 @@
 from datetime import UTC, date, datetime
+from typing import Any
 
 from sqlalchemy import (
     BigInteger,
@@ -9,8 +10,10 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    TypeDecorator,
     UniqueConstraint,
 )
+from sqlalchemy.engine import Dialect
 from sqlalchemy.orm import Mapped, mapped_column
 
 from marketpulse.db.base import Base
@@ -20,12 +23,38 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+class TZDateTime(TypeDecorator[datetime]):
+    """DateTime column that always returns a UTC-aware datetime on read.
+
+    SQLite stores datetimes as ISO strings without timezone semantics; SQLAlchemy
+    returns naive datetimes by default. This decorator ensures every read attaches
+    UTC, so downstream comparisons against `datetime.now(UTC)` never raise TypeError.
+    """
+
+    impl = DateTime(timezone=True)
+    cache_ok = True
+
+    def process_bind_param(self, value: datetime | None, dialect: Dialect) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+
+    def process_result_value(self, value: Any, dialect: Dialect) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+
+
 class WatchlistItem(Base):
     __tablename__ = "watchlist_items"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     ticker: Mapped[str] = mapped_column(String(16), unique=True, nullable=False)
-    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    added_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow, nullable=False)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
@@ -39,7 +68,7 @@ class DailyRecap(Base):
     watchlist_performance_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     news_summary_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     ai_commentary_text: Mapped[str | None] = mapped_column(Text, nullable=True)
-    generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    generated_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
     generation_status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -53,8 +82,8 @@ class AiAnalysis(Base):
     prompt_version: Mapped[str] = mapped_column(String(32), nullable=False)
     input_data_json: Mapped[str] = mapped_column(Text, nullable=False)
     response_markdown: Mapped[str] = mapped_column(Text, nullable=False)
-    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
 
     __table_args__ = (Index("ix_ai_analyses_ticker_expires", "ticker", "expires_at"),)
 
@@ -69,7 +98,7 @@ class PriceCacheEntry(Base):
     low: Mapped[float] = mapped_column(Float, nullable=False)
     close: Mapped[float] = mapped_column(Float, nullable=False)
     volume: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow, nullable=False)
 
 
 class NewsCacheEntry(Base):
@@ -79,12 +108,12 @@ class NewsCacheEntry(Base):
     ticker: Mapped[str] = mapped_column(String(16), nullable=False)
     headline: Mapped[str] = mapped_column(Text, nullable=False)
     url: Mapped[str] = mapped_column(Text, nullable=False)
-    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    published_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
     source: Mapped[str] = mapped_column(String(64), nullable=False)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
-        Index("ix_news_cache_ticker_date", "ticker", "published_at"),
+        Index("ix_news_cache_ticker_published_at", "ticker", "published_at"),
         UniqueConstraint("ticker", "url", name="uq_news_ticker_url"),
     )
 

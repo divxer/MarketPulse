@@ -1,5 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
+import pytest
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from marketpulse.db.models import (
@@ -72,3 +74,48 @@ def test_app_setting_kv(db_session: Session) -> None:
     db_session.commit()
     got = db_session.query(AppSetting).filter_by(key="foo").one()
     assert got.value == "bar"
+
+
+def test_watchlist_ticker_unique(db_session: Session) -> None:
+    db_session.add(WatchlistItem(ticker="AAPL"))
+    db_session.commit()
+    db_session.add(WatchlistItem(ticker="AAPL"))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+
+
+def test_daily_recap_unique_date_collision(db_session: Session) -> None:
+    today = datetime(2026, 5, 9).date()
+    db_session.add(DailyRecap(recap_date=today, generation_status="pending"))
+    db_session.commit()
+    db_session.add(DailyRecap(recap_date=today, generation_status="pending"))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+
+
+def test_news_unique_ticker_url(db_session: Session) -> None:
+    now = datetime.now(UTC)
+    db_session.add(NewsCacheEntry(
+        ticker="AAPL", headline="A", url="https://example.com/a",
+        published_at=now, source="s",
+    ))
+    db_session.commit()
+    db_session.add(NewsCacheEntry(
+        ticker="AAPL", headline="B", url="https://example.com/a",
+        published_at=now, source="s",
+    ))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+
+
+def test_datetime_roundtrip_preserves_utc(db_session: Session) -> None:
+    """SQLite needs the TZDateTime decorator to keep tz info on read."""
+    now = datetime.now(UTC)
+    item = WatchlistItem(ticker="MSFT")
+    db_session.add(item)
+    db_session.commit()
+    db_session.expire_all()
+    fetched = db_session.query(WatchlistItem).filter_by(ticker="MSFT").one()
+    assert fetched.added_at.tzinfo is not None
+    # delta should be tiny — same call site
+    assert abs((fetched.added_at - now).total_seconds()) < 5
