@@ -4,10 +4,9 @@ from fastapi.testclient import TestClient
 from marketpulse.auth.password import hash_password
 
 
-@pytest.mark.skip(reason="depends on Task 21 / route")
 def test_unauthenticated_redirected(client: TestClient) -> None:
     res = client.get("/", follow_redirects=False)
-    assert res.status_code in (302, 307)
+    assert res.status_code in (302, 303, 307)
     assert res.headers["location"].endswith("/login")
 
 

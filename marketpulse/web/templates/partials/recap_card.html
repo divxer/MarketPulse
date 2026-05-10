@@ -1,0 +1,19 @@
+<section class="bg-white rounded-md shadow-sm p-4">
+  <header class="flex items-center justify-between">
+    <h2 class="font-semibold">Today's Recap — {{ today }}</h2>
+  </header>
+  {% if not recap %}
+    <p class="mt-2 text-slate-500">No recap yet for today.</p>
+  {% elif recap.generation_status == "pending" %}
+    <p class="mt-2 text-slate-500"
+       hx-get="/" hx-trigger="every 10s" hx-target="body">Generating recap…</p>
+  {% elif recap.generation_status == "failed" %}
+    <p class="mt-2 text-red-600">Recap failed: {{ recap.error_message }}</p>
+    <form method="post" action="/recap/{{ recap.recap_date }}/retry">
+      <button class="mt-2 bg-slate-900 text-white px-3 py-1 rounded">Retry</button>
+    </form>
+  {% else %}
+    <p class="mt-2 whitespace-pre-line">{{ recap.ai_commentary_text }}</p>
+    <a class="text-sm text-blue-600" href="/recap/{{ recap.recap_date }}">Full recap →</a>
+  {% endif %}
+</section>

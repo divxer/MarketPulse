@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "partials/recap_card.html" %}
+
+<section class="mt-6 bg-white rounded-md shadow-sm">
+  <header class="flex items-center justify-between p-4 border-b">
+    <h2 class="font-semibold">Watchlist</h2>
+    <a href="/watchlist" class="text-sm text-blue-600">Manage</a>
+  </header>
+  <table class="w-full text-sm">
+    <thead class="text-left text-slate-500">
+      <tr><th class="px-4 py-2">Ticker</th><th>Price</th><th>Δ%</th><th>Vol</th><th>Signals</th></tr>
+    </thead>
+    <tbody>
+      {% for item in watchlist %}
+      <tr class="border-t hover:bg-slate-50">
+        <td class="px-4 py-2"><a href="/stock/{{ item.ticker }}" class="font-medium">{{ item.ticker }}</a></td>
+        <td>—</td><td>—</td><td>—</td><td>—</td>
+      </tr>
+      {% endfor %}
+      {% if not watchlist %}
+      <tr><td colspan="5" class="px-4 py-8 text-center text-slate-500">
+        No tickers yet. <a href="/watchlist" class="text-blue-600">Add some</a>.
+      </td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}
