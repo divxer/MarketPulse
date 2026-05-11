@@ -3,7 +3,13 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse
+from sqlalchemy import func
 from sqlalchemy.orm import Session
+
+# Sort key: real trade time (executed_at) when present, fallback to record time.
+# Defined once so all trade-listing endpoints stay consistent.
+def _trade_sort_key():
+    return func.coalesce(Trade.executed_at, Trade.created_at).desc()
 
 from marketpulse.db.models import Trade
 from marketpulse.holdings.robinhood_import import (
@@ -34,7 +40,7 @@ def trades_page(
     db: Session = Depends(get_db),
     _: None = Depends(require_auth),
 ):
-    q = db.query(Trade).order_by(Trade.created_at.desc())
+    q = db.query(Trade).order_by(_trade_sort_key())
     if ticker:
         q = q.filter(Trade.ticker == ticker.upper())
     trades = q.limit(200).all()
@@ -98,7 +104,7 @@ def trades_add(
     trades = (
         db.query(Trade)
         .filter(Trade.ticker == normalized)
-        .order_by(Trade.created_at.desc())
+        .order_by(_trade_sort_key())
         .limit(200)
         .all()
     )
@@ -106,7 +112,7 @@ def trades_add(
         request,
         "partials/trades_table.html",
         {
-            "trades": db.query(Trade).order_by(Trade.created_at.desc()).limit(200).all(),
+            "trades": db.query(Trade).order_by(_trade_sort_key()).limit(200).all(),
             "realized_pl_total": total_realized_pl(db),
             "filter_ticker": None,
             "_just_added": trades[0] if trades else None,
