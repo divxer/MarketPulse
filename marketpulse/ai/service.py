@@ -43,11 +43,15 @@ class AiService:
         data: _DataLike,
         model: str,
         ttl_hours: int,
+        model_analyze: str | None = None,
     ) -> None:
         self.session = session
         self.ai = ai_client
         self.data = data
         self.model = model
+        # /stock deep-analysis can use a premium model (e.g. Opus). Falls back
+        # to `model` when not set. Cheap features (recap, risk) always use `model`.
+        self.model_analyze = model_analyze or model
         self.ttl_hours = ttl_hours
 
     def analyze(self, ticker: str) -> AnalysisResult:
@@ -71,7 +75,7 @@ class AiService:
             quote=quote, fundamentals=fundamentals, news=news, bars=bars,
         )
         system, data = _split_prompt(prompt_text)
-        response = self.ai.complete(system=system, user=data)
+        response = self.ai.complete(system=system, user=data, model=self.model_analyze)
         now = datetime.now(UTC)
         input_snapshot = {
             "ticker": quote.ticker,
@@ -106,7 +110,7 @@ class AiService:
         }
         record = AiAnalysis(
             ticker=ticker,
-            model=self.model,
+            model=self.model_analyze,
             prompt_version=version,
             input_data_json=json.dumps(input_snapshot, default=str),
             response_markdown=response,
@@ -117,7 +121,7 @@ class AiService:
         self.session.commit()
         return AnalysisResult(
             ticker=ticker,
-            model=self.model,
+            model=self.model_analyze,
             prompt_version=version,
             response_markdown=response,
             requested_at=now,
@@ -169,7 +173,7 @@ class AiService:
         stmt = (
             select(AiAnalysis)
             .where(AiAnalysis.ticker == ticker)
-            .where(AiAnalysis.model == self.model)
+            .where(AiAnalysis.model == self.model_analyze)
             .where(AiAnalysis.prompt_version == version)
             .where(AiAnalysis.expires_at > datetime.now(UTC))
             .order_by(AiAnalysis.requested_at.desc())

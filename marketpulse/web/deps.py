@@ -57,6 +57,7 @@ def get_ai_service(
     return AiService(
         db, ai_client=AnthropicClient(), data=data,
         model=s.ai_model, ttl_hours=s.ai_cache_ttl_hours,
+        model_analyze=s.ai_model_analyze or None,
     )
 
 

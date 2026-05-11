@@ -7,7 +7,7 @@ from marketpulse.config import get_settings
 
 
 class AiClient(Protocol):
-    def complete(self, *, system: str, user: str) -> str: ...
+    def complete(self, *, system: str, user: str, model: str | None = None) -> str: ...
 
 
 # Retry only on transient API/network errors. Validation errors (bad input) shouldn't retry.
@@ -31,9 +31,9 @@ class AnthropicClient:
         wait=wait_exponential(multiplier=1, max=8),
         retry=retry_if_exception_type(_AI_RETRY_EXCEPTIONS),
     )
-    def complete(self, *, system: str, user: str) -> str:
+    def complete(self, *, system: str, user: str, model: str | None = None) -> str:
         msg = self._client.messages.create(
-            model=self._model,
+            model=model or self._model,
             max_tokens=2000,
             system=[
                 {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}},

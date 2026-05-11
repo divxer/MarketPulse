@@ -11,8 +11,9 @@ class FakeAi:
         self.response = response
         self.calls = 0
 
-    def complete(self, *, system: str, user: str) -> str:
+    def complete(self, *, system: str, user: str, model: str | None = None) -> str:
         self.calls += 1
+        self.last_model = model
         return self.response
 
 
@@ -84,6 +85,42 @@ def test_analyze_invalidates_on_model_change(db_session: Session) -> None:
     res = svc2.analyze("NVDA")
     assert ai.calls == 2
     assert res.cached is False
+
+
+def test_analyze_uses_model_analyze_when_set(db_session: Session) -> None:
+    """When model_analyze is provided, /stock deep analyze uses it instead of model."""
+    ai = FakeAi()
+    svc = AiService(
+        db_session, ai_client=ai, data=FakeData(),
+        model="cheap-model", ttl_hours=24, model_analyze="premium-model",
+    )
+    res = svc.analyze("NVDA")
+    assert ai.last_model == "premium-model"
+    assert res.model == "premium-model"
+
+
+def test_analyze_falls_back_to_model_when_analyze_unset(db_session: Session) -> None:
+    """When model_analyze is None or empty, analyze() uses model."""
+    ai = FakeAi()
+    svc = AiService(
+        db_session, ai_client=ai, data=FakeData(),
+        model="default-model", ttl_hours=24, model_analyze=None,
+    )
+    res = svc.analyze("NVDA")
+    assert ai.last_model == "default-model"
+    assert res.model == "default-model"
+
+
+def test_daily_commentary_uses_base_model_not_analyze(db_session: Session) -> None:
+    """Recap/commentary should NOT use the premium model — that's analyze-only."""
+    ai = FakeAi(response="点评")
+    svc = AiService(
+        db_session, ai_client=ai, data=FakeData(),
+        model="cheap-model", ttl_hours=24, model_analyze="premium-model",
+    )
+    svc.daily_commentary(market_summary={}, watchlist_perf=[])
+    # daily_commentary doesn't pass model explicitly → falls back to client's default
+    assert ai.last_model is None
 
 
 def test_analyze_persists_full_input_snapshot(db_session: Session) -> None:

@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     watchlist_recap_time: str = Field("16:30", alias="WATCHLIST_RECAP_TIME")
     log_level: str = Field("INFO", alias="LOG_LEVEL")
     ai_model: str = Field("claude-sonnet-4-6", alias="AI_MODEL")
+    # Optional premium model for /stock AI deep analysis only — daily recap and
+    # portfolio risk stay on the cheap default. Empty string = use AI_MODEL.
+    ai_model_analyze: str = Field("", alias="AI_MODEL_ANALYZE")
     ai_cache_ttl_hours: int = Field(24, alias="AI_CACHE_TTL_HOURS", ge=0)
     news_cache_ttl_days: int = Field(7, alias="NEWS_CACHE_TTL_DAYS", ge=0)
     quote_cache_ttl_seconds: int = Field(300, alias="QUOTE_CACHE_TTL_SECONDS", ge=0)
