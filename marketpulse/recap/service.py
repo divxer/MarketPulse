@@ -5,7 +5,8 @@ from typing import Any, Protocol
 from sqlalchemy.orm import Session
 
 from marketpulse.data.types import Bar, MarketOverview, NewsItem, Quote
-from marketpulse.db.models import DailyRecap, WatchlistItem
+from marketpulse.db.models import DailyRecap, Holding, WatchlistItem
+from marketpulse.holdings.service import compute_totals, enrich_holdings
 from marketpulse.logging import get_logger
 from marketpulse.recap.signals import detect_signals
 
@@ -20,8 +21,13 @@ class _DataLike(Protocol):
 
 
 class _AiLike(Protocol):
-    def daily_commentary(self, *, market_summary: dict[str, Any],
-                         watchlist_perf: list[dict[str, Any]]) -> str: ...
+    def daily_commentary(
+        self, *,
+        market_summary: dict[str, Any],
+        watchlist_perf: list[dict[str, Any]],
+        holdings_overview: list[dict[str, Any]] | None = None,
+        holdings_totals: dict[str, float] | None = None,
+    ) -> str: ...
 
 
 class RecapService:
@@ -48,13 +54,21 @@ class RecapService:
                 if not row.get("error"):
                     news_summary.append({"ticker": item.ticker, "items": row.pop("news_items", [])})
                 perf.append(row)
-            if not perf:
-                log.info("recap_empty_watchlist", date=str(target))
-                commentary = "自选股清单为空,无需生成 AI 点评。"
+            # Fetch holdings + compute live P&L so commentary can mention them
+            holdings = self.session.query(Holding).order_by(Holding.sort_order).all()
+            holdings_overview = enrich_holdings(holdings, self.data) if holdings else []
+            holdings_totals = compute_totals(holdings_overview) if holdings_overview else None
+
+            if not perf and not holdings_overview:
+                log.info("recap_empty_watchlist_and_holdings", date=str(target))
+                commentary = "自选股清单和持仓均为空,无需生成 AI 点评。"
             else:
                 try:
                     commentary = self.ai.daily_commentary(
-                        market_summary=market_summary, watchlist_perf=perf,
+                        market_summary=market_summary,
+                        watchlist_perf=perf,
+                        holdings_overview=holdings_overview or None,
+                        holdings_totals=holdings_totals,
                     )
                 except Exception as exc:
                     log.warning("commentary_failed", error=str(exc))
@@ -62,6 +76,12 @@ class RecapService:
 
             recap.market_summary_json = json.dumps(market_summary)
             recap.watchlist_performance_json = json.dumps(perf)
+            recap.holdings_overview_json = (
+                json.dumps(holdings_overview) if holdings_overview else None
+            )
+            recap.holdings_totals_json = (
+                json.dumps(holdings_totals) if holdings_totals else None
+            )
             recap.news_summary_json = json.dumps(news_summary)
             recap.ai_commentary_text = commentary
             recap.generation_status = "success"
@@ -84,6 +104,8 @@ class RecapService:
             existing.error_message = None
             existing.market_summary_json = None
             existing.watchlist_performance_json = None
+            existing.holdings_overview_json = None
+            existing.holdings_totals_json = None
             existing.news_summary_json = None
             existing.ai_commentary_text = None
             existing.generated_at = None

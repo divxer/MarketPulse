@@ -79,6 +79,8 @@ class DailyRecap(Base):
     recap_date: Mapped[date] = mapped_column(Date, unique=True, nullable=False)
     market_summary_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     watchlist_performance_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    holdings_overview_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    holdings_totals_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     news_summary_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     ai_commentary_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     generated_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)

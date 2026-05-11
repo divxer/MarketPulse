@@ -35,9 +35,16 @@ class FakeData:
 class FakeAi:
     def __init__(self) -> None:
         self.calls = 0
+        self.last_holdings: list[dict] | None = None
+        self.last_holdings_totals: dict | None = None
 
-    def daily_commentary(self, *, market_summary, watchlist_perf) -> str:
+    def daily_commentary(
+        self, *, market_summary, watchlist_perf,
+        holdings_overview=None, holdings_totals=None,
+    ) -> str:
         self.calls += 1
+        self.last_holdings = holdings_overview
+        self.last_holdings_totals = holdings_totals
         return "All good."
 
 
@@ -113,11 +120,61 @@ def test_failed_rerun_clears_stale_success_data(db_session: Session) -> None:
 
 
 def test_empty_watchlist_skips_ai_commentary(db_session: Session) -> None:
-    """No tickers → no AI call (saves tokens). Commentary set to placeholder."""
+    """No tickers and no holdings → no AI call (saves tokens). Placeholder text."""
     ai = FakeAi()
     svc = RecapService(db_session, data=FakeData(), ai=ai)
     result = svc.generate(date(2026, 5, 8))
     assert result.generation_status == "success"
     assert ai.calls == 0
     assert result.ai_commentary_text is not None
-    assert "自选股清单为空" in result.ai_commentary_text
+
+
+def test_recap_includes_holdings_overview(db_session: Session) -> None:
+    """Recap with holdings persists overview + totals and passes them to AI."""
+    from marketpulse.db.models import Holding
+
+    db_session.add(WatchlistItem(ticker="AAPL"))
+    # NVDA: 10 shares @ $80, current $100 → +$200 (+25%)
+    db_session.add(Holding(ticker="NVDA", quantity=10, avg_cost=80))
+    db_session.commit()
+
+    ai = FakeAi()
+    svc = RecapService(db_session, data=FakeData(), ai=ai)
+    result = svc.generate(date(2026, 5, 8))
+
+    assert result.generation_status == "success"
+    assert ai.last_holdings is not None
+    assert ai.last_holdings[0]["ticker"] == "NVDA"
+    assert ai.last_holdings[0]["pl_dollars"] == 200
+    assert ai.last_holdings[0]["pl_pct"] == 25
+    assert ai.last_holdings_totals["pl_dollars"] == 200
+
+    overview = json.loads(result.holdings_overview_json)
+    assert overview[0]["ticker"] == "NVDA"
+    totals = json.loads(result.holdings_totals_json)
+    assert totals["pl_dollars"] == 200
+
+
+def test_recap_with_only_holdings_no_watchlist(db_session: Session) -> None:
+    """Holdings alone should still trigger AI commentary."""
+    from marketpulse.db.models import Holding
+    db_session.add(Holding(ticker="MSFT", quantity=5, avg_cost=200))
+    db_session.commit()
+    ai = FakeAi()
+    svc = RecapService(db_session, data=FakeData(), ai=ai)
+    result = svc.generate(date(2026, 5, 8))
+    assert result.generation_status == "success"
+    assert ai.calls == 1  # AI called because holdings exist
+    assert ai.last_holdings is not None
+    assert ai.last_holdings[0]["ticker"] == "MSFT"
+
+
+def test_recap_no_holdings_no_watchlist_skips_ai(db_session: Session) -> None:
+    """Neither watchlist nor holdings → no AI call."""
+    ai = FakeAi()
+    svc = RecapService(db_session, data=FakeData(), ai=ai)
+    result = svc.generate(date(2026, 5, 8))
+    assert ai.calls == 0
+    assert result.holdings_overview_json is None
+    assert result.holdings_totals_json is None
+    assert "自选股清单和持仓均为空" in result.ai_commentary_text

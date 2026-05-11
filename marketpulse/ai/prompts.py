@@ -4,7 +4,7 @@ from typing import Any
 from marketpulse.data.types import Bar, Fundamentals, NewsItem, Quote
 
 ANALYSIS_PROMPT_VERSION = "analysis-v2-zh"
-COMMENTARY_PROMPT_VERSION = "commentary-v2-zh"
+COMMENTARY_PROMPT_VERSION = "commentary-v3-zh-holdings"
 
 _ANALYSIS_SYSTEM = (
     "你是一名股票研究分析师。请用中文输出一份简明的 markdown 报告,包含三个部分:"
@@ -13,9 +13,12 @@ _ANALYSIS_SYSTEM = (
 )
 
 _COMMENTARY_SYSTEM = (
-    "你是一名盘后市场点评作者。请用中文写一段(3-5 句)简短点评,"
-    "面向正在关注这个自选股清单的投资者。要客观、冷静、具体,"
-    "提及具体的 ticker 和数字。股票代码保留英文原文。"
+    "你是一名盘后市场点评作者。请用中文写一段简短点评(可分两段,"
+    "总共 4-7 句),面向同时关注自选股、可能持有部分仓位的投资者。"
+    "如果数据中包含 holdings,请单独提及当日持仓盈亏情况(总盈亏金额、"
+    "盈亏百分比、表现最好和最差的持仓);如果 holdings 为空或缺失,"
+    "只点评自选股动向即可。要客观、冷静、具体,提及具体的 ticker 和数字。"
+    "股票代码保留英文原文。"
 )
 
 
@@ -51,7 +54,15 @@ def render_analysis_prompt(
 
 
 def render_commentary_prompt(
-    *, market_summary: dict[str, Any], watchlist_perf: list[dict[str, Any]]
+    *,
+    market_summary: dict[str, Any],
+    watchlist_perf: list[dict[str, Any]],
+    holdings_overview: list[dict[str, Any]] | None = None,
+    holdings_totals: dict[str, float] | None = None,
 ) -> str:
-    payload = {"market": market_summary, "watchlist": watchlist_perf}
-    return f"{_COMMENTARY_SYSTEM}\n\nDATA:\n{json.dumps(payload, indent=2)}"
+    payload: dict[str, Any] = {"market": market_summary, "watchlist": watchlist_perf}
+    if holdings_overview:
+        payload["holdings"] = holdings_overview
+    if holdings_totals:
+        payload["holdings_totals"] = holdings_totals
+    return f"{_COMMENTARY_SYSTEM}\n\nDATA:\n{json.dumps(payload, indent=2, default=str)}"

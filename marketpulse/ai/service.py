@@ -125,10 +125,17 @@ class AiService:
         )
 
     def daily_commentary(
-        self, *, market_summary: dict[str, Any], watchlist_perf: list[dict[str, Any]]
+        self, *,
+        market_summary: dict[str, Any],
+        watchlist_perf: list[dict[str, Any]],
+        holdings_overview: list[dict[str, Any]] | None = None,
+        holdings_totals: dict[str, float] | None = None,
     ) -> str:
         prompt_text = prompts.render_commentary_prompt(
-            market_summary=market_summary, watchlist_perf=watchlist_perf,
+            market_summary=market_summary,
+            watchlist_perf=watchlist_perf,
+            holdings_overview=holdings_overview,
+            holdings_totals=holdings_totals,
         )
         system, data = _split_prompt(prompt_text)
         return self.ai.complete(system=system, user=data)

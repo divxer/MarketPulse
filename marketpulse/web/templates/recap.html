@@ -18,5 +18,13 @@
     <h2 class="mt-4 font-semibold">自选股表现</h2>
     <pre class="text-xs bg-slate-50 p-2 rounded">{{ row.watchlist_performance_json }}</pre>
   {% endif %}
+  {% if row.holdings_totals_json %}
+    <h2 class="mt-4 font-semibold">持仓汇总</h2>
+    <pre class="text-xs bg-slate-50 p-2 rounded">{{ row.holdings_totals_json }}</pre>
+  {% endif %}
+  {% if row.holdings_overview_json %}
+    <h2 class="mt-4 font-semibold">持仓明细</h2>
+    <pre class="text-xs bg-slate-50 p-2 rounded">{{ row.holdings_overview_json }}</pre>
+  {% endif %}
 </section>
 {% endblock %}
