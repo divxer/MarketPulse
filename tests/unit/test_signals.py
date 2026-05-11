@@ -1,7 +1,7 @@
-from datetime import date
+from datetime import date, timedelta
 
 from marketpulse.data.types import Bar, Quote
-from marketpulse.recap.signals import detect_signals, ema, macd, sma
+from marketpulse.recap.signals import detect_signals, ema, macd, scan_signal_markers, sma
 
 
 def _bar(d: int, close: float, volume: int = 1_000_000) -> Bar:
@@ -166,3 +166,50 @@ def test_macd_too_short_all_nones() -> None:
     assert all(v is None for v in line)
     assert all(v is None for v in signal)
     assert all(v is None for v in hist)
+
+
+def _bar_dated(d: date, close: float, vol: int = 1_000_000) -> Bar:
+    return Bar(date=d, open=close, high=close, low=close, close=close, volume=vol)
+
+
+def test_scan_signal_markers_detects_ema_golden_cross() -> None:
+    # Construct a series where EMA12 crosses above EMA26 once.
+    # Long downtrend then sharp recovery → guaranteed cross.
+    today = date.today()
+    closes = list(range(100, 50, -1)) + list(range(50, 100))  # 100 bars
+    bars = [_bar_dated(today - timedelta(days=len(closes) - i), float(c))
+            for i, c in enumerate(closes)]
+    markers = scan_signal_markers(bars)
+    types = [m["type"] for m in markers]
+    assert "ema_golden_cross" in types
+
+
+def test_scan_signal_markers_emits_once_not_per_bar() -> None:
+    # If RSI stays >= 70 for many bars, we want one marker at the first cross,
+    # not one marker per bar.
+    today = date.today()
+    closes = [10.0] * 30 + list(range(10, 60))
+    bars = [_bar_dated(today - timedelta(days=len(closes) - i), float(c))
+            for i, c in enumerate(closes)]
+    markers = scan_signal_markers(bars)
+    overbought = [m for m in markers if m["type"] == "rsi_overbought"]
+    # The rising series saturates RSI well above 70 → must fire EXACTLY once
+    # (sustained overbought is deduplicated by the marker scanner).
+    assert len(overbought) == 1
+
+
+def test_scan_signal_markers_empty_series() -> None:
+    assert scan_signal_markers([]) == []
+
+
+def test_scan_signal_markers_each_marker_has_required_fields() -> None:
+    today = date.today()
+    closes = list(range(100, 50, -1)) + list(range(50, 100))
+    bars = [_bar_dated(today - timedelta(days=len(closes) - i), float(c))
+            for i, c in enumerate(closes)]
+    markers = scan_signal_markers(bars)
+    for m in markers:
+        assert set(m.keys()) >= {"time", "type", "note"}
+        assert isinstance(m["time"], str)  # ISO date for JSON
+        assert isinstance(m["type"], str)
+        assert isinstance(m["note"], str)

@@ -207,3 +207,88 @@ def detect_signals(quote: Quote, bars: list[Bar]) -> list[str]:
                 signals.append("BOLLINGER_LOWER")
 
     return signals
+
+
+def scan_signal_markers(bars: list[Bar]) -> list[dict[str, str]]:
+    """Walk the series and emit one marker per (signal_type, first-fire) pair.
+
+    A signal is considered "firing" at bar i if it would have been emitted by
+    detect_signals() on the prefix bars[:i+1]. Once a signal type fires, it is
+    deduplicated until it stops firing for at least one bar (so a sustained
+    overbought RSI gets one marker on entry, not one per bar).
+    """
+    if not bars:
+        return []
+
+    markers: list[dict[str, str]] = []
+    # For each signal type, was it firing on the previous bar?
+    previously_firing: dict[str, bool] = {}
+
+    closes = [b.close for b in bars]
+
+    def _add(i: int, signal_type: str, note: str) -> None:
+        was_firing = previously_firing.get(signal_type, False)
+        if not was_firing:
+            markers.append({
+                "time": bars[i].date.isoformat(),
+                "type": signal_type,
+                "note": note,
+            })
+        previously_firing[signal_type] = True
+
+    def _clear(signal_type: str) -> None:
+        previously_firing[signal_type] = False
+
+    # Indicators precomputed over the full series for efficient lookup.
+    ema12 = ema(closes, EMA_SHORT)
+    ema26 = ema(closes, EMA_LONG)
+
+    for i in range(len(bars)):
+        prefix_closes = closes[: i + 1]
+
+        # EMA cross — use precomputed series and look at index i vs i-1
+        if i >= 1 and ema12[i] is not None and ema26[i] is not None \
+                and ema12[i - 1] is not None and ema26[i - 1] is not None:
+            prev_diff = ema12[i - 1] - ema26[i - 1]
+            curr_diff = ema12[i] - ema26[i]
+            if prev_diff <= 0 < curr_diff:
+                _add(i, "ema_golden_cross",
+                     f"EMA12 (${ema12[i]:.2f}) crossed above EMA26 (${ema26[i]:.2f})")
+                _clear("ema_death_cross")
+            elif prev_diff >= 0 > curr_diff:
+                _add(i, "ema_death_cross",
+                     f"EMA12 (${ema12[i]:.2f}) crossed below EMA26 (${ema26[i]:.2f})")
+                _clear("ema_golden_cross")
+
+        # RSI overbought / oversold (need full _rsi to handle Wilder's smoothing)
+        rsi_val = _rsi(prefix_closes)
+        if rsi_val is not None:
+            if rsi_val >= RSI_OVERBOUGHT:
+                _add(i, "rsi_overbought", f"RSI(14) = {rsi_val:.1f} (≥ {RSI_OVERBOUGHT:.0f})")
+                _clear("rsi_oversold")
+            elif rsi_val <= RSI_OVERSOLD:
+                _add(i, "rsi_oversold", f"RSI(14) = {rsi_val:.1f} (≤ {RSI_OVERSOLD:.0f})")
+                _clear("rsi_overbought")
+            else:
+                _clear("rsi_overbought")
+                _clear("rsi_oversold")
+
+        # Bollinger band touch
+        band = _bollinger(prefix_closes)
+        if band:
+            upper, _, lower = band
+            last_close = prefix_closes[-1]
+            if upper > lower + 1e-9:
+                if last_close > upper:
+                    _add(i, "bollinger_upper",
+                         f"Close ${last_close:.2f} above upper band ${upper:.2f}")
+                    _clear("bollinger_lower")
+                elif last_close < lower:
+                    _add(i, "bollinger_lower",
+                         f"Close ${last_close:.2f} below lower band ${lower:.2f}")
+                    _clear("bollinger_upper")
+                else:
+                    _clear("bollinger_upper")
+                    _clear("bollinger_lower")
+
+    return markers
