@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 from fastapi.testclient import TestClient
 
 from marketpulse.auth.password import hash_password
-from marketpulse.data.types import Bar, Fundamentals, NewsItem, Quote
+from marketpulse.data.types import Fundamentals, Quote
 
 
 def _login(client, monkeypatch):
@@ -105,8 +105,9 @@ def test_update_holding(client: TestClient, monkeypatch):
     client.app.dependency_overrides[get_data_service] = lambda: fake
     try:
         client.post("/holdings", data={"ticker": "META", "quantity": 5, "avg_cost": 300})
-        from marketpulse.db.base import get_engine
         from sqlalchemy import text
+
+        from marketpulse.db.base import get_engine
         with get_engine().connect() as conn:
             row_id = conn.execute(text("SELECT id FROM holdings WHERE ticker='META'")).scalar_one()
         # update quantity and avg_cost
@@ -128,8 +129,9 @@ def test_delete_holding(client: TestClient, monkeypatch):
     client.app.dependency_overrides[get_data_service] = lambda: fake
     try:
         client.post("/holdings", data={"ticker": "GOOG", "quantity": 4, "avg_cost": 150})
-        from marketpulse.db.base import get_engine
         from sqlalchemy import text
+
+        from marketpulse.db.base import get_engine
         with get_engine().connect() as conn:
             row_id = conn.execute(text("SELECT id FROM holdings WHERE ticker='GOOG'")).scalar_one()
         res = client.delete(f"/holdings/{row_id}")
