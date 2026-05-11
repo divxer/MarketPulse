@@ -42,93 +42,38 @@ def test_holdings_page_empty(client: TestClient, monkeypatch):
     assert "暂无持仓" in res.text
 
 
-def test_add_holding_and_pl(client: TestClient, monkeypatch):
+def test_holdings_built_from_trades(client: TestClient, monkeypatch):
+    """Buying via /trades populates the Holdings page."""
     _login(client, monkeypatch)
     fake = _FakeData(price=300.0)
     from marketpulse.web.deps import get_data_service
     client.app.dependency_overrides[get_data_service] = lambda: fake
     try:
-        # add NVDA: 10 shares @ $200, current $300 → +$1000 (+50%)
-        res = client.post("/holdings", data={
-            "ticker": "NVDA", "quantity": 10, "avg_cost": 200, "notes": "core position",
+        # buy NVDA: 10 shares @ $200, current $300 → +$1000 (+50%)
+        client.post("/trades", data={
+            "ticker": "NVDA", "action": "buy", "quantity": 10, "price": 200,
         })
-        assert res.status_code == 200
-        assert "NVDA" in res.text
-        assert "300.00" in res.text       # current price
-        assert "3000.00" in res.text      # market value
-        assert "+1000.00" in res.text     # pl dollars
-        assert "+50.00" in res.text       # pl pct
-
         page = client.get("/holdings")
+        assert page.status_code == 200
         assert "NVDA" in page.text
-        assert "core position" in page.text
+        assert "300.00" in page.text       # current price
+        assert "3000.00" in page.text      # market value
+        assert "+1000.00" in page.text     # pl dollars
+        assert "+50.00" in page.text       # pl pct
     finally:
         client.app.dependency_overrides.clear()
 
 
-def test_add_holding_duplicate_rejected(client: TestClient, monkeypatch):
+def test_delete_holding_for_cleanup(client: TestClient, monkeypatch):
+    """Delete row remains for cleaning up stale data."""
     _login(client, monkeypatch)
     fake = _FakeData()
     from marketpulse.web.deps import get_data_service
     client.app.dependency_overrides[get_data_service] = lambda: fake
     try:
-        client.post("/holdings", data={"ticker": "AAPL", "quantity": 5, "avg_cost": 180})
-        res = client.post("/holdings", data={"ticker": "AAPL", "quantity": 3, "avg_cost": 200})
-        assert res.status_code == 409
-    finally:
-        client.app.dependency_overrides.clear()
-
-
-def test_add_holding_invalid_inputs(client: TestClient, monkeypatch):
-    _login(client, monkeypatch)
-    fake = _FakeData()
-    from marketpulse.web.deps import get_data_service
-    client.app.dependency_overrides[get_data_service] = lambda: fake
-    try:
-        # bad ticker
-        res = client.post("/holdings", data={"ticker": "  ", "quantity": 1, "avg_cost": 100})
-        assert res.status_code == 422
-        # negative quantity
-        res = client.post("/holdings", data={"ticker": "TSLA", "quantity": -1, "avg_cost": 100})
-        assert res.status_code == 422
-        # zero cost
-        res = client.post("/holdings", data={"ticker": "TSLA", "quantity": 1, "avg_cost": 0})
-        assert res.status_code == 422
-    finally:
-        client.app.dependency_overrides.clear()
-
-
-def test_update_holding(client: TestClient, monkeypatch):
-    _login(client, monkeypatch)
-    fake = _FakeData(price=400.0)
-    from marketpulse.web.deps import get_data_service
-    client.app.dependency_overrides[get_data_service] = lambda: fake
-    try:
-        client.post("/holdings", data={"ticker": "META", "quantity": 5, "avg_cost": 300})
-        from sqlalchemy import text
-
-        from marketpulse.db.base import get_engine
-        with get_engine().connect() as conn:
-            row_id = conn.execute(text("SELECT id FROM holdings WHERE ticker='META'")).scalar_one()
-        # update quantity and avg_cost
-        res = client.post(f"/holdings/{row_id}/update", data={
-            "quantity": 10, "avg_cost": 350, "notes": "added more",
+        client.post("/trades", data={
+            "ticker": "GOOG", "action": "buy", "quantity": 4, "price": 150,
         })
-        assert res.status_code == 200
-        assert "10" in res.text
-        assert "350.00" in res.text
-        assert "added more" in res.text
-    finally:
-        client.app.dependency_overrides.clear()
-
-
-def test_delete_holding(client: TestClient, monkeypatch):
-    _login(client, monkeypatch)
-    fake = _FakeData()
-    from marketpulse.web.deps import get_data_service
-    client.app.dependency_overrides[get_data_service] = lambda: fake
-    try:
-        client.post("/holdings", data={"ticker": "GOOG", "quantity": 4, "avg_cost": 150})
         from sqlalchemy import text
 
         from marketpulse.db.base import get_engine
@@ -139,6 +84,23 @@ def test_delete_holding(client: TestClient, monkeypatch):
         assert "GOOG" not in client.get("/holdings").text
     finally:
         client.app.dependency_overrides.clear()
+
+
+def test_holdings_add_endpoint_removed(client: TestClient, monkeypatch):
+    """Direct holdings creation is no longer supported — must go through trades."""
+    _login(client, monkeypatch)
+    res = client.post("/holdings", data={
+        "ticker": "NVDA", "quantity": 10, "avg_cost": 200,
+    })
+    # 405 Method Not Allowed (route removed)
+    assert res.status_code == 405
+
+
+def test_holdings_update_endpoint_removed(client: TestClient, monkeypatch):
+    """Direct edit also removed."""
+    _login(client, monkeypatch)
+    res = client.post("/holdings/1/update", data={"quantity": 1, "avg_cost": 1})
+    assert res.status_code == 404
 
 
 def test_holdings_resilient_to_quote_failure(client: TestClient, monkeypatch):
@@ -152,10 +114,13 @@ def test_holdings_resilient_to_quote_failure(client: TestClient, monkeypatch):
     from marketpulse.web.deps import get_data_service
     client.app.dependency_overrides[get_data_service] = lambda: _BoomData()
     try:
-        res = client.post("/holdings", data={"ticker": "AMZN", "quantity": 5, "avg_cost": 150})
-        assert res.status_code == 200
-        assert "AMZN" in res.text
+        client.post("/trades", data={
+            "ticker": "AMZN", "action": "buy", "quantity": 5, "price": 150,
+        })
+        page = client.get("/holdings")
+        assert page.status_code == 200
+        assert "AMZN" in page.text
         # Cost basis still shown
-        assert "150.00" in res.text
+        assert "150.00" in page.text
     finally:
         client.app.dependency_overrides.clear()

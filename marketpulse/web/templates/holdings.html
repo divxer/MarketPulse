@@ -25,19 +25,9 @@
     {% endif %}
   </header>
 
-  <form hx-post="/holdings" hx-target="#holdings-rows" hx-swap="beforeend"
-        hx-on::after-request="if(event.detail.successful) this.reset()"
-        class="flex flex-wrap gap-2 mb-4 items-center text-sm">
-    <input name="ticker" placeholder="代码" required
-           class="border rounded px-3 py-1 uppercase w-24" />
-    <input name="quantity" type="number" step="any" min="0" placeholder="数量" required
-           class="border rounded px-3 py-1 w-24" />
-    <input name="avg_cost" type="number" step="any" min="0" placeholder="均价 $" required
-           class="border rounded px-3 py-1 w-28" />
-    <input name="notes" placeholder="备注(可选)"
-           class="border rounded px-3 py-1 flex-1 min-w-0" />
-    <button class="bg-slate-900 text-white px-3 py-1 rounded">添加</button>
-  </form>
+  <p class="text-xs text-slate-500 mb-4">
+    持仓自动从<a href="/trades" class="text-slate-700 hover:underline">交易记录</a>计算 — 买入/卖出请在交易页面录入。下方"删除"仅用于清理错误数据。
+  </p>
 
   <table class="w-full text-sm">
     <thead class="text-left text-slate-500">
@@ -56,7 +46,7 @@
       {% for row in rows %}{% include "partials/holding_row.html" %}{% endfor %}
       {% if not rows %}
       <tr><td colspan="8" class="px-4 py-8 text-center text-slate-500">
-        暂无持仓。在上方表单中添加你的第一笔。
+        暂无持仓。去<a href="/trades" class="text-slate-700 underline">交易</a>页面录入第一笔买入。
       </td></tr>
       {% endif %}
     </tbody>
