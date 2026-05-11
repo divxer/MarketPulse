@@ -1,0 +1,38 @@
+{% set _metric_label = {"price": "价格", "change_pct": "涨跌幅", "volume_ratio": "量比"}.get(rule.metric, rule.metric) %}
+<tr id="alert-row-{{ rule.id }}" class="border-t">
+  <td class="px-2 py-1">
+    <form hx-post="/alerts/{{ rule.id }}/toggle"
+          hx-target="#alert-row-{{ rule.id }}" hx-swap="outerHTML"
+          style="display:inline">
+      {% if rule.enabled %}
+        <button class="text-xs px-2 py-0.5 rounded bg-green-100 text-green-800" title="点击禁用">启用</button>
+      {% else %}
+        <button class="text-xs px-2 py-0.5 rounded bg-slate-200 text-slate-600" title="点击启用">禁用</button>
+      {% endif %}
+    </form>
+  </td>
+  <td><a href="/stock/{{ rule.ticker }}" class="font-medium">{{ rule.ticker }}</a></td>
+  <td>
+    {{ _metric_label }} {{ rule.op }}
+    {% if rule.metric == "price" %}${{ "%.2f"|format(rule.threshold) }}
+    {% elif rule.metric == "change_pct" %}{{ "%+.2f"|format(rule.threshold) }}%
+    {% else %}{{ "%.2f"|format(rule.threshold) }}x{% endif %}
+  </td>
+  <td class="text-right text-xs text-slate-500">
+    {% if rule.last_value is not none %}
+      {% if rule.metric == "price" %}${{ "%.2f"|format(rule.last_value) }}
+      {% elif rule.metric == "change_pct" %}{{ "%+.2f"|format(rule.last_value) }}%
+      {% else %}{{ "%.2f"|format(rule.last_value) }}x{% endif %}
+    {% endif %}
+  </td>
+  <td class="text-xs text-slate-500">
+    {% if rule.last_triggered_at %}{{ rule.last_triggered_at.strftime("%Y-%m-%d %H:%M") }}{% endif %}
+  </td>
+  <td class="text-xs text-slate-500 max-w-xs truncate">{{ rule.notes or "" }}</td>
+  <td class="text-right">
+    <button hx-delete="/alerts/{{ rule.id }}"
+            hx-target="#alert-row-{{ rule.id }}" hx-swap="outerHTML"
+            hx-confirm="删除这条告警规则?"
+            class="text-red-600 text-xs">删除</button>
+  </td>
+</tr>

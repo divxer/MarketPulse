@@ -3,6 +3,7 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     Date,
     DateTime,
     Float,
@@ -87,6 +88,24 @@ class Trade(Base):
     created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow, nullable=False)
 
     __table_args__ = (Index("ix_trades_ticker_created", "ticker", "created_at"),)
+
+
+class AlertRule(Base):
+    __tablename__ = "alert_rules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ticker: Mapped[str] = mapped_column(String(16), nullable=False)
+    # metric ∈ {'price', 'change_pct', 'volume_ratio'}; op ∈ {'>=', '<='}
+    metric: Mapped[str] = mapped_column(String(16), nullable=False)
+    op: Mapped[str] = mapped_column(String(2), nullable=False)
+    threshold: Mapped[float] = mapped_column(Float, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_triggered_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    last_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow, nullable=False)
+
+    __table_args__ = (Index("ix_alert_rules_enabled", "enabled"),)
 
 
 class DailyRecap(Base):

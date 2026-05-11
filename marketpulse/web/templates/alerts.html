@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="bg-white rounded-md shadow-sm p-4">
+  <header class="flex items-center justify-between mb-3">
+    <h1 class="font-semibold">价格告警</h1>
+    <span class="text-xs text-slate-500">
+      推送渠道:
+      {% if notifier_kind == "none" %}
+        <span class="text-amber-600">未配置(NOTIFIER_KIND=none)— 告警仅记录,不推送</span>
+      {% else %}
+        <span class="font-semibold">{{ notifier_kind }}</span>
+      {% endif %}
+    </span>
+  </header>
+
+  <form hx-post="/alerts" hx-target="#alert-rows" hx-swap="beforeend"
+        hx-on::after-request="if(event.detail.successful) this.reset()"
+        class="grid grid-cols-2 md:grid-cols-6 gap-2 mb-4 text-sm">
+    <input name="ticker" placeholder="代码" required
+           class="border rounded px-3 py-1 uppercase" />
+    <select name="metric" required class="border rounded px-3 py-1">
+      <option value="price">价格</option>
+      <option value="change_pct">涨跌幅 %</option>
+      <option value="volume_ratio">量比</option>
+    </select>
+    <select name="op" required class="border rounded px-3 py-1">
+      <option value=">=">≥</option>
+      <option value="<=">≤</option>
+    </select>
+    <input name="threshold" type="number" step="any" placeholder="阈值" required
+           class="border rounded px-3 py-1" />
+    <input name="notes" placeholder="备注(可选)"
+           class="border rounded px-3 py-1 col-span-1 md:col-span-1 min-w-0" />
+    <button class="bg-slate-900 text-white px-3 py-1 rounded">添加</button>
+  </form>
+
+  <table class="w-full text-sm">
+    <thead class="text-left text-slate-500">
+      <tr>
+        <th class="px-2 py-1">状态</th>
+        <th>代码</th>
+        <th>条件</th>
+        <th class="text-right">上次值</th>
+        <th>上次触发</th>
+        <th>备注</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody id="alert-rows">
+      {% for rule in rules %}{% include "partials/alert_row.html" %}{% endfor %}
+      {% if not rules %}
+      <tr><td colspan="7" class="px-4 py-8 text-center text-slate-500">
+        暂无告警规则。在上方表单中添加第一条。
+      </td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

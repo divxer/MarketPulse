@@ -5,6 +5,8 @@ from apscheduler.triggers.cron import CronTrigger
 
 from marketpulse.ai.client import AnthropicClient
 from marketpulse.ai.service import AiService
+from marketpulse.alerts.engine import evaluate_rules
+from marketpulse.alerts.notifier import build_notifier
 from marketpulse.config import get_settings
 from marketpulse.data.cache import NewsCache
 from marketpulse.data.service import DataService
@@ -43,6 +45,28 @@ def run_daily_recap() -> None:
         db.close()
 
 
+def run_alert_check() -> None:
+    settings = get_settings()
+    if settings.notifier_kind == "none":
+        return  # No transport configured; skip the work.
+    gen = session_scope()
+    db = next(gen)
+    try:
+        data = DataService(
+            db, YFinanceClient(), news_ttl_days=settings.news_cache_ttl_days,
+        )
+        notifier = build_notifier(settings)
+        results = evaluate_rules(
+            db, data=data, notifier=notifier,
+            debounce_minutes=settings.alert_debounce_minutes,
+        )
+        fired = sum(1 for r in results if r.get("fired"))
+        if fired:
+            log.info("alert_check_done", evaluated=len(results), fired=fired)
+    finally:
+        db.close()
+
+
 def run_news_purge() -> None:
     log.info("news_purge_start")
     settings = get_settings()
@@ -76,5 +100,13 @@ def build_scheduler() -> BackgroundScheduler:
         run_news_purge,
         trigger=CronTrigger(day_of_week="sun", hour=3),
         id="news_purge", replace_existing=True,
+    )
+    # Alert checker: every 5 min during US market hours (Mon-Fri 09:30-16:00 ET)
+    sched.add_job(
+        run_alert_check,
+        trigger=CronTrigger(
+            day_of_week="mon-fri", hour="9-16", minute="*/5",
+        ),
+        id="alert_check", replace_existing=True, misfire_grace_time=60,
     )
     return sched

@@ -18,6 +18,20 @@ class Settings(BaseSettings):
     ai_cache_ttl_hours: int = Field(24, alias="AI_CACHE_TTL_HOURS", ge=0)
     news_cache_ttl_days: int = Field(7, alias="NEWS_CACHE_TTL_DAYS", ge=0)
 
+    # Notifier: one of "none" | "bark" | "serverchan" | "smtp"
+    notifier_kind: str = Field("none", alias="NOTIFIER_KIND")
+    notifier_bark_url: str = Field("", alias="NOTIFIER_BARK_URL")
+    notifier_serverchan_key: str = Field("", alias="NOTIFIER_SERVERCHAN_KEY")
+    notifier_smtp_host: str = Field("", alias="NOTIFIER_SMTP_HOST")
+    notifier_smtp_port: int = Field(587, alias="NOTIFIER_SMTP_PORT", ge=0)
+    notifier_smtp_user: str = Field("", alias="NOTIFIER_SMTP_USER")
+    notifier_smtp_password: str = Field("", alias="NOTIFIER_SMTP_PASSWORD")
+    notifier_email_from: str = Field("", alias="NOTIFIER_EMAIL_FROM")
+    notifier_email_to: str = Field("", alias="NOTIFIER_EMAIL_TO")
+
+    # Alert debounce: don't re-fire the same rule within this many minutes
+    alert_debounce_minutes: int = Field(60, alias="ALERT_DEBOUNCE_MINUTES", ge=0)
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
