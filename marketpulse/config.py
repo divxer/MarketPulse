@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     ai_cache_ttl_hours: int = Field(24, alias="AI_CACHE_TTL_HOURS", ge=0)
     news_cache_ttl_days: int = Field(7, alias="NEWS_CACHE_TTL_DAYS", ge=0)
     quote_cache_ttl_seconds: int = Field(300, alias="QUOTE_CACHE_TTL_SECONDS", ge=0)
+    # Live quote source: 'auto' (Tencent first, yfinance fallback), 'tencent', 'yfinance'
+    quote_source: str = Field("auto", alias="QUOTE_SOURCE")
 
     # Notifier: one of "none" | "bark" | "serverchan" | "smtp"
     notifier_kind: str = Field("none", alias="NOTIFIER_KIND")

@@ -9,13 +9,26 @@ from marketpulse.alerts.engine import evaluate_rules
 from marketpulse.alerts.notifier import build_notifier
 from marketpulse.config import get_settings
 from marketpulse.data.cache import NewsCache
+from marketpulse.data.hybrid_client import HybridClient
 from marketpulse.data.service import DataService
+from marketpulse.data.tencent_client import TencentClient
 from marketpulse.data.yfinance_client import YFinanceClient
 from marketpulse.db.base import session_scope
 from marketpulse.logging import get_logger
 from marketpulse.recap.service import RecapService
 
 log = get_logger(__name__)
+
+
+def _build_quote_client():
+    s = get_settings()
+    yf = YFinanceClient()
+    source = (s.quote_source or "auto").lower()
+    if source == "yfinance":
+        return yf
+    return HybridClient(
+        yf, tencent=TencentClient(), prefer_tencent=source in ("auto", "tencent"),
+    )
 
 
 def parse_recap_time(value: str) -> time:
@@ -33,7 +46,7 @@ def run_daily_recap() -> None:
     gen = session_scope()
     db = next(gen)
     try:
-        data = DataService(db, YFinanceClient(), news_ttl_days=settings.news_cache_ttl_days)
+        data = DataService(db, _build_quote_client(), news_ttl_days=settings.news_cache_ttl_days)
         ai = AiService(
             db, ai_client=AnthropicClient(), data=data,
             model=settings.ai_model, ttl_hours=settings.ai_cache_ttl_hours,
@@ -53,7 +66,7 @@ def run_alert_check() -> None:
     db = next(gen)
     try:
         data = DataService(
-            db, YFinanceClient(), news_ttl_days=settings.news_cache_ttl_days,
+            db, _build_quote_client(), news_ttl_days=settings.news_cache_ttl_days,
         )
         notifier = build_notifier(settings)
         results = evaluate_rules(

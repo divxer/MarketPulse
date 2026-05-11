@@ -30,9 +30,23 @@ def require_auth(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="auth required")
 
 
+def _build_quote_client():
+    """Construct the quote+data client based on QUOTE_SOURCE setting."""
+    from marketpulse.data.hybrid_client import HybridClient
+    from marketpulse.data.tencent_client import TencentClient
+    s = get_settings()
+    yf = YFinanceClient()
+    source = (s.quote_source or "auto").lower()
+    if source == "yfinance":
+        return yf
+    return HybridClient(
+        yf, tencent=TencentClient(), prefer_tencent=source in ("auto", "tencent"),
+    )
+
+
 def get_data_service(db: Session = Depends(get_db)) -> DataService:
     s = get_settings()
-    return DataService(db, YFinanceClient(), news_ttl_days=s.news_cache_ttl_days)
+    return DataService(db, _build_quote_client(), news_ttl_days=s.news_cache_ttl_days)
 
 
 def get_ai_service(
