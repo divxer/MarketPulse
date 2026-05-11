@@ -46,10 +46,14 @@ def _market_section(market_json: str | None) -> str | None:
         return None
     d = json.loads(market_json)
     parts = []
-    if "spy" in d: parts.append(f"SPY {d['spy']:+.2f}%")
-    if "qqq" in d: parts.append(f"QQQ {d['qqq']:+.2f}%")
-    if "dia" in d: parts.append(f"DIA {d['dia']:+.2f}%")
-    if "vix" in d: parts.append(f"VIX {d['vix']:.1f}")
+    if "spy" in d:
+        parts.append(f"SPY {d['spy']:+.2f}%")
+    if "qqq" in d:
+        parts.append(f"QQQ {d['qqq']:+.2f}%")
+    if "dia" in d:
+        parts.append(f"DIA {d['dia']:+.2f}%")
+    if "vix" in d:
+        parts.append(f"VIX {d['vix']:.1f}")
     return "📈 大盘\n" + "  ".join(parts) if parts else None
 
 

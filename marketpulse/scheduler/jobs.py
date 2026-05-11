@@ -6,7 +6,7 @@ from apscheduler.triggers.cron import CronTrigger
 from marketpulse.ai.client import AnthropicClient
 from marketpulse.ai.service import AiService
 from marketpulse.alerts.engine import evaluate_rules
-from marketpulse.alerts.notifier import build_notifier
+from marketpulse.alerts.notifier import NoopNotifier, build_notifier
 from marketpulse.config import get_settings
 from marketpulse.data.cache import NewsCache
 from marketpulse.data.hybrid_client import HybridClient
@@ -15,6 +15,7 @@ from marketpulse.data.tencent_client import TencentClient
 from marketpulse.data.yfinance_client import YFinanceClient
 from marketpulse.db.base import session_scope
 from marketpulse.logging import get_logger
+from marketpulse.recap.push import push_recap_summary
 from marketpulse.recap.service import RecapService
 
 log = get_logger(__name__)
@@ -54,6 +55,19 @@ def run_daily_recap() -> None:
         svc = RecapService(db, data=data, ai=ai)
         result = svc.generate(target)
         log.info("recap_job_done", date=str(target), status=result.generation_status)
+
+        # Optional push — non-blocking, never fails the job.
+        if settings.notifier_recap_enabled:
+            notifier = build_notifier(settings)
+            if not isinstance(notifier, NoopNotifier):
+                try:
+                    push_recap_summary(
+                        result, notifier,
+                        base_url=settings.public_base_url or None,
+                        notifier_kind=settings.notifier_kind,
+                    )
+                except Exception as exc:
+                    log.warning("recap_push_skipped", error=str(exc))
     finally:
         db.close()
 
