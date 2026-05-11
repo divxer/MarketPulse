@@ -83,6 +83,34 @@ def test_trade_post_rejects_invalid_executed_at(client: TestClient, monkeypatch)
     assert res.status_code == 422
 
 
+def test_delete_trade_recomputes_holding(client: TestClient, monkeypatch):
+    _login(client, monkeypatch)
+    # Buy 100 @ 10, buy 100 @ 20 → avg 15. Sell 50 @ 25 → realized +500.
+    client.post("/trades", data={"ticker": "ZZZ", "action": "buy", "quantity": 100, "price": 10})
+    r = client.post("/trades", data={"ticker": "ZZZ", "action": "buy", "quantity": 100, "price": 20})
+    # Get second buy's id from the response (its row id appears in trade-row-N).
+    import re as _re
+    ids = sorted(int(m) for m in _re.findall(r'id="trade-row-(\d+)"', r.text))
+    second_buy_id = ids[-1]
+    client.post("/trades", data={"ticker": "ZZZ", "action": "sell", "quantity": 50, "price": 25})
+
+    # Delete the second buy (the @20 one). Remaining: buy 100@10, sell 50@25.
+    # avg_cost should drop to 10, sell's realized_pl should become (25-10)*50 = 750.
+    r = client.delete(f"/trades/{second_buy_id}")
+    assert r.status_code == 200
+
+    r = client.get("/trades?ticker=ZZZ")
+    assert "+750.00" in r.text
+    r = client.get("/holdings")
+    assert "ZZZ" in r.text  # 50 shares remain
+
+
+def test_delete_nonexistent_trade_404(client: TestClient, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.delete("/trades/99999")
+    assert r.status_code == 404
+
+
 def test_robinhood_import_bad_csv_returns_422(client: TestClient, monkeypatch):
     _login(client, monkeypatch)
     res = client.post(

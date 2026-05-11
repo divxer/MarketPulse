@@ -11,7 +11,12 @@ from marketpulse.holdings.robinhood_import import (
     RobinhoodParseError,
     parse_robinhood_csv,
 )
-from marketpulse.holdings.trades import TradeError, record_trade, total_realized_pl
+from marketpulse.holdings.trades import (
+    TradeError,
+    recompute_ticker,
+    record_trade,
+    total_realized_pl,
+)
 from marketpulse.logging import get_logger
 from marketpulse.web.deps import get_db, require_auth
 from marketpulse.web.main import templates
@@ -107,6 +112,23 @@ def trades_add(
             "_just_added": trades[0] if trades else None,
         },
     )
+
+
+@router.delete("/trades/{trade_id}", response_class=HTMLResponse)
+def trades_delete(
+    trade_id: int,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_auth),
+):
+    trade = db.query(Trade).filter(Trade.id == trade_id).one_or_none()
+    if not trade:
+        raise HTTPException(status_code=404, detail="trade not found")
+    ticker = trade.ticker
+    db.delete(trade)
+    db.commit()
+    # Recompute Holding + realized_pl on remaining sells for this ticker.
+    recompute_ticker(db, ticker)
+    return HTMLResponse("")
 
 
 def _is_duplicate(db: Session, t: ParsedTrade) -> bool:

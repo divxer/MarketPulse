@@ -91,6 +91,47 @@ def record_trade(
     return trade
 
 
+def recompute_ticker(session: Session, ticker: str) -> None:
+    """Rebuild Holding row + realized_pl values from the full Trade history for ticker.
+
+    Used when a trade is deleted: prior buys/sells may have affected the avg_cost basis,
+    so realized P&L on sells needs recomputation. Walks all remaining trades in
+    chronological order and reconstructs Holding state.
+    """
+    ticker = ticker.strip().upper()
+    trades = (
+        session.query(Trade)
+        .filter(Trade.ticker == ticker)
+        .order_by(Trade.executed_at.asc().nulls_last(), Trade.created_at.asc())
+        .all()
+    )
+    qty = 0.0
+    avg_cost = 0.0
+    for t in trades:
+        if t.action == "buy":
+            new_qty = qty + t.quantity
+            total_cost = qty * avg_cost + t.quantity * t.price + t.fees
+            avg_cost = total_cost / new_qty if new_qty else 0
+            qty = new_qty
+            t.realized_pl = None
+        else:  # sell
+            t.realized_pl = (t.price - avg_cost) * t.quantity - t.fees
+            qty -= t.quantity
+            # avg_cost unchanged on partial sell
+
+    holding = session.query(Holding).filter(Holding.ticker == ticker).one_or_none()
+    if qty <= _EPSILON:
+        if holding:
+            session.delete(holding)
+    elif holding:
+        holding.quantity = qty
+        holding.avg_cost = avg_cost
+    else:
+        session.add(Holding(ticker=ticker, quantity=qty, avg_cost=avg_cost))
+
+    session.commit()
+
+
 def total_realized_pl(session: Session, *, ticker: str | None = None) -> float:
     """Sum of realized P&L across all sell trades (optionally filtered by ticker)."""
     q = session.query(Trade).filter(Trade.realized_pl.isnot(None))
