@@ -75,8 +75,8 @@ def test_stock_analyze_failure_renders_error_fragment(client: TestClient, monkey
     try:
         res = client.post("/stock/AAPL/analyze")
         assert res.status_code == 200
-        assert "AI analysis failed" in res.text
+        assert "AI 分析失败" in res.text
         assert "anthropic unavailable" in res.text
-        assert "Retry" in res.text
+        assert "重试" in res.text
     finally:
         client.app.dependency_overrides.clear()

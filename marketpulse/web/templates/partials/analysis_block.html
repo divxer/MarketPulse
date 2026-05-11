@@ -1,7 +1,7 @@
 <article class="prose prose-sm max-w-none mt-3 p-3 bg-slate-50 rounded">
   <small class="text-slate-500">
-    Generated {% if result.cached %}(cached){% else %}(fresh){% endif %} •
-    model {{ result.model }} • prompt {{ result.prompt_version }}
+    {% if result.cached %}缓存结果{% else %}实时生成{% endif %} •
+    模型 {{ result.model }} • 提示词版本 {{ result.prompt_version }}
   </small>
   <div>{{ result.response_markdown | replace("\n", "<br>") | safe }}</div>
 </article>

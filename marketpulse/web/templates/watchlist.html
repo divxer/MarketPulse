@@ -1,18 +1,18 @@
 {% extends "base.html" %}
 {% block content %}
 <section class="bg-white rounded-md shadow-sm p-4">
-  <h1 class="font-semibold mb-3">Watchlist</h1>
+  <h1 class="font-semibold mb-3">自选股</h1>
 
   <form hx-post="/watchlist" hx-target="#watchlist-rows" hx-swap="beforeend"
         class="flex gap-2 mb-4">
     <input name="ticker" placeholder="AAPL" required
            class="border rounded px-3 py-1 uppercase" />
-    <button class="bg-slate-900 text-white px-3 py-1 rounded">Add</button>
+    <button class="bg-slate-900 text-white px-3 py-1 rounded">添加</button>
   </form>
 
   <table class="w-full text-sm">
     <thead class="text-left text-slate-500">
-      <tr><th class="px-2 py-1">Ticker</th><th>Notes</th><th></th></tr>
+      <tr><th class="px-2 py-1">代码</th><th>备注</th><th></th></tr>
     </thead>
     <tbody id="watchlist-rows">
       {% for item in items %}{% include "partials/watchlist_row.html" %}{% endfor %}

@@ -1,19 +1,19 @@
 <section class="bg-white rounded-md shadow-sm p-4">
   <header class="flex items-center justify-between">
-    <h2 class="font-semibold">Today's Recap — {{ today }}</h2>
+    <h2 class="font-semibold">今日复盘 — {{ today }}</h2>
   </header>
   {% if not recap %}
-    <p class="mt-2 text-slate-500">No recap yet for today.</p>
+    <p class="mt-2 text-slate-500">今日复盘尚未生成。</p>
   {% elif recap.generation_status == "pending" %}
     <p class="mt-2 text-slate-500"
-       hx-get="/" hx-trigger="every 10s" hx-target="body">Generating recap…</p>
+       hx-get="/" hx-trigger="every 10s" hx-target="body">正在生成复盘…</p>
   {% elif recap.generation_status == "failed" %}
-    <p class="mt-2 text-red-600">Recap failed: {{ recap.error_message }}</p>
+    <p class="mt-2 text-red-600">复盘失败:{{ recap.error_message }}</p>
     <form method="post" action="/recap/{{ recap.recap_date }}/retry">
-      <button class="mt-2 bg-slate-900 text-white px-3 py-1 rounded">Retry</button>
+      <button class="mt-2 bg-slate-900 text-white px-3 py-1 rounded">重试</button>
     </form>
   {% else %}
     <p class="mt-2 whitespace-pre-line">{{ recap.ai_commentary_text }}</p>
-    <a class="text-sm text-blue-600" href="/recap/{{ recap.recap_date }}">Full recap →</a>
+    <a class="text-sm text-blue-600" href="/recap/{{ recap.recap_date }}">完整复盘 →</a>
   {% endif %}
 </section>

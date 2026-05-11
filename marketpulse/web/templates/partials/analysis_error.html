@@ -1,6 +1,6 @@
 <div class="mt-3 p-3 bg-red-50 border border-red-200 rounded text-sm">
-  <p class="text-red-700 font-medium">AI analysis failed</p>
+  <p class="text-red-700 font-medium">AI 分析失败</p>
   <p class="text-red-600 text-xs mt-1">{{ error }}</p>
   <button hx-post="/stock/{{ ticker }}/analyze" hx-target="#analysis" hx-swap="innerHTML"
-          class="mt-2 bg-slate-900 text-white px-3 py-1 rounded text-xs">Retry</button>
+          class="mt-2 bg-slate-900 text-white px-3 py-1 rounded text-xs">重试</button>
 </div>

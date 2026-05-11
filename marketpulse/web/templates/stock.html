@@ -9,9 +9,9 @@
       </span>
     </span>
   </header>
-  {% if quote.stale %}<p class="text-amber-600 text-xs">⚠ Showing cached data</p>{% endif %}
+  {% if quote.stale %}<p class="text-amber-600 text-xs">⚠ 数据来自缓存(非实时)</p>{% endif %}
 
-  <h2 class="mt-6 font-semibold">Recent News</h2>
+  <h2 class="mt-6 font-semibold">最新新闻</h2>
   <ul class="mt-2 text-sm space-y-1">
     {% for n in news %}
     <li><a href="{{ n.url }}" class="text-blue-600">{{ n.headline }}</a>
@@ -21,7 +21,7 @@
 
   <div id="analysis" class="mt-6">
     <button hx-post="/stock/{{ ticker }}/analyze" hx-target="#analysis" hx-swap="innerHTML"
-            class="bg-slate-900 text-white px-3 py-1 rounded">AI Deep Analysis</button>
+            class="bg-slate-900 text-white px-3 py-1 rounded">AI 深度分析</button>
   </div>
 </section>
 {% endblock %}
