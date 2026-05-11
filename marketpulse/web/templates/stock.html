@@ -11,6 +11,17 @@
   </header>
   {% if quote.stale %}<p class="text-amber-600 text-xs">⚠ 数据来自缓存(非实时)</p>{% endif %}
 
+  <div class="flex gap-1 mt-4 text-xs">
+    <button data-period="30d" class="px-2 py-1 rounded border border-slate-200">30D</button>
+    <button data-period="60d" class="px-2 py-1 rounded border border-slate-200 bg-slate-900 text-white">60D</button>
+    <button data-period="6m"  class="px-2 py-1 rounded border border-slate-200">6M</button>
+    <button data-period="1y"  class="px-2 py-1 rounded border border-slate-200">1Y</button>
+  </div>
+
+  <div id="chart-main"  data-ticker="{{ ticker }}" class="mt-2"></div>
+  <div id="chart-rsi"   class="mt-2"></div>
+  <div id="chart-macd"  class="mt-2"></div>
+
   <h2 class="mt-6 font-semibold">最新新闻</h2>
   <ul class="mt-2 text-sm space-y-1">
     {% for n in news %}
@@ -24,4 +35,7 @@
             class="bg-slate-900 text-white px-3 py-1 rounded">AI 深度分析</button>
   </div>
 </section>
+
+<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"></script>
+<script src="/static/chart.js"></script>
 {% endblock %}
