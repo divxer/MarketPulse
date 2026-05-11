@@ -94,3 +94,24 @@ def test_market_overview(db_session: Session) -> None:
     m = svc.get_market_overview()
     assert m.spy.symbol == "SPY"
 
+
+def test_quote_cache_dedups_within_ttl(db_session: Session) -> None:
+    """Second get_quote for the same ticker within TTL must not call yfinance."""
+    from marketpulse.data.quote_cache import QUOTE_CACHE
+    QUOTE_CACHE.configure(60)
+    yf = FakeYF()
+    svc = DataService(db_session, yf)
+    svc.get_quote("AAPL")
+    yf.calls.clear()
+    svc.get_quote("AAPL")
+    assert ("quote", "AAPL") not in yf.calls  # cache hit
+
+
+def test_quote_cache_isolates_different_tickers(db_session: Session) -> None:
+    yf = FakeYF()
+    svc = DataService(db_session, yf)
+    svc.get_quote("AAPL")
+    yf.calls.clear()
+    svc.get_quote("NVDA")  # different ticker → must call yfinance
+    assert ("quote", "NVDA") in yf.calls
+

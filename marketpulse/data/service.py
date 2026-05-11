@@ -4,6 +4,7 @@ from typing import Protocol
 from sqlalchemy.orm import Session
 
 from marketpulse.data.cache import NewsCache, PriceCache
+from marketpulse.data.quote_cache import QUOTE_CACHE
 from marketpulse.data.types import Bar, Fundamentals, MarketOverview, NewsItem, Quote
 from marketpulse.logging import get_logger
 
@@ -28,8 +29,15 @@ class DataService:
         self.news_cache = NewsCache(session, ttl_days=news_ttl_days)
 
     def get_quote(self, ticker: str) -> Quote:
+        # Short-circuit if we have a fresh quote — saves a yfinance call
+        # (and avoids Yahoo Finance rate-limiting on repeat page loads).
+        cached = QUOTE_CACHE.get(ticker)
+        if cached is not None:
+            return cached
         try:
-            return self.yf.fetch_quote(ticker)
+            q = self.yf.fetch_quote(ticker)
+            QUOTE_CACHE.set(ticker, q)
+            return q
         except Exception as exc:
             log.warning("quote_fallback_to_cache", ticker=ticker, error=str(exc))
             bars = self.price_cache.get_range(
@@ -42,7 +50,7 @@ class DataService:
             change_pct = (
                 ((last.close - prev.close) / prev.close * 100) if prev.close else 0.0
             )
-            return Quote(
+            stale_quote = Quote(
                 ticker=ticker,
                 price=last.close,
                 change_pct=change_pct,
@@ -53,6 +61,10 @@ class DataService:
                 fetched_at=datetime.now(UTC),
                 stale=True,
             )
+            # Cache the stale quote with a SHORTER TTL (60s) so we stop hammering
+            # yfinance during an ongoing outage, but recover quickly when it heals.
+            QUOTE_CACHE.set(ticker, stale_quote, ttl_seconds=60)
+            return stale_quote
 
     def get_history(self, ticker: str, period: str = "60d") -> list[Bar]:
         days = int(period.rstrip("d")) if period.endswith("d") else 60

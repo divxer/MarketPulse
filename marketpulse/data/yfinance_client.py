@@ -1,19 +1,29 @@
 from datetime import UTC, datetime
 
 import yfinance as yf
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from marketpulse.data.types import Bar, Fundamentals, IndexQuote, MarketOverview, NewsItem, Quote
 from marketpulse.logging import get_logger
 
 log = get_logger(__name__)
 
-# Retry on transient network/HTTP errors only — never on programmer errors like ValueError.
+
+def _is_transient(exc: BaseException) -> bool:
+    """Network errors AND yfinance rate-limit messages are worth retrying.
+    Real programmer errors (ValueError on missing tickers) are not."""
+    if isinstance(exc, (OSError, RuntimeError, TimeoutError)):
+        return True
+    msg = str(exc).lower()
+    return any(s in msg for s in ("rate limit", "too many requests", "429"))
+
+
+# Use longer backoff on rate-limit (Yahoo returns 429 when hammered).
 _retry = retry(
     reraise=True,
     stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=0.5, max=4),
-    retry=retry_if_exception_type((OSError, RuntimeError, TimeoutError)),
+    wait=wait_exponential(multiplier=2, max=30),
+    retry=retry_if_exception(_is_transient),
 )
 
 

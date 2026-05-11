@@ -16,6 +16,9 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 def create_app() -> FastAPI:
     settings = get_settings()
     configure_logging(settings.log_level)
+    # Honor user-configured TTL for the in-memory quote cache.
+    from marketpulse.data.quote_cache import QUOTE_CACHE
+    QUOTE_CACHE.configure(settings.quote_cache_ttl_seconds)
     app = FastAPI(title="MarketPulse")
 
     if STATIC_DIR.exists():

@@ -10,6 +10,15 @@ os.environ.setdefault("SESSION_SECRET", "x" * 32)
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")
 
 
+@pytest.fixture(autouse=True)
+def _clear_quote_cache() -> None:
+    """The QUOTE_CACHE module-level singleton must not leak across tests."""
+    from marketpulse.data.quote_cache import QUOTE_CACHE
+    QUOTE_CACHE.clear()
+    yield
+    QUOTE_CACHE.clear()
+
+
 @pytest.fixture()
 def db_url(tmp_path: Path) -> str:
     return f"sqlite:///{tmp_path / 'test.db'}"
