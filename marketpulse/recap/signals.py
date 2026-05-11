@@ -91,8 +91,8 @@ def macd(
     else:
         signal_line = [None] * len(line)
     hist = [
-        (l - s) if (l is not None and s is not None) else None
-        for l, s in zip(line, signal_line, strict=True)
+        (line_v - sig_v) if (line_v is not None and sig_v is not None) else None
+        for line_v, sig_v in zip(line, signal_line, strict=True)
     ]
     return line, signal_line, hist
 
@@ -109,6 +109,64 @@ def sma(values: list[float], period: int) -> list[float | None]:
         else:
             out.append(sum(values[i - period + 1 : i + 1]) / period)
     return out
+
+
+def rsi_series(closes: list[float], period: int = RSI_PERIOD) -> list[float | None]:
+    """Wilder's RSI as a full sparse series — same length as input, leading Nones
+    until warmup (period+1 bars seen). At each position, the same recurrence the
+    private `_rsi` helper uses is applied, so signals.detect_signals stays consistent.
+    """
+    out: list[float | None] = [None] * len(closes)
+    if len(closes) < period + 1:
+        return out
+    deltas = [closes[i + 1] - closes[i] for i in range(len(closes) - 1)]
+    gains = [d if d > 0 else 0.0 for d in deltas]
+    losses = [-d if d < 0 else 0.0 for d in deltas]
+    avg_g = sum(gains[:period]) / period
+    avg_l = sum(losses[:period]) / period
+
+    def _to_rsi(g: float, l_: float) -> float | None:
+        if g == 0 and l_ == 0:
+            return None
+        if l_ == 0:
+            return 100.0
+        rs = g / l_
+        return 100.0 - (100.0 / (1 + rs))
+
+    out[period] = _to_rsi(avg_g, avg_l)
+    for i in range(period, len(deltas)):
+        avg_g = (avg_g * (period - 1) + gains[i]) / period
+        avg_l = (avg_l * (period - 1) + losses[i]) / period
+        out[i + 1] = _to_rsi(avg_g, avg_l)
+    return out
+
+
+def bollinger_series(
+    closes: list[float], period: int = BB_PERIOD, num_std: float = BB_STD_DEV,
+) -> tuple[list[float | None], list[float | None], list[float | None]]:
+    """Bollinger bands as three sparse series (upper, middle, lower).
+
+    Middle is a rolling SMA over `period`; upper/lower are ± `num_std` standard
+    deviations from the middle. Same windowing convention as `sma()` — leading
+    Nones until the window fills.
+    """
+    upper: list[float | None] = []
+    middle: list[float | None] = []
+    lower: list[float | None] = []
+    for i in range(len(closes)):
+        if i + 1 < period:
+            upper.append(None)
+            middle.append(None)
+            lower.append(None)
+            continue
+        window = closes[i - period + 1 : i + 1]
+        m = sum(window) / period
+        var = sum((x - m) ** 2 for x in window) / period
+        std = var ** 0.5
+        middle.append(m)
+        upper.append(m + num_std * std)
+        lower.append(m - num_std * std)
+    return upper, middle, lower
 
 
 def _ema_cross(bars: list[Bar]) -> str | None:

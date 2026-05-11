@@ -1,7 +1,15 @@
 from datetime import date, timedelta
 
 from marketpulse.data.types import Bar, Quote
-from marketpulse.recap.signals import detect_signals, ema, macd, scan_signal_markers, sma
+from marketpulse.recap.signals import (
+    bollinger_series,
+    detect_signals,
+    ema,
+    macd,
+    rsi_series,
+    scan_signal_markers,
+    sma,
+)
 
 
 def _bar(d: int, close: float, volume: int = 1_000_000) -> Bar:
@@ -213,3 +221,40 @@ def test_scan_signal_markers_each_marker_has_required_fields() -> None:
         assert isinstance(m["time"], str)  # ISO date for JSON
         assert isinstance(m["type"], str)
         assert isinstance(m["note"], str)
+
+
+def test_rsi_series_matches_private_rsi_on_full_input() -> None:
+    # Series result at index len-1 should equal _rsi() over the full closes.
+    from marketpulse.recap.signals import _rsi
+    closes = [100.0 + (i % 7 - 3) for i in range(50)]
+    series = rsi_series(closes)
+    assert len(series) == len(closes)
+    assert series[0] is None
+    # Warmup: first non-None at index `period` (=14 by default)
+    assert series[14] is not None
+    assert series[-1] == _rsi(closes)
+
+
+def test_rsi_series_too_short() -> None:
+    assert rsi_series([1.0, 2.0]) == [None, None]
+
+
+def test_bollinger_series_basic() -> None:
+    closes = [100.0] * 20 + [130.0]
+    upper, middle, lower = bollinger_series(closes, period=20, num_std=2.0)
+    assert len(upper) == len(middle) == len(lower) == 21
+    # First 19 entries are None (window not filled)
+    assert all(x is None for x in upper[:19])
+    # Index 19: window is 20 flat 100s → std=0 → upper = lower = middle = 100
+    assert middle[19] == 100.0
+    assert upper[19] == 100.0
+    assert lower[19] == 100.0
+    # Index 20: window has one 130 + nineteen 100s → mean=101.5, std>0
+    assert middle[20] is not None and middle[20] > 100
+    assert upper[20] is not None and upper[20] > middle[20]
+    assert lower[20] is not None and lower[20] < middle[20]
+
+
+def test_bollinger_series_too_short() -> None:
+    upper, middle, lower = bollinger_series([1.0, 2.0], period=20)
+    assert upper == middle == lower == [None, None]

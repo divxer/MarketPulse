@@ -1,4 +1,4 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 from fastapi.testclient import TestClient
 
@@ -78,5 +78,107 @@ def test_stock_analyze_failure_renders_error_fragment(client: TestClient, monkey
         assert "AI 分析失败" in res.text
         assert "anthropic unavailable" in res.text
         assert "重试" in res.text
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def _make_bars(n: int, start_close: float = 100.0) -> list[Bar]:
+    today = date.today()
+    return [
+        Bar(date=today - timedelta(days=n - i),
+            open=start_close + i, high=start_close + i + 1,
+            low=start_close + i - 1, close=start_close + i,
+            volume=1_000_000)
+        for i in range(n)
+    ]
+
+
+class _FakeDataChart:
+    def __init__(self, bars: list[Bar]) -> None:
+        self.bars = bars
+        self.last_period: str | None = None
+
+    def get_quote(self, ticker: str) -> Quote:
+        return Quote(ticker=ticker, price=100.0, change_pct=0,
+                     volume=1, avg_volume_20d=1, fetched_at=datetime.now(UTC))
+
+    def get_history(self, ticker: str, period: str = "60d") -> list[Bar]:
+        self.last_period = period
+        return self.bars
+
+    def get_news(self, ticker: str, limit: int = 10): return []
+
+
+def test_chart_data_returns_expected_keys(client, monkeypatch) -> None:
+    _login(client, monkeypatch)
+    fake = _FakeDataChart(_make_bars(300))
+    from marketpulse.web.deps import get_data_service
+    client.app.dependency_overrides[get_data_service] = lambda: fake
+    try:
+        r = client.get("/stock/AAPL/chart-data?period=60d")
+        assert r.status_code == 200
+        data = r.json()
+        assert set(data.keys()) >= {
+            "bars", "ema12", "ema26", "sma50", "sma200",
+            "bb_upper", "bb_middle", "bb_lower",
+            "rsi", "macd", "signal_markers",
+        }
+        assert isinstance(data["bars"], list)
+        assert data["bars"][0].keys() >= {"time", "open", "high", "low", "close", "volume"}
+        assert isinstance(data["macd"], dict)
+        assert set(data["macd"].keys()) == {"line", "signal", "histogram"}
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_chart_data_fetches_with_200d_headroom_for_sma(client, monkeypatch) -> None:
+    _login(client, monkeypatch)
+    fake = _FakeDataChart(_make_bars(300))
+    from marketpulse.web.deps import get_data_service
+    client.app.dependency_overrides[get_data_service] = lambda: fake
+    try:
+        client.get("/stock/AAPL/chart-data?period=30d")
+        # Despite user requesting 30d, backend should fetch 1y so SMA200 has data.
+        assert fake.last_period == "1y"
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_chart_data_unknown_period_returns_422(client, monkeypatch) -> None:
+    _login(client, monkeypatch)
+    fake = _FakeDataChart(_make_bars(10))
+    from marketpulse.web.deps import get_data_service
+    client.app.dependency_overrides[get_data_service] = lambda: fake
+    try:
+        r = client.get("/stock/AAPL/chart-data?period=banana")
+        assert r.status_code == 422
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_chart_data_empty_bars_returns_empty_arrays(client, monkeypatch) -> None:
+    _login(client, monkeypatch)
+    fake = _FakeDataChart([])
+    from marketpulse.web.deps import get_data_service
+    client.app.dependency_overrides[get_data_service] = lambda: fake
+    try:
+        r = client.get("/stock/AAPL/chart-data?period=60d")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["bars"] == []
+        assert data["ema12"] == []
+        assert data["signal_markers"] == []
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_chart_data_sets_cache_control_header(client, monkeypatch) -> None:
+    _login(client, monkeypatch)
+    fake = _FakeDataChart(_make_bars(10))
+    from marketpulse.web.deps import get_data_service
+    client.app.dependency_overrides[get_data_service] = lambda: fake
+    try:
+        r = client.get("/stock/AAPL/chart-data?period=60d")
+        assert "max-age=300" in r.headers.get("cache-control", "")
     finally:
         client.app.dependency_overrides.clear()
