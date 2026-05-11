@@ -18,6 +18,60 @@ def test_trades_page_empty(client: TestClient, monkeypatch):
     assert "暂无交易记录" in res.text
 
 
+_RH_HEADER = (
+    "Activity Date,Process Date,Settle Date,Instrument,Description,"
+    "Trans Code,Quantity,Price,Amount\n"
+)
+
+
+def test_robinhood_import_preview_and_confirm(client: TestClient, monkeypatch):
+    _login(client, monkeypatch)
+    csv = _RH_HEADER + (
+        "5/8/2026,5/9/2026,5/12/2026,AAPL,Apple,Buy,10,$180.00,($1800.00)\n"
+        "5/9/2026,5/10/2026,5/13/2026,AAPL,Apple,Sell,4,$200.00,$800.00\n"
+        "5/1/2026,5/2/2026,5/3/2026,AAPL,Dividend,CDIV,,,$5.00\n"
+    )
+    res = client.post(
+        "/trades/import",
+        files={"file": ("activity.csv", csv, "text/csv")},
+    )
+    assert res.status_code == 200
+    assert "AAPL" in res.text
+    assert "2 笔" in res.text  # 2 new trades
+
+    res = client.post("/trades/import/confirm", data={"csv_text": csv})
+    assert res.status_code == 200
+    assert "新增" in res.text
+
+    res = client.get("/trades")
+    assert "AAPL" in res.text
+    # Realized P&L = (200-180)*4 = 80
+    assert "+80.00" in res.text
+
+
+def test_robinhood_import_skips_duplicates(client: TestClient, monkeypatch):
+    _login(client, monkeypatch)
+    csv = _RH_HEADER + "5/8/2026,5/9/2026,5/12/2026,SPY,SPDR,Buy,1,$500.00,($500.00)\n"
+    # First import
+    client.post("/trades/import/confirm", data={"csv_text": csv})
+    # Re-upload same file → preview should show 0 new, 1 skipped
+    res = client.post(
+        "/trades/import",
+        files={"file": ("activity.csv", csv, "text/csv")},
+    )
+    assert res.status_code == 200
+    assert "0 笔为新交易" in res.text or "0</span> 笔为新交易" in res.text
+
+
+def test_robinhood_import_bad_csv_returns_422(client: TestClient, monkeypatch):
+    _login(client, monkeypatch)
+    res = client.post(
+        "/trades/import",
+        files={"file": ("bad.csv", "no,header,here\n1,2,3\n", "text/csv")},
+    )
+    assert res.status_code == 422
+
+
 def test_add_buy_and_sell_trades(client: TestClient, monkeypatch):
     _login(client, monkeypatch)
     res = client.post("/trades", data={

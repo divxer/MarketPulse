@@ -1,10 +1,15 @@
 import re
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
 from marketpulse.db.models import Trade
+from marketpulse.holdings.robinhood_import import (
+    ParsedTrade,
+    RobinhoodParseError,
+    parse_robinhood_csv,
+)
 from marketpulse.holdings.trades import TradeError, record_trade, total_realized_pl
 from marketpulse.logging import get_logger
 from marketpulse.web.deps import get_db, require_auth
@@ -82,5 +87,109 @@ def trades_add(
             "realized_pl_total": total_realized_pl(db),
             "filter_ticker": None,
             "_just_added": trades[0] if trades else None,
+        },
+    )
+
+
+def _is_duplicate(db: Session, t: ParsedTrade) -> bool:
+    """A prior trade with same ticker/action/qty/price executed on the same UTC day."""
+    day_start = t.executed_at.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = day_start.replace(hour=23, minute=59, second=59, microsecond=999_999)
+    q = (
+        db.query(Trade)
+        .filter(
+            Trade.ticker == t.ticker,
+            Trade.action == t.action,
+            Trade.quantity == t.quantity,
+            Trade.price == t.price,
+            Trade.executed_at >= day_start,
+            Trade.executed_at <= day_end,
+        )
+    )
+    return db.query(q.exists()).scalar() is True
+
+
+_MAX_CSV_BYTES = 2 * 1024 * 1024  # 2 MB — covers ~10 years of activity
+
+
+def _parse_csv_text(text: str) -> list[ParsedTrade]:
+    if len(text.encode("utf-8")) > _MAX_CSV_BYTES:
+        raise HTTPException(status_code=413, detail="CSV 文件过大 (>2MB)")
+    try:
+        return parse_robinhood_csv(text)
+    except RobinhoodParseError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/trades/import", response_class=HTMLResponse)
+def trades_import_page(
+    request: Request,
+    _: None = Depends(require_auth),
+):
+    return templates.TemplateResponse(request, "trades_import.html", {})
+
+
+@router.post("/trades/import", response_class=HTMLResponse)
+def trades_import_preview(
+    request: Request,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    _: None = Depends(require_auth),
+):
+    raw = file.file.read()
+    text = raw.decode("utf-8-sig", errors="replace") if isinstance(raw, bytes) else raw
+    parsed = _parse_csv_text(text)
+    new_trades = [t for t in parsed if not _is_duplicate(db, t)]
+    skipped = len(parsed) - len(new_trades)
+    return templates.TemplateResponse(
+        request,
+        "trades_import.html",
+        {
+            "preview": new_trades,
+            "skipped": skipped,
+            "total_parsed": len(parsed),
+            "filename": file.filename,
+            "csv_text": text,
+        },
+    )
+
+
+@router.post("/trades/import/confirm", response_class=HTMLResponse)
+def trades_import_confirm(
+    request: Request,
+    csv_text: str = Form(...),
+    db: Session = Depends(get_db),
+    _: None = Depends(require_auth),
+):
+    parsed = _parse_csv_text(csv_text)
+    imported = 0
+    skipped = 0
+    errors: list[str] = []
+    for t in parsed:
+        if _is_duplicate(db, t):
+            skipped += 1
+            continue
+        try:
+            record_trade(
+                db,
+                ticker=t.ticker,
+                action=t.action,
+                quantity=t.quantity,
+                price=t.price,
+                executed_at=t.executed_at,
+                notes=f"Robinhood import (row {t.raw_row})",
+            )
+            imported += 1
+        except TradeError as exc:
+            errors.append(f"行 {t.raw_row} {t.action} {t.ticker}: {exc}")
+            log.warning("import_skip", row=t.raw_row, ticker=t.ticker, error=str(exc))
+
+    return templates.TemplateResponse(
+        request,
+        "trades_import.html",
+        {
+            "imported": imported,
+            "skipped": skipped,
+            "errors": errors,
         },
     )

@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="bg-white rounded-md shadow-sm p-4 max-w-4xl mx-auto">
+  <header class="flex items-center justify-between mb-4">
+    <h1 class="font-semibold text-lg">导入 Robinhood 交易记录</h1>
+    <a href="/trades" class="text-sm text-slate-600 hover:underline">← 返回交易记录</a>
+  </header>
+
+  {% if imported is defined %}
+    {# === Step 3: Result === #}
+    <div class="rounded border border-green-200 bg-green-50 p-4 mb-4">
+      <p class="font-semibold text-green-800">导入完成</p>
+      <p class="text-sm text-slate-700 mt-1">
+        新增 <span class="font-semibold">{{ imported }}</span> 笔,
+        跳过重复 <span class="font-semibold">{{ skipped }}</span> 笔。
+      </p>
+    </div>
+    {% if errors %}
+      <div class="rounded border border-amber-200 bg-amber-50 p-3 mb-4 text-sm">
+        <p class="font-semibold mb-1">部分行未导入:</p>
+        <ul class="list-disc list-inside text-slate-700">
+          {% for e in errors %}<li>{{ e }}</li>{% endfor %}
+        </ul>
+      </div>
+    {% endif %}
+    <a href="/trades" class="inline-block bg-slate-900 text-white px-4 py-2 rounded text-sm">查看交易记录</a>
+
+  {% elif preview is defined %}
+    {# === Step 2: Preview === #}
+    <p class="text-sm text-slate-700 mb-3">
+      文件 <span class="font-mono">{{ filename }}</span> 共解析出
+      <span class="font-semibold">{{ total_parsed }}</span> 笔交易,
+      其中 <span class="font-semibold">{{ preview|length }}</span> 笔为新交易,
+      <span class="font-semibold">{{ skipped }}</span> 笔已存在(将跳过)。
+    </p>
+
+    {% if preview %}
+      <div class="overflow-x-auto mb-4">
+        <table class="w-full text-sm">
+          <thead class="text-slate-500 text-left">
+            <tr>
+              <th class="py-1 pr-3">日期</th>
+              <th class="py-1 pr-3">代码</th>
+              <th class="py-1 pr-3">方向</th>
+              <th class="py-1 pr-3 text-right">数量</th>
+              <th class="py-1 pr-3 text-right">价格</th>
+              <th class="py-1 pr-3 text-right">金额</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for t in preview %}
+            <tr class="border-t">
+              <td class="py-1 pr-3">{{ t.executed_at.strftime("%Y-%m-%d") }}</td>
+              <td class="py-1 pr-3 font-mono">{{ t.ticker }}</td>
+              <td class="py-1 pr-3 {% if t.action == 'buy' %}text-green-600{% else %}text-red-600{% endif %}">
+                {{ "买入" if t.action == "buy" else "卖出" }}
+              </td>
+              <td class="py-1 pr-3 text-right">{{ "%.4f"|format(t.quantity) }}</td>
+              <td class="py-1 pr-3 text-right">${{ "%.2f"|format(t.price) }}</td>
+              <td class="py-1 pr-3 text-right">${{ "%.2f"|format(t.quantity * t.price) }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      <form method="post" action="/trades/import/confirm" class="flex gap-2 items-center">
+        <textarea name="csv_text" class="hidden">{{ csv_text }}</textarea>
+        <button class="bg-slate-900 text-white px-4 py-2 rounded text-sm">确认导入 {{ preview|length }} 笔</button>
+        <a href="/trades/import" class="text-sm text-slate-600 hover:underline">取消</a>
+      </form>
+    {% else %}
+      <p class="text-sm text-slate-500 mb-3">没有新交易需要导入。</p>
+      <a href="/trades/import" class="text-sm text-slate-600 hover:underline">重新选择文件</a>
+    {% endif %}
+
+  {% else %}
+    {# === Step 1: Upload === #}
+    <div class="text-sm text-slate-700 mb-4 space-y-2">
+      <p>从 Robinhood 导出交易记录的步骤:</p>
+      <ol class="list-decimal list-inside ml-2 space-y-1">
+        <li>App 内: Account → Menu → <strong>Reports and statements</strong></li>
+        <li>选择 <strong>Account activity report</strong>,选时间范围 → Generate report</li>
+        <li>报告会通过邮件发到你的 Robinhood 注册邮箱,下载里面的 CSV 文件</li>
+        <li>上传到这里(仅识别 Buy/Sell 交易,分红、拆股等会忽略)</li>
+      </ol>
+    </div>
+
+    <form method="post" action="/trades/import" enctype="multipart/form-data"
+          class="flex gap-2 items-center">
+      <input type="file" name="file" accept=".csv,text/csv" required
+             class="text-sm flex-1 file:mr-3 file:border-0 file:bg-slate-100 file:px-3 file:py-1 file:rounded file:text-sm" />
+      <button class="bg-slate-900 text-white px-4 py-2 rounded text-sm">预览</button>
+    </form>
+    <p class="text-xs text-slate-500 mt-3">
+      文件不会保存到服务器。重复的交易(同一天同代码同数量同价格)会自动跳过。
+    </p>
+  {% endif %}
+</section>
+{% endblock %}

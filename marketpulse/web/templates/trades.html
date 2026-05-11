@@ -6,8 +6,9 @@
       交易记录
       {% if filter_ticker %}— {{ filter_ticker }}{% endif %}
     </h1>
-    <div class="text-sm text-slate-600">
-      已实现盈亏
+    <div class="text-sm text-slate-600 flex items-center gap-4">
+      <a href="/trades/import" class="text-slate-700 hover:underline">导入 Robinhood CSV</a>
+      <span>已实现盈亏</span>
       <span class="font-semibold {% if realized_pl_total >= 0 %}text-green-600{% else %}text-red-600{% endif %}">
         ${{ "%+.2f"|format(realized_pl_total) }}
       </span>
