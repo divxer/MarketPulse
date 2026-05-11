@@ -41,6 +41,62 @@ def _ema(values: list[float], period: int) -> list[float] | None:
     return out
 
 
+def ema(values: list[float], period: int) -> list[float | None]:
+    """Sparse EMA — same length as input, leading Nones where window isn't filled.
+
+    Public counterpart to `_ema` which returns a shorter array. Used by `macd()`
+    and the chart-data endpoint where every series must align by index.
+    """
+    out: list[float | None] = []
+    if len(values) < period:
+        return [None] * len(values)
+    multiplier = 2 / (period + 1)
+    seed = sum(values[:period]) / period
+    out.extend([None] * (period - 1))
+    out.append(seed)
+    for v in values[period:]:
+        prev = out[-1]
+        assert prev is not None  # invariant: out[period-1:] is dense
+        out.append((v - prev) * multiplier + prev)
+    return out
+
+
+def macd(
+    values: list[float],
+    fast: int = 12,
+    slow: int = 26,
+    signal: int = 9,
+) -> tuple[list[float | None], list[float | None], list[float | None]]:
+    """MACD line, signal line, and histogram. Each is the same length as `values`,
+    with leading Nones during indicator warm-up.
+
+    line = EMA(fast) - EMA(slow)
+    signal = EMA(line, signal)
+    histogram = line - signal
+    """
+    fast_ema = ema(values, fast)
+    slow_ema = ema(values, slow)
+    # MACD line is defined where slow EMA is.
+    line: list[float | None] = [
+        (f - s) if (f is not None and s is not None) else None
+        for f, s in zip(fast_ema, slow_ema, strict=True)
+    ]
+    # Signal line is EMA of the dense tail of line.
+    dense_tail = [v for v in line if v is not None]
+    if len(dense_tail) >= signal:
+        signal_tail = ema(dense_tail, signal)
+        # Re-pad with Nones for positions where line itself was None.
+        pad = len(line) - len(signal_tail)
+        signal_line: list[float | None] = [None] * pad + signal_tail
+    else:
+        signal_line = [None] * len(line)
+    hist = [
+        (l - s) if (l is not None and s is not None) else None
+        for l, s in zip(line, signal_line, strict=True)
+    ]
+    return line, signal_line, hist
+
+
 def sma(values: list[float], period: int) -> list[float | None]:
     """Simple moving average. Returns one entry per input position.
     Positions where the window isn't yet filled (< period values seen)

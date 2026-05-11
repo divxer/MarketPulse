@@ -1,7 +1,7 @@
 from datetime import date
 
 from marketpulse.data.types import Bar, Quote
-from marketpulse.recap.signals import detect_signals, sma
+from marketpulse.recap.signals import detect_signals, ema, macd, sma
 
 
 def _bar(d: int, close: float, volume: int = 1_000_000) -> Bar:
@@ -123,3 +123,46 @@ def test_sma_period_one_returns_input() -> None:
 
 def test_sma_empty_input() -> None:
     assert sma([], 5) == []
+
+
+def test_ema_sparse_returns_input_length_with_leading_nones() -> None:
+    # Period 3: first 2 entries are None, then EMAs
+    out = ema([1.0, 2.0, 3.0, 4.0, 5.0], 3)
+    assert len(out) == 5
+    assert out[0] is None
+    assert out[1] is None
+    # Seed = simple mean of first 3 = 2.0
+    assert out[2] == 2.0
+    # multiplier = 2/(3+1) = 0.5; out[3] = (4 - 2) * 0.5 + 2 = 3.0
+    assert out[3] == 3.0
+    # out[4] = (5 - 3) * 0.5 + 3 = 4.0
+    assert out[4] == 4.0
+
+
+def test_ema_too_short_all_nones() -> None:
+    assert ema([1.0, 2.0], 5) == [None, None]
+
+
+def test_macd_basic_shape() -> None:
+    # 50 ascending values → all three series should compute past warm-up
+    values = [float(i) for i in range(1, 51)]
+    line, signal, hist = macd(values, fast=12, slow=26, signal=9)
+    assert len(line) == 50
+    assert len(signal) == 50
+    assert len(hist) == 50
+    # First slow-1=25 entries of line are None (need full slow EMA)
+    assert line[24] is None
+    assert line[25] is not None
+    # Signal line warm-up: slow-1 + (signal-1) = 25 + 8 = 33
+    assert signal[32] is None
+    assert signal[33] is not None
+    # Histogram = line - signal where both are non-None
+    assert hist[40] == line[40] - signal[40]
+
+
+def test_macd_too_short_all_nones() -> None:
+    values = [1.0, 2.0, 3.0]
+    line, signal, hist = macd(values)
+    assert all(v is None for v in line)
+    assert all(v is None for v in signal)
+    assert all(v is None for v in hist)
