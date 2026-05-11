@@ -25,6 +25,11 @@ services:
       - "8088:8000"
     volumes:
       - /volume1/docker/marketpulse/data:/data
+    extra_hosts:
+      # Maps host.docker.internal to the bridge gateway so the container can
+      # reach services running on the NAS host (e.g. a local Mihomo/Clash proxy
+      # at the host's :7892). Required for HTTP_PROXY/HTTPS_PROXY below.
+      - "host.docker.internal:host-gateway"
     environment:
       APP_PASSWORD_HASH: ${APP_PASSWORD_HASH}
       SESSION_SECRET: ${SESSION_SECRET}
@@ -49,6 +54,12 @@ services:
       NOTIFIER_RECAP_ENABLED: ${NOTIFIER_RECAP_ENABLED:-true}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
       ALERT_DEBOUNCE_MINUTES: ${ALERT_DEBOUNCE_MINUTES:-60}
+      # Outbound HTTP proxy (e.g. for reaching Anthropic API from regions where
+      # it's blocked). Leave empty to disable. NO_PROXY bypasses for hosts that
+      # are already China-friendly (Tencent quote/kline) or local.
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,*.gtimg.cn}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
       interval: 30s
