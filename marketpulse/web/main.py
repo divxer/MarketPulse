@@ -1,8 +1,10 @@
 from pathlib import Path
 
+import markdown as _markdown
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from markupsafe import Markup
 
 from marketpulse.config import get_settings
 from marketpulse.logging import configure_logging
@@ -11,6 +13,19 @@ TEMPLATES_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
 
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+
+
+def _render_markdown(text: str | None) -> Markup:
+    """Convert AI markdown output to safe HTML. Used by templates as |markdown."""
+    if not text:
+        return Markup("")
+    # `nl2br` keeps single newlines as <br>; without it the AI's intra-paragraph
+    # newlines would visually merge text together.
+    html = _markdown.markdown(text, extensions=["nl2br", "tables"])
+    return Markup(html)
+
+
+templates.env.filters["markdown"] = _render_markdown
 
 
 def create_app() -> FastAPI:

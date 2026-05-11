@@ -1,7 +1,9 @@
-<article class="prose prose-sm max-w-none mt-3 p-3 bg-slate-50 rounded">
-  <small class="text-slate-500">
+<article class="mt-3 p-4 bg-slate-50 rounded">
+  <small class="text-slate-500 block mb-2">
     {% if result.cached %}缓存结果{% else %}实时生成{% endif %} •
     模型 {{ result.model }} • 提示词版本 {{ result.prompt_version }}
   </small>
-  <div>{{ result.response_markdown | replace("\n", "<br>") | safe }}</div>
+  <div class="ai-markdown text-slate-800 leading-relaxed">
+    {{ result.response_markdown | markdown }}
+  </div>
 </article>

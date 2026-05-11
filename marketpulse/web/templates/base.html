@@ -7,6 +7,41 @@
   <link rel="stylesheet" href="/static/app.css" />
   <script src="https://unpkg.com/htmx.org@2.0.4"></script>
   <script src="https://unpkg.com/htmx-ext-sse@2.2.2"></script>
+  <style>
+    /* Styling for AI-generated markdown blocks (risk analysis, stock analysis).
+       Tailwind's @tailwindcss/typography plugin isn't in our build, so we
+       handcraft the few elements the AI actually emits. */
+    .ai-markdown { font-size: 0.875rem; }
+    .ai-markdown h1, .ai-markdown h2, .ai-markdown h3 {
+      font-weight: 600; margin: 0.75rem 0 0.5rem; color: #0f172a;
+    }
+    .ai-markdown h1 { font-size: 1.125rem; }
+    .ai-markdown h2 { font-size: 1rem; }
+    .ai-markdown h3 { font-size: 0.9375rem; }
+    .ai-markdown p { margin: 0.5rem 0; }
+    .ai-markdown ul, .ai-markdown ol { margin: 0.5rem 0; padding-left: 1.25rem; }
+    .ai-markdown ul { list-style: disc; }
+    .ai-markdown ol { list-style: decimal; }
+    .ai-markdown li { margin: 0.25rem 0; }
+    .ai-markdown strong { color: #0f172a; font-weight: 600; }
+    .ai-markdown code {
+      background: #e2e8f0; padding: 0.125rem 0.25rem; border-radius: 3px;
+      font-size: 0.8125rem;
+    }
+    .ai-markdown table {
+      border-collapse: collapse; margin: 0.5rem 0; width: 100%;
+    }
+    .ai-markdown th, .ai-markdown td {
+      border: 1px solid #cbd5e1; padding: 0.25rem 0.5rem; text-align: left;
+    }
+    .ai-markdown th { background: #f1f5f9; font-weight: 600; }
+    .ai-markdown blockquote {
+      border-left: 3px solid #cbd5e1; padding-left: 0.75rem; color: #475569;
+      margin: 0.5rem 0;
+    }
+    .ai-markdown :first-child { margin-top: 0; }
+    .ai-markdown :last-child { margin-bottom: 0; }
+  </style>
 </head>
 <body class="bg-slate-50 text-slate-900 font-sans">
   <header class="border-b bg-white">

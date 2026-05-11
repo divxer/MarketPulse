@@ -2,8 +2,8 @@
   {% if error %}
     <p class="text-red-600">AI 风险分析失败:{{ error }}</p>
   {% else %}
-    <div class="prose prose-sm text-slate-800 leading-relaxed">
-      {{ markdown | replace("\n", "<br>") | safe }}
+    <div class="ai-markdown text-slate-800 leading-relaxed">
+      {{ markdown | markdown }}
     </div>
   {% endif %}
 </div>

@@ -190,3 +190,30 @@ def test_holdings_risk_analysis_empty_portfolio(client: TestClient, monkeypatch)
         assert "暂无持仓" in res.text
     finally:
         client.app.dependency_overrides.clear()
+
+
+def test_risk_analysis_renders_markdown_to_html(client: TestClient, monkeypatch):
+    """`**bold**` and `## heading` in AI output must become <strong> and <h2>."""
+    _login(client, monkeypatch)
+    fake = _FakeData()
+    class _MdAi:
+        def portfolio_risk(self, **kwargs):
+            return "## 风险\n\n这是一段 **粗体** 文字。\n\n- 第一项\n- 第二项"
+    from marketpulse.web.deps import get_ai_service, get_data_service
+    client.app.dependency_overrides[get_data_service] = lambda: fake
+    client.app.dependency_overrides[get_ai_service] = lambda: _MdAi()
+    try:
+        client.post("/trades", data={
+            "ticker": "MDX", "action": "buy", "quantity": 1, "price": 10,
+        })
+        res = client.post("/holdings/risk-analysis")
+        assert res.status_code == 200
+        # Heading rendered to <h2>, bold to <strong>, list to <li>
+        assert "<h2>" in res.text and "风险" in res.text
+        assert "<strong>" in res.text and "粗体" in res.text
+        assert "<li>" in res.text and "第一项" in res.text
+        # Literal markdown syntax should NOT survive
+        assert "**粗体**" not in res.text
+        assert "## 风险" not in res.text
+    finally:
+        client.app.dependency_overrides.clear()
