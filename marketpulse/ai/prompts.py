@@ -5,7 +5,7 @@ from marketpulse.data.types import Bar, Fundamentals, NewsItem, Quote
 
 ANALYSIS_PROMPT_VERSION = "analysis-v2-zh"
 COMMENTARY_PROMPT_VERSION = "commentary-v3-zh-holdings"
-RISK_PROMPT_VERSION = "risk-v1-zh"
+RISK_PROMPT_VERSION = "risk-v2-zh-data"
 
 _ANALYSIS_SYSTEM = (
     "你是一名股票研究分析师。请用中文输出一份简明的 markdown 报告,包含三个部分:"
@@ -14,14 +14,15 @@ _ANALYSIS_SYSTEM = (
 )
 
 _RISK_SYSTEM = (
-    "你是一名投资组合风险分析师。请用中文输出一段简短的 markdown 报告(150-300 字),"
-    "包含三个段落:\n\n"
-    "**集中度风险**:基于 allocation(每只股占组合的百分比),指出是否存在仓位过于集中的问题。\n"
-    "**盈亏结构**:基于 unrealized P&L 和 realized P&L,分析当前组合的盈亏分布。"
-    "提到对组合盈亏贡献最大和最小的几只股票。\n"
-    "**注意事项**:提出 1-2 个具体的、可操作的关注点(例如调仓建议方向、止损考虑等),"
-    "但不要给出明确的买入/卖出指令。\n\n"
-    "保持客观冷静,只使用所提供的数据,不要编造数字。股票代码保留英文原文。"
+    "请基于以下数据用中文输出一份简短的 markdown 数据观察报告(150-300 字),"
+    "分三段:\n\n"
+    "**集中度观察**:计算每只股占组合总市值的百分比,指出占比最高的股票及其比例。\n"
+    "**盈亏分布**:统计未实现盈亏和已实现盈亏的数值,列出对组合贡献最大和最小的"
+    "几只股票及其金额、百分比。\n"
+    "**数据观察**:基于上述数字,提出 1-2 个值得用户进一步关注的观察点"
+    "(例如某只股占比异常高、累计已实现损失的规模等)。\n\n"
+    "纯数据描述,不要给出投资建议或买卖意见。只使用所提供的数字,"
+    "不要编造任何数据。股票代码保留英文原文。"
 )
 
 _COMMENTARY_SYSTEM = (
