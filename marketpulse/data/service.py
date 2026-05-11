@@ -11,6 +11,14 @@ from marketpulse.logging import get_logger
 log = get_logger(__name__)
 
 
+_PERIOD_DAYS = {
+    "30d": 30,
+    "60d": 60,
+    "6m": 180,
+    "1y": 365,
+}
+
+
 class _YFLike(Protocol):
     def fetch_quote(self, ticker: str) -> Quote: ...
     def fetch_history(self, ticker: str, period: str = ...) -> list[Bar]: ...
@@ -67,7 +75,9 @@ class DataService:
             return stale_quote
 
     def get_history(self, ticker: str, period: str = "60d") -> list[Bar]:
-        days = int(period.rstrip("d")) if period.endswith("d") else 60
+        if period not in _PERIOD_DAYS:
+            raise ValueError(f"unsupported period {period!r} (use one of {sorted(_PERIOD_DAYS)})")
+        days = _PERIOD_DAYS[period]
         end = date.today()
         start = end - timedelta(days=days)
         cached = self.price_cache.get_range(ticker, start, end)
