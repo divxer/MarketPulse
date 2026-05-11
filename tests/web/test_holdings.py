@@ -124,3 +124,69 @@ def test_holdings_resilient_to_quote_failure(client: TestClient, monkeypatch):
         assert "150.00" in page.text
     finally:
         client.app.dependency_overrides.clear()
+
+
+def test_holdings_dashboard_shows_kpis_and_allocation(client: TestClient, monkeypatch):
+    """Dashboard shows total cost/market value/P&L KPIs and per-ticker allocation."""
+    _login(client, monkeypatch)
+    fake = _FakeData(price=300.0)
+    from marketpulse.web.deps import get_data_service
+    client.app.dependency_overrides[get_data_service] = lambda: fake
+    try:
+        client.post("/trades", data={
+            "ticker": "AAA", "action": "buy", "quantity": 10, "price": 200,
+        })
+        page = client.get("/holdings")
+        assert page.status_code == 200
+        # KPI labels
+        assert "总成本" in page.text
+        assert "市值" in page.text
+        assert "未实现盈亏" in page.text
+        assert "已实现盈亏" in page.text
+        # Allocation card
+        assert "持仓分布" in page.text
+        # Contribution ranking
+        assert "贡献度排行" in page.text
+        # AI risk analysis card
+        assert "AI 风险分析" in page.text
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_holdings_risk_analysis_endpoint(client: TestClient, monkeypatch):
+    """POST /holdings/risk-analysis calls AI and renders markdown response."""
+    _login(client, monkeypatch)
+    fake = _FakeData()
+    class _FakeAi:
+        def portfolio_risk(self, **kwargs):
+            return "**集中度风险**:测试输出\n\n仅占位用于单测。"
+    from marketpulse.web.deps import get_ai_service, get_data_service
+    client.app.dependency_overrides[get_data_service] = lambda: fake
+    client.app.dependency_overrides[get_ai_service] = lambda: _FakeAi()
+    try:
+        client.post("/trades", data={
+            "ticker": "BBB", "action": "buy", "quantity": 5, "price": 100,
+        })
+        res = client.post("/holdings/risk-analysis")
+        assert res.status_code == 200
+        assert "集中度风险" in res.text
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_holdings_risk_analysis_empty_portfolio(client: TestClient, monkeypatch):
+    """Empty portfolio returns a friendly skip message without calling AI."""
+    _login(client, monkeypatch)
+    fake = _FakeData()
+    class _FakeAi:
+        def portfolio_risk(self, **kwargs):
+            raise AssertionError("should not be called when no holdings")
+    from marketpulse.web.deps import get_ai_service, get_data_service
+    client.app.dependency_overrides[get_data_service] = lambda: fake
+    client.app.dependency_overrides[get_ai_service] = lambda: _FakeAi()
+    try:
+        res = client.post("/holdings/risk-analysis")
+        assert res.status_code == 200
+        assert "暂无持仓" in res.text
+    finally:
+        client.app.dependency_overrides.clear()

@@ -1,22 +1,33 @@
+{% set total_mv = totals.market_value if totals.market_value else 0 %}
+{% set pct = (row.market_value / total_mv * 100) if (row.market_value and total_mv) else 0 %}
 <tr id="holding-row-{{ row.id }}" class="border-t">
   <td class="px-2 py-1">
     <a href="/stock/{{ row.ticker }}" class="font-medium">{{ row.ticker }}</a>
     {% if row.stale %}<span class="text-amber-600 text-xs ml-1" title="数据来自缓存">⚠</span>{% endif %}
   </td>
-  <td class="text-right">{{ "%g"|format(row.quantity) }}</td>
-  <td class="text-right">${{ "%.2f"|format(row.avg_cost) }}</td>
-  <td class="text-right">
+  <td class="text-right tabular-nums">{{ "%g"|format(row.quantity) }}</td>
+  <td class="text-right tabular-nums">${{ "%.2f"|format(row.avg_cost) }}</td>
+  <td class="text-right tabular-nums">
     {% if row.current_price is not none %}${{ "%.2f"|format(row.current_price) }}{% else %}—{% endif %}
   </td>
-  <td class="text-right">
+  <td class="text-right tabular-nums">
     {% if row.market_value is not none %}${{ "%.2f"|format(row.market_value) }}{% else %}—{% endif %}
   </td>
-  <td class="text-right {% if row.pl_dollars is not none and row.pl_dollars >= 0 %}text-green-600{% elif row.pl_dollars is not none %}text-red-600{% endif %}">
+  <td class="text-right tabular-nums {% if row.pl_dollars is not none and row.pl_dollars >= 0 %}text-green-600{% elif row.pl_dollars is not none %}text-red-600{% endif %}">
     {% if row.pl_dollars is not none %}
       ${{ "%+.2f"|format(row.pl_dollars) }} <span class="text-xs">({{ "%+.2f"|format(row.pl_pct) }}%)</span>
     {% else %}—{% endif %}
   </td>
-  <td class="text-xs text-slate-500 max-w-xs truncate">{{ row.notes or "" }}</td>
+  <td class="w-32">
+    {% if row.market_value is not none %}
+    <div class="flex items-center gap-2">
+      <div class="flex-1 h-1.5 bg-slate-100 rounded overflow-hidden">
+        <div class="h-full bg-slate-400" style="width: {{ pct }}%;"></div>
+      </div>
+      <span class="text-xs text-slate-500 tabular-nums w-10 text-right">{{ "%.1f"|format(pct) }}%</span>
+    </div>
+    {% endif %}
+  </td>
   <td class="text-right">
     <button hx-delete="/holdings/{{ row.id }}"
             hx-target="#holding-row-{{ row.id }}" hx-swap="outerHTML"

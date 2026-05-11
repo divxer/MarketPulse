@@ -140,6 +140,29 @@ class AiService:
         system, data = _split_prompt(prompt_text)
         return self.ai.complete(system=system, user=data)
 
+    def portfolio_risk(
+        self, *,
+        holdings: list[dict[str, Any]],
+        totals: dict[str, float],
+        allocation: list[dict[str, Any]],
+        realized_pl: float,
+        trading_stats: dict[str, Any],
+    ) -> str:
+        """Generate a Markdown risk analysis of the current portfolio.
+
+        Not cached — the caller decides when to refresh (typically on-demand
+        from the /holdings page, since portfolio state changes per trade).
+        """
+        prompt_text = prompts.render_risk_prompt(
+            holdings=holdings,
+            totals=totals,
+            allocation=allocation,
+            realized_pl=realized_pl,
+            trading_stats=trading_stats,
+        )
+        system, data = _split_prompt(prompt_text)
+        return self.ai.complete(system=system, user=data)
+
     def _lookup_cache(self, ticker: str, version: str) -> AiAnalysis | None:
         # Cache scoped to (ticker, model, prompt_version) so switching either
         # the model or the prompt template invalidates and forces a fresh call.

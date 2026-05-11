@@ -2,12 +2,25 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
+from marketpulse.ai.service import AiService
 from marketpulse.data.service import DataService
 from marketpulse.db.models import Holding
-from marketpulse.holdings.service import compute_totals, enrich_holdings
+from marketpulse.holdings.service import (
+    allocation_breakdown,
+    compute_totals,
+    enrich_holdings,
+    monthly_realized_pl,
+    sort_by_pl_impact,
+    trading_stats,
+)
 from marketpulse.holdings.trades import total_realized_pl
 from marketpulse.logging import get_logger
-from marketpulse.web.deps import get_data_service, get_db, require_auth
+from marketpulse.web.deps import (
+    get_ai_service,
+    get_data_service,
+    get_db,
+    require_auth,
+)
 from marketpulse.web.main import templates
 
 router = APIRouter()
@@ -23,14 +36,67 @@ def holdings_page(
 ):
     holdings = db.query(Holding).order_by(Holding.sort_order, Holding.id).all()
     rows = enrich_holdings(holdings, data)
+    totals = compute_totals(rows)
+    realized = total_realized_pl(db)
     return templates.TemplateResponse(
         request,
         "holdings.html",
         {
             "rows": rows,
-            "totals": compute_totals(rows),
-            "realized_pl": total_realized_pl(db),
+            "ranked_rows": sort_by_pl_impact(rows),
+            "totals": totals,
+            "realized_pl": realized,
+            "allocation": allocation_breakdown(rows),
+            "monthly_pl": monthly_realized_pl(db),
+            "trade_stats": trading_stats(db),
         },
+    )
+
+
+@router.post("/holdings/risk-analysis", response_class=HTMLResponse)
+def holdings_risk_analysis(
+    request: Request,
+    db: Session = Depends(get_db),
+    data: DataService = Depends(get_data_service),
+    ai: AiService = Depends(get_ai_service),
+    _: None = Depends(require_auth),
+):
+    """On-demand AI portfolio risk analysis. Returns rendered Markdown HTML."""
+    holdings = db.query(Holding).order_by(Holding.sort_order, Holding.id).all()
+    if not holdings:
+        return templates.TemplateResponse(
+            request, "partials/risk_analysis.html",
+            {"markdown": "暂无持仓,无需风险分析。", "error": None},
+        )
+    rows = enrich_holdings(holdings, data)
+    totals = compute_totals(rows)
+    allocation = allocation_breakdown(rows)
+    realized = total_realized_pl(db)
+    stats = trading_stats(db)
+
+    # Strip the non-JSON-serializable bits + heavy fields the AI doesn't need
+    holdings_payload = [
+        {k: r[k] for k in ("ticker", "quantity", "avg_cost", "current_price",
+                            "market_value", "pl_dollars", "pl_pct") if k in r}
+        for r in rows
+    ]
+    try:
+        result = ai.portfolio_risk(
+            holdings=holdings_payload,
+            totals=totals,
+            allocation=allocation,
+            realized_pl=realized,
+            trading_stats=stats,
+        )
+    except Exception as exc:  # noqa: BLE001 — surface any failure as recoverable UI error
+        log.warning("portfolio_risk_failed", error=str(exc))
+        return templates.TemplateResponse(
+            request, "partials/risk_analysis.html",
+            {"markdown": None, "error": str(exc)},
+        )
+    return templates.TemplateResponse(
+        request, "partials/risk_analysis.html",
+        {"markdown": result, "error": None},
     )
 
 

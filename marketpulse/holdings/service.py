@@ -4,10 +4,14 @@ Used by both the /holdings web route (to render the page) and the recap
 service (to include holdings P&L in the daily AI commentary).
 """
 
+from collections import defaultdict
+from datetime import date
 from typing import Any, Protocol
 
+from sqlalchemy.orm import Session
+
 from marketpulse.data.types import Quote
-from marketpulse.db.models import Holding
+from marketpulse.db.models import Holding, Trade
 from marketpulse.logging import get_logger
 
 log = get_logger(__name__)
@@ -58,3 +62,97 @@ def compute_totals(rows: list[dict[str, Any]]) -> dict[str, float]:
     pl = mv - cost if cost > 0 else 0
     pl_pct = pl / cost * 100 if cost > 0 else 0
     return {"cost": cost, "market_value": mv, "pl_dollars": pl, "pl_pct": pl_pct}
+
+
+def allocation_breakdown(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Per-position share of total market value, sorted descending.
+
+    Each entry: {ticker, market_value, pct, color}.
+    Tickers with no market value (quote failed) are skipped.
+    """
+    valued = [r for r in rows if r.get("market_value") is not None]
+    total = sum(r["market_value"] for r in valued)
+    if total <= 0:
+        return []
+    # Stable color cycle — same ticker gets the same hue across page loads.
+    palette = [
+        "#475569",  # slate-600
+        "#16a34a",  # green-600
+        "#a855f7",  # purple-500
+        "#3b82f6",  # blue-500
+        "#f59e0b",  # amber-500
+        "#ec4899",  # pink-500
+        "#0ea5e9",  # sky-500
+        "#84cc16",  # lime-500
+    ]
+    sorted_rows = sorted(valued, key=lambda r: r["market_value"], reverse=True)
+    return [
+        {
+            "ticker": r["ticker"],
+            "market_value": r["market_value"],
+            "pct": r["market_value"] / total * 100,
+            "color": palette[i % len(palette)],
+        }
+        for i, r in enumerate(sorted_rows)
+    ]
+
+
+def sort_by_pl_impact(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Sort enriched rows by absolute unrealized P&L (biggest mover first).
+
+    Rows with no P&L (quote failed) sink to the bottom.
+    """
+    def key(r: dict[str, Any]) -> tuple[int, float]:
+        pl = r.get("pl_dollars")
+        if pl is None:
+            return (1, 0.0)  # nulls last
+        return (0, -abs(pl))
+    return sorted(rows, key=key)
+
+
+def monthly_realized_pl(session: Session) -> list[dict[str, Any]]:
+    """Aggregate realized P&L from sell trades grouped by (year, month).
+
+    Returns a list of {month: 'YYYY-MM', pl: float, trade_count: int} sorted
+    chronologically. Months with no trades are omitted (frontend can fill gaps).
+    """
+    sells = (
+        session.query(Trade)
+        .filter(Trade.realized_pl.isnot(None))
+        .all()
+    )
+    buckets: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {"pl": 0.0, "trade_count": 0},
+    )
+    for t in sells:
+        when: date | None = t.executed_at.date() if t.executed_at else (
+            t.created_at.date() if t.created_at else None
+        )
+        if when is None:
+            continue
+        key = f"{when.year:04d}-{when.month:02d}"
+        buckets[key]["pl"] += t.realized_pl
+        buckets[key]["trade_count"] += 1
+    return [
+        {"month": m, "pl": v["pl"], "trade_count": v["trade_count"]}
+        for m, v in sorted(buckets.items())
+    ]
+
+
+def trading_stats(session: Session) -> dict[str, Any]:
+    """High-level stats across all trades: count, win rate, total realized P&L."""
+    trades = session.query(Trade).all()
+    total = len(trades)
+    sells = [t for t in trades if t.realized_pl is not None]
+    wins = sum(1 for t in sells if t.realized_pl > 0)
+    losses = sum(1 for t in sells if t.realized_pl < 0)
+    closed = wins + losses
+    realized = sum(t.realized_pl for t in sells)
+    return {
+        "total_trades": total,
+        "closed_positions": closed,
+        "wins": wins,
+        "losses": losses,
+        "win_rate_pct": (wins / closed * 100) if closed else 0.0,
+        "realized_pl": realized,
+    }
