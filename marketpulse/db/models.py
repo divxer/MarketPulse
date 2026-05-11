@@ -72,6 +72,23 @@ class Holding(Base):
     created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow, nullable=False)
 
 
+class Trade(Base):
+    __tablename__ = "trades"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ticker: Mapped[str] = mapped_column(String(16), nullable=False)
+    action: Mapped[str] = mapped_column(String(8), nullable=False)  # 'buy' or 'sell'
+    quantity: Mapped[float] = mapped_column(Float, nullable=False)
+    price: Mapped[float] = mapped_column(Float, nullable=False)
+    fees: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    executed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    realized_pl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow, nullable=False)
+
+    __table_args__ = (Index("ix_trades_ticker_created", "ticker", "created_at"),)
+
+
 class DailyRecap(Base):
     __tablename__ = "daily_recaps"
 

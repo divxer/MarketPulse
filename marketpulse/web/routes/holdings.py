@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from marketpulse.data.service import DataService
 from marketpulse.db.models import Holding
 from marketpulse.holdings.service import compute_totals, enrich_holdings
+from marketpulse.holdings.trades import total_realized_pl
 from marketpulse.logging import get_logger
 from marketpulse.web.deps import get_data_service, get_db, require_auth
 from marketpulse.web.main import templates
@@ -27,7 +28,13 @@ def holdings_page(
     holdings = db.query(Holding).order_by(Holding.sort_order, Holding.id).all()
     rows = enrich_holdings(holdings, data)
     return templates.TemplateResponse(
-        request, "holdings.html", {"rows": rows, "totals": compute_totals(rows)},
+        request,
+        "holdings.html",
+        {
+            "rows": rows,
+            "totals": compute_totals(rows),
+            "realized_pl": total_realized_pl(db),
+        },
     )
 
 

@@ -1,0 +1,45 @@
+<table class="w-full text-sm">
+  <thead class="text-left text-slate-500">
+    <tr>
+      <th class="px-2 py-1">时间</th>
+      <th>代码</th>
+      <th>动作</th>
+      <th class="text-right">数量</th>
+      <th class="text-right">价格</th>
+      <th class="text-right">手续费</th>
+      <th class="text-right">已实现盈亏</th>
+      <th>备注</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for t in trades %}
+    <tr class="border-t">
+      <td class="px-2 py-1 text-slate-500 text-xs">
+        {{ (t.executed_at or t.created_at).strftime("%Y-%m-%d %H:%M") }}
+      </td>
+      <td><a href="/stock/{{ t.ticker }}" class="font-medium">{{ t.ticker }}</a></td>
+      <td>
+        {% if t.action == "buy" %}
+          <span class="text-blue-600 text-xs">买入</span>
+        {% else %}
+          <span class="text-orange-600 text-xs">卖出</span>
+        {% endif %}
+      </td>
+      <td class="text-right">{{ "%g"|format(t.quantity) }}</td>
+      <td class="text-right">${{ "%.2f"|format(t.price) }}</td>
+      <td class="text-right text-xs text-slate-500">
+        {% if t.fees %}${{ "%.2f"|format(t.fees) }}{% endif %}
+      </td>
+      <td class="text-right {% if t.realized_pl is not none and t.realized_pl >= 0 %}text-green-600{% elif t.realized_pl is not none %}text-red-600{% endif %}">
+        {% if t.realized_pl is not none %}${{ "%+.2f"|format(t.realized_pl) }}{% endif %}
+      </td>
+      <td class="text-xs text-slate-500 max-w-xs truncate">{{ t.notes or "" }}</td>
+    </tr>
+    {% endfor %}
+    {% if not trades %}
+    <tr><td colspan="8" class="px-4 py-8 text-center text-slate-500">
+      暂无交易记录。在上方表单中记录第一笔。
+    </td></tr>
+    {% endif %}
+  </tbody>
+</table>

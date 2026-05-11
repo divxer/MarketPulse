@@ -3,16 +3,24 @@
 <section class="bg-white rounded-md shadow-sm p-4">
   <header class="flex items-center justify-between mb-3">
     <h1 class="font-semibold">持仓</h1>
-    {% if rows %}
-    <div class="text-sm text-slate-600">
-      总成本 <span class="font-semibold text-slate-900">${{ "%.2f"|format(totals.cost) }}</span>
-      ·
-      市值 <span class="font-semibold text-slate-900">${{ "%.2f"|format(totals.market_value) }}</span>
-      ·
-      盈亏
-      <span class="font-semibold {% if totals.pl_dollars >= 0 %}text-green-600{% else %}text-red-600{% endif %}">
-        ${{ "%+.2f"|format(totals.pl_dollars) }} ({{ "%+.2f"|format(totals.pl_pct) }}%)
+    {% if rows or realized_pl %}
+    <div class="text-sm text-slate-600 flex flex-wrap gap-x-3 gap-y-1 items-baseline">
+      {% if rows %}
+      <span>总成本 <span class="font-semibold text-slate-900">${{ "%.2f"|format(totals.cost) }}</span></span>
+      <span>市值 <span class="font-semibold text-slate-900">${{ "%.2f"|format(totals.market_value) }}</span></span>
+      <span>未实现盈亏
+        <span class="font-semibold {% if totals.pl_dollars >= 0 %}text-green-600{% else %}text-red-600{% endif %}">
+          ${{ "%+.2f"|format(totals.pl_dollars) }} ({{ "%+.2f"|format(totals.pl_pct) }}%)
+        </span>
       </span>
+      {% endif %}
+      {% if realized_pl %}
+      <span>已实现盈亏
+        <span class="font-semibold {% if realized_pl >= 0 %}text-green-600{% else %}text-red-600{% endif %}">
+          ${{ "%+.2f"|format(realized_pl) }}
+        </span>
+      </span>
+      {% endif %}
     </div>
     {% endif %}
   </header>

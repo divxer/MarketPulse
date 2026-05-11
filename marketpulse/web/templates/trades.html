@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="bg-white rounded-md shadow-sm p-4">
+  <header class="flex items-center justify-between mb-3">
+    <h1 class="font-semibold">
+      交易记录
+      {% if filter_ticker %}— {{ filter_ticker }}{% endif %}
+    </h1>
+    <div class="text-sm text-slate-600">
+      已实现盈亏
+      <span class="font-semibold {% if realized_pl_total >= 0 %}text-green-600{% else %}text-red-600{% endif %}">
+        ${{ "%+.2f"|format(realized_pl_total) }}
+      </span>
+    </div>
+  </header>
+
+  <form hx-post="/trades" hx-target="#trades-container" hx-swap="innerHTML"
+        hx-on::after-request="if(event.detail.successful) this.reset()"
+        class="grid grid-cols-2 md:grid-cols-7 gap-2 mb-4 text-sm">
+    <input name="ticker" placeholder="代码" required
+           class="border rounded px-3 py-1 uppercase" />
+    <select name="action" required class="border rounded px-3 py-1">
+      <option value="buy">买入</option>
+      <option value="sell">卖出</option>
+    </select>
+    <input name="quantity" type="number" step="any" min="0" placeholder="数量" required
+           class="border rounded px-3 py-1" />
+    <input name="price" type="number" step="any" min="0" placeholder="价格 $" required
+           class="border rounded px-3 py-1" />
+    <input name="fees" type="number" step="any" min="0" placeholder="手续费 $" value="0"
+           class="border rounded px-3 py-1" />
+    <input name="notes" placeholder="备注(可选)"
+           class="border rounded px-3 py-1 col-span-2 md:col-span-1 min-w-0" />
+    <button class="bg-slate-900 text-white px-3 py-1 rounded">记录</button>
+  </form>
+
+  <div id="trades-container">
+    {% include "partials/trades_table.html" %}
+  </div>
+</section>
+{% endblock %}

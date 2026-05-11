@@ -28,6 +28,7 @@ def create_app() -> FastAPI:
         home,
         recap,
         stock,
+        trades,
         watchlist,
     )
     app.include_router(health.router)
@@ -35,6 +36,7 @@ def create_app() -> FastAPI:
     app.include_router(home.router)
     app.include_router(watchlist.router)
     app.include_router(holdings.router)
+    app.include_router(trades.router)
     app.include_router(stock.router)
     app.include_router(recap.router)
 
