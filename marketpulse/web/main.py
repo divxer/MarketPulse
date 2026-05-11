@@ -21,11 +21,14 @@ def create_app() -> FastAPI:
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-    from marketpulse.web.routes import auth, health, home, recap, stock, watchlist  # noqa: WPS433
+    from marketpulse.web.routes import (  # noqa: WPS433
+        auth, health, holdings, home, recap, stock, watchlist,
+    )
     app.include_router(health.router)
     app.include_router(auth.router)
     app.include_router(home.router)
     app.include_router(watchlist.router)
+    app.include_router(holdings.router)
     app.include_router(stock.router)
     app.include_router(recap.router)
 

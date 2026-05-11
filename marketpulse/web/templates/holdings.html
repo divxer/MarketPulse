@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="bg-white rounded-md shadow-sm p-4">
+  <header class="flex items-center justify-between mb-3">
+    <h1 class="font-semibold">持仓</h1>
+    {% if rows %}
+    <div class="text-sm text-slate-600">
+      总成本 <span class="font-semibold text-slate-900">${{ "%.2f"|format(totals.cost) }}</span>
+      ·
+      市值 <span class="font-semibold text-slate-900">${{ "%.2f"|format(totals.market_value) }}</span>
+      ·
+      盈亏
+      <span class="font-semibold {% if totals.pl_dollars >= 0 %}text-green-600{% else %}text-red-600{% endif %}">
+        ${{ "%+.2f"|format(totals.pl_dollars) }} ({{ "%+.2f"|format(totals.pl_pct) }}%)
+      </span>
+    </div>
+    {% endif %}
+  </header>
+
+  <form hx-post="/holdings" hx-target="#holdings-rows" hx-swap="beforeend"
+        hx-on::after-request="if(event.detail.successful) this.reset()"
+        class="flex flex-wrap gap-2 mb-4 items-center text-sm">
+    <input name="ticker" placeholder="代码" required
+           class="border rounded px-3 py-1 uppercase w-24" />
+    <input name="quantity" type="number" step="any" min="0" placeholder="数量" required
+           class="border rounded px-3 py-1 w-24" />
+    <input name="avg_cost" type="number" step="any" min="0" placeholder="均价 $" required
+           class="border rounded px-3 py-1 w-28" />
+    <input name="notes" placeholder="备注(可选)"
+           class="border rounded px-3 py-1 flex-1 min-w-0" />
+    <button class="bg-slate-900 text-white px-3 py-1 rounded">添加</button>
+  </form>
+
+  <table class="w-full text-sm">
+    <thead class="text-left text-slate-500">
+      <tr>
+        <th class="px-2 py-1">代码</th>
+        <th class="text-right">数量</th>
+        <th class="text-right">均价</th>
+        <th class="text-right">现价</th>
+        <th class="text-right">市值</th>
+        <th class="text-right">盈亏</th>
+        <th>备注</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody id="holdings-rows">
+      {% for row in rows %}{% include "partials/holding_row.html" %}{% endfor %}
+      {% if not rows %}
+      <tr><td colspan="8" class="px-4 py-8 text-center text-slate-500">
+        暂无持仓。在上方表单中添加你的第一笔。
+      </td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

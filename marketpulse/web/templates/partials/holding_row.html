@@ -1,0 +1,26 @@
+<tr id="holding-row-{{ row.id }}" class="border-t">
+  <td class="px-2 py-1">
+    <a href="/stock/{{ row.ticker }}" class="font-medium">{{ row.ticker }}</a>
+    {% if row.stale %}<span class="text-amber-600 text-xs ml-1" title="数据来自缓存">⚠</span>{% endif %}
+  </td>
+  <td class="text-right">{{ "%g"|format(row.quantity) }}</td>
+  <td class="text-right">${{ "%.2f"|format(row.avg_cost) }}</td>
+  <td class="text-right">
+    {% if row.current_price is not none %}${{ "%.2f"|format(row.current_price) }}{% else %}—{% endif %}
+  </td>
+  <td class="text-right">
+    {% if row.market_value is not none %}${{ "%.2f"|format(row.market_value) }}{% else %}—{% endif %}
+  </td>
+  <td class="text-right {% if row.pl_dollars is not none and row.pl_dollars >= 0 %}text-green-600{% elif row.pl_dollars is not none %}text-red-600{% endif %}">
+    {% if row.pl_dollars is not none %}
+      ${{ "%+.2f"|format(row.pl_dollars) }} <span class="text-xs">({{ "%+.2f"|format(row.pl_pct) }}%)</span>
+    {% else %}—{% endif %}
+  </td>
+  <td class="text-xs text-slate-500 max-w-xs truncate">{{ row.notes or "" }}</td>
+  <td class="text-right">
+    <button hx-delete="/holdings/{{ row.id }}"
+            hx-target="#holding-row-{{ row.id }}" hx-swap="outerHTML"
+            hx-confirm="删除 {{ row.ticker }} 这笔持仓?"
+            class="text-red-600 text-xs">删除</button>
+  </td>
+</tr>

@@ -84,6 +84,24 @@ def test_watchlist_ticker_unique(db_session: Session) -> None:
         db_session.commit()
 
 
+def test_create_holding(db_session: Session) -> None:
+    from marketpulse.db.models import Holding
+    h = Holding(ticker="NVDA", quantity=10.5, avg_cost=200.0, notes="core")
+    db_session.add(h)
+    db_session.commit()
+    assert h.id is not None
+    assert h.created_at is not None
+
+
+def test_holding_ticker_unique(db_session: Session) -> None:
+    from marketpulse.db.models import Holding
+    db_session.add(Holding(ticker="AAPL", quantity=1, avg_cost=180))
+    db_session.commit()
+    db_session.add(Holding(ticker="AAPL", quantity=2, avg_cost=200))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+
+
 def test_daily_recap_unique_date_collision(db_session: Session) -> None:
     today = datetime(2026, 5, 9).date()
     db_session.add(DailyRecap(recap_date=today, generation_status="pending"))

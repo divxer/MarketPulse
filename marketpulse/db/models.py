@@ -59,6 +59,19 @@ class WatchlistItem(Base):
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
+class Holding(Base):
+    __tablename__ = "holdings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ticker: Mapped[str] = mapped_column(String(16), unique=True, nullable=False)
+    quantity: Mapped[float] = mapped_column(Float, nullable=False)
+    avg_cost: Mapped[float] = mapped_column(Float, nullable=False)
+    opened_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow, nullable=False)
+
+
 class DailyRecap(Base):
     __tablename__ = "daily_recaps"
 
