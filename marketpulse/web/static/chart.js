@@ -12,35 +12,36 @@
     bollinger_lower:   { shape: "square",    color: "#6366f1", text: "下轨" },
   };
 
+  // Holds series handles so toggle checkboxes can flip visibility without redraw.
+  const seriesRefs = { bb_upper: null, bb_lower: null, sma50: null, sma200: null };
+
   function densify(series) {
-    // Drop entries where value is null; lightweight-charts ignores them anyway,
-    // but explicit filtering keeps the API surface small.
     return series.filter(p => p.value !== null && p.value !== undefined);
   }
 
   function renderCharts(payload) {
-    // Clear any previous instances.
-    document.getElementById("chart-main").innerHTML = "";
+    const mainEl = document.getElementById("chart-main");
+    mainEl.innerHTML = "";
     document.getElementById("chart-rsi").innerHTML = "";
     document.getElementById("chart-macd").innerHTML = "";
+    seriesRefs.bb_upper = seriesRefs.bb_lower = seriesRefs.sma50 = seriesRefs.sma200 = null;
 
     if (!payload.bars || payload.bars.length === 0) {
-      document.getElementById("chart-main").innerHTML =
+      mainEl.innerHTML =
         '<p class="text-slate-500 text-sm py-8 text-center">暂无 K 线数据</p>';
       return;
     }
 
     const commonOpts = {
+      autoSize: true,  // resize with the container (mobile-friendly)
       layout: { background: { color: "#ffffff" }, textColor: "#334155" },
       grid: { vertLines: { color: "#e2e8f0" }, horzLines: { color: "#e2e8f0" } },
       timeScale: { borderColor: "#cbd5e1" },
+      crosshair: { mode: 0 },  // magnet mode — snaps to bars
     };
 
     // === Main chart: candles + EMA/SMA + Bollinger + volume ===
-    const mainChart = LightweightCharts.createChart(
-      document.getElementById("chart-main"),
-      Object.assign({ height: 400 }, commonOpts),
-    );
+    const mainChart = LightweightCharts.createChart(mainEl, commonOpts);
     const candleSeries = mainChart.addCandlestickSeries({
       upColor: "#16a34a", downColor: "#dc2626",
       borderVisible: false, wickUpColor: "#16a34a", wickDownColor: "#dc2626",
@@ -49,18 +50,21 @@
 
     function addLineIfData(series, opts) {
       const data = densify(series);
-      if (data.length === 0) return;
+      if (data.length === 0) return null;
       const line = mainChart.addLineSeries(opts);
       line.setData(data);
+      return line;
     }
-    addLineIfData(payload.ema12,    { color: "#0ea5e9", lineWidth: 1, title: "EMA12" });
-    addLineIfData(payload.ema26,    { color: "#f59e0b", lineWidth: 1, title: "EMA26" });
-    addLineIfData(payload.sma50,    { color: "#8b5cf6", lineWidth: 1, title: "SMA50" });
-    addLineIfData(payload.sma200,   { color: "#64748b", lineWidth: 1, title: "SMA200" });
-    addLineIfData(payload.bb_upper, { color: "#a855f7", lineWidth: 1, lineStyle: 2, title: "BB上轨" });
-    addLineIfData(payload.bb_lower, { color: "#a855f7", lineWidth: 1, lineStyle: 2, title: "BB下轨" });
+    addLineIfData(payload.ema12,   { color: "#0ea5e9", lineWidth: 1, title: "EMA12" });
+    addLineIfData(payload.ema26,   { color: "#f59e0b", lineWidth: 1, title: "EMA26" });
+    seriesRefs.sma50    = addLineIfData(payload.sma50,    { color: "#8b5cf6", lineWidth: 1, title: "SMA50" });
+    seriesRefs.sma200   = addLineIfData(payload.sma200,   { color: "#64748b", lineWidth: 1, title: "SMA200" });
+    seriesRefs.bb_upper = addLineIfData(payload.bb_upper, { color: "#a855f7", lineWidth: 1, lineStyle: 2, title: "BB上轨" });
+    seriesRefs.bb_lower = addLineIfData(payload.bb_lower, { color: "#a855f7", lineWidth: 1, lineStyle: 2, title: "BB下轨" });
+    // Apply current toggle state (in case user toggled off before reload)
+    applyToggles();
 
-    // Volume as histogram in a separate overlay pane.
+    // Volume as histogram in an overlay pane at the bottom of the main chart.
     const volSeries = mainChart.addHistogramSeries({
       priceFormat: { type: "volume" },
       priceScaleId: "",
@@ -71,7 +75,6 @@
       color: b.close >= b.open ? "rgba(22,163,74,0.4)" : "rgba(220,38,38,0.4)",
     })));
 
-    // Signal markers on the candle series.
     if (payload.signal_markers && payload.signal_markers.length > 0) {
       const markers = payload.signal_markers.map(m => {
         const style = SIGNAL_STYLES[m.type] || { shape: "circle", color: "#475569", text: m.type };
@@ -85,10 +88,14 @@
 
     // === RSI pane ===
     const rsiData = densify(payload.rsi);
+    let rsiChart = null;
     if (rsiData.length > 0) {
-      const rsiChart = LightweightCharts.createChart(
+      rsiChart = LightweightCharts.createChart(
         document.getElementById("chart-rsi"),
-        Object.assign({ height: 120 }, commonOpts),
+        Object.assign({}, commonOpts, {
+          // Extra top margin so the "75.00" label isn't clipped by the pane edge.
+          rightPriceScale: { scaleMargins: { top: 0.15, bottom: 0.15 } },
+        }),
       );
       const rsiSeries = rsiChart.addLineSeries({ color: "#9333ea", lineWidth: 1 });
       rsiSeries.setData(rsiData);
@@ -96,15 +103,17 @@
       ob.setData(rsiData.map(p => ({ time: p.time, value: 70 })));
       const os = rsiChart.addLineSeries({ color: "#93c5fd", lineWidth: 1, lineStyle: 2 });
       os.setData(rsiData.map(p => ({ time: p.time, value: 30 })));
-      mainChart.timeScale().subscribeVisibleTimeRangeChange(r => r && rsiChart.timeScale().setVisibleRange(r));
     }
 
     // === MACD pane ===
     const macdLine = densify(payload.macd.line);
+    let macdChart = null;
     if (macdLine.length > 0) {
-      const macdChart = LightweightCharts.createChart(
+      macdChart = LightweightCharts.createChart(
         document.getElementById("chart-macd"),
-        Object.assign({ height: 120 }, commonOpts),
+        Object.assign({}, commonOpts, {
+          rightPriceScale: { scaleMargins: { top: 0.15, bottom: 0.15 } },
+        }),
       );
       const line = macdChart.addLineSeries({ color: "#0ea5e9", lineWidth: 1 });
       line.setData(macdLine);
@@ -115,12 +124,29 @@
         time: p.time, value: p.value,
         color: p.value >= 0 ? "rgba(22,163,74,0.6)" : "rgba(220,38,38,0.6)",
       })));
-      mainChart.timeScale().subscribeVisibleTimeRangeChange(r => r && macdChart.timeScale().setVisibleRange(r));
     }
 
-    // Fit all bars to chart width (default barSpacing=6 leaves a 30D window
-    // showing only ~120 px of candles squished to the right).
+    // Sync time scale: main -> RSI/MACD. Also reverse-sync RSI/MACD scrolls back
+    // to main so the user can pan from any pane.
+    const syncPair = (a, b) => {
+      a.timeScale().subscribeVisibleTimeRangeChange(r => {
+        if (!r) return;
+        b.timeScale().setVisibleRange(r);
+      });
+    };
+    if (rsiChart)  { syncPair(mainChart, rsiChart);  syncPair(rsiChart, mainChart); }
+    if (macdChart) { syncPair(mainChart, macdChart); syncPair(macdChart, mainChart); }
+
     mainChart.timeScale().fitContent();
+  }
+
+  function applyToggles() {
+    const bbOn  = document.getElementById("toggle-bb")?.checked  ?? true;
+    const smaOn = document.getElementById("toggle-sma")?.checked ?? true;
+    if (seriesRefs.bb_upper) seriesRefs.bb_upper.applyOptions({ visible: bbOn });
+    if (seriesRefs.bb_lower) seriesRefs.bb_lower.applyOptions({ visible: bbOn });
+    if (seriesRefs.sma50)    seriesRefs.sma50.applyOptions({ visible: smaOn });
+    if (seriesRefs.sma200)   seriesRefs.sma200.applyOptions({ visible: smaOn });
   }
 
   async function load(ticker, period) {
@@ -151,5 +177,8 @@
         load(ticker, currentPeriod);
       });
     });
+
+    document.getElementById("toggle-bb")?.addEventListener("change", applyToggles);
+    document.getElementById("toggle-sma")?.addEventListener("change", applyToggles);
   });
 })();

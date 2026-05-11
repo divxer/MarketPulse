@@ -1,40 +1,141 @@
 {% extends "base.html" %}
 {% block content %}
-<section class="bg-white rounded-md shadow-sm p-4">
-  <header class="flex items-baseline justify-between">
-    <h1 class="text-xl font-semibold">{{ ticker }}</h1>
-    <span class="text-2xl">{{ "%.2f"|format(quote.price) }}
-      <span class="{% if quote.change_pct >= 0 %}text-green-600{% else %}text-red-600{% endif %}">
-        {{ "%+.2f"|format(quote.change_pct) }}%
-      </span>
-    </span>
-  </header>
-  {% if quote.stale %}<p class="text-amber-600 text-xs">⚠ 数据来自缓存(非实时)</p>{% endif %}
+{% set change_amount = quote.price - (quote.price / (1 + quote.change_pct / 100)) if quote.change_pct != -100 else 0 %}
+{% set change_color = "text-green-600" if quote.change_pct >= 0 else "text-red-600" %}
 
-  <div class="flex gap-1 mt-4 text-xs">
+<section class="bg-white rounded-md shadow-sm p-4">
+  <header class="flex flex-wrap items-baseline justify-between gap-3">
+    <div class="flex items-baseline gap-3 flex-wrap">
+      <h1 class="text-xl font-semibold">{{ ticker }}</h1>
+      <span class="text-2xl font-semibold">${{ "%.2f"|format(quote.price) }}</span>
+      <span class="text-sm {{ change_color }}">
+        {{ "%+.2f"|format(change_amount) }} ({{ "%+.2f"|format(quote.change_pct) }}%)
+      </span>
+      {% if quote.stale %}<span class="text-amber-600 text-xs">⚠ 缓存</span>{% endif %}
+    </div>
+    <div class="flex items-center gap-2 text-xs">
+      <form hx-post="/watchlist" hx-target="this" hx-swap="outerHTML" class="inline">
+        <input type="hidden" name="ticker" value="{{ ticker }}" />
+        <button class="px-2 py-1 rounded border border-slate-200 hover:bg-slate-50"
+                {% if in_watchlist %}disabled title="已在自选股"{% endif %}>
+          {% if in_watchlist %}★ 已自选{% else %}☆ 加自选{% endif %}
+        </button>
+      </form>
+      <button type="button" onclick="document.getElementById('record-trade-form').classList.toggle('hidden')"
+              class="px-2 py-1 rounded border border-slate-200 hover:bg-slate-50">📝 记一笔</button>
+      <button hx-post="/stock/{{ ticker }}/analyze" hx-target="#analysis" hx-swap="innerHTML"
+              class="bg-slate-900 text-white px-3 py-1 rounded">🤖 AI 分析</button>
+    </div>
+  </header>
+
+  {% if holding %}
+  {% set market_value = holding.quantity * quote.price %}
+  {% set cost = holding.quantity * holding.avg_cost %}
+  {% set pl_dollars = market_value - cost %}
+  {% set pl_pct = (pl_dollars / cost * 100) if cost else 0 %}
+  <div class="mt-3 px-3 py-2 bg-slate-50 rounded text-sm flex flex-wrap gap-x-4 gap-y-1 items-baseline">
+    <span class="text-slate-500">持仓</span>
+    <span><span class="font-semibold">{{ "%g"|format(holding.quantity) }}</span> 股</span>
+    <span class="text-slate-500">@ 均价</span>
+    <span>${{ "%.2f"|format(holding.avg_cost) }}</span>
+    <span class="text-slate-500">市值</span>
+    <span>${{ "%.2f"|format(market_value) }}</span>
+    <span class="{% if pl_dollars >= 0 %}text-green-600{% else %}text-red-600{% endif %} font-semibold">
+      {{ "%+.2f"|format(pl_dollars) }} ({{ "%+.2f"|format(pl_pct) }}%)
+    </span>
+  </div>
+  {% endif %}
+
+  <form id="record-trade-form" class="hidden mt-3 px-3 py-2 bg-amber-50 rounded text-sm flex flex-wrap gap-2 items-center"
+        hx-post="/trades" hx-target="#record-trade-msg" hx-swap="innerHTML"
+        hx-on::after-request="if(event.detail.successful) { this.querySelector('[name=quantity]').value=''; }">
+    <input type="hidden" name="ticker" value="{{ ticker }}" />
+    <select name="action" class="border rounded px-2 py-1">
+      <option value="buy">买入</option>
+      <option value="sell">卖出</option>
+    </select>
+    <input name="quantity" type="number" step="any" min="0" placeholder="数量" required
+           class="border rounded px-2 py-1 w-24" />
+    <input name="price" type="number" step="any" min="0" placeholder="价格 $" required
+           value="{{ "%.2f"|format(quote.price) }}" class="border rounded px-2 py-1 w-24" />
+    <input name="executed_at" type="date" class="border rounded px-2 py-1" />
+    <button class="bg-slate-900 text-white px-3 py-1 rounded">提交</button>
+    <span id="record-trade-msg" class="text-xs text-slate-500"></span>
+  </form>
+
+  <div class="flex flex-wrap gap-1 mt-4 text-xs items-center">
     <button data-period="30d" class="px-2 py-1 rounded border border-slate-200">30D</button>
     <button data-period="60d" class="px-2 py-1 rounded border border-slate-200 bg-slate-900 text-white">60D</button>
     <button data-period="6m"  class="px-2 py-1 rounded border border-slate-200">6M</button>
     <button data-period="1y"  class="px-2 py-1 rounded border border-slate-200">1Y</button>
+    <span class="ml-3 text-slate-500 flex items-center gap-2">
+      <label class="cursor-pointer"><input type="checkbox" id="toggle-bb" checked /> 布林带</label>
+      <label class="cursor-pointer"><input type="checkbox" id="toggle-sma" checked /> SMA50/200</label>
+    </span>
   </div>
 
-  <div id="chart-main"  data-ticker="{{ ticker }}" class="mt-2"></div>
-  <div id="chart-rsi"   class="mt-2"></div>
-  <div id="chart-macd"  class="mt-2"></div>
+  <div class="relative mt-2">
+    <div id="chart-main" data-ticker="{{ ticker }}" class="chart-pane chart-main"></div>
+  </div>
+  <div class="relative mt-2">
+    <span class="absolute top-1 left-2 text-xs font-medium text-slate-500 z-10 pointer-events-none">RSI(14)</span>
+    <div id="chart-rsi" class="chart-pane chart-rsi"></div>
+  </div>
+  <div class="relative mt-2">
+    <span class="absolute top-1 left-2 text-xs font-medium text-slate-500 z-10 pointer-events-none">MACD(12,26,9)</span>
+    <div id="chart-macd" class="chart-pane chart-macd"></div>
+  </div>
 
-  <h2 class="mt-6 font-semibold">最新新闻</h2>
+  {% if recent_trades %}
+  <h2 class="mt-6 font-semibold flex items-center gap-2 text-sm">
+    最近交易 <a href="/trades?ticker={{ ticker }}" class="text-slate-500 text-xs hover:underline">全部 →</a>
+  </h2>
+  <table class="mt-2 text-sm w-full">
+    <tbody>
+    {% for t in recent_trades %}
+      <tr class="border-t">
+        <td class="py-1 text-slate-500 text-xs w-28">
+          {{ (t.executed_at or t.created_at).strftime("%Y-%m-%d") }}
+        </td>
+        <td class="py-1 w-16">
+          {% if t.action == "buy" %}<span class="text-blue-600 text-xs">买入</span>
+          {% else %}<span class="text-orange-600 text-xs">卖出</span>{% endif %}
+        </td>
+        <td class="py-1 text-right w-20">{{ "%g"|format(t.quantity) }}</td>
+        <td class="py-1 text-right w-24">${{ "%.2f"|format(t.price) }}</td>
+        <td class="py-1 text-right text-xs {% if t.realized_pl is not none and t.realized_pl >= 0 %}text-green-600{% elif t.realized_pl is not none %}text-red-600{% endif %}">
+          {% if t.realized_pl is not none %}{{ "%+.2f"|format(t.realized_pl) }}{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  <h2 class="mt-6 font-semibold text-sm">最新新闻</h2>
   <ul class="mt-2 text-sm space-y-1">
     {% for n in news %}
     <li><a href="{{ n.url }}" class="text-blue-600">{{ n.headline }}</a>
         <span class="text-slate-500">— {{ n.source }}</span></li>
+    {% else %}
+    <li class="text-slate-500 text-xs">暂无新闻(yfinance 限流时常见,几小时后会恢复)</li>
     {% endfor %}
   </ul>
 
-  <div id="analysis" class="mt-6">
-    <button hx-post="/stock/{{ ticker }}/analyze" hx-target="#analysis" hx-swap="innerHTML"
-            class="bg-slate-900 text-white px-3 py-1 rounded">AI 深度分析</button>
-  </div>
+  <div id="analysis" class="mt-6"></div>
 </section>
+
+<style>
+  .chart-pane { width: 100%; }
+  .chart-main { height: 400px; }
+  .chart-rsi  { height: 140px; }
+  .chart-macd { height: 140px; }
+  @media (max-width: 640px) {
+    .chart-main { height: 280px; }
+    .chart-rsi  { height: 100px; }
+    .chart-macd { height: 100px; }
+  }
+</style>
 
 <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"></script>
 <script src="/static/chart.js"></script>

@@ -49,6 +49,52 @@ def test_stock_page(client: TestClient, monkeypatch) -> None:
         client.app.dependency_overrides.clear()
 
 
+def test_stock_page_shows_holding_strip_when_position_exists(client: TestClient, monkeypatch) -> None:
+    """When the user holds the ticker, /stock shows current shares + avg cost + live P&L."""
+    _login(client, monkeypatch)
+    from marketpulse.web.deps import get_data_service
+    client.app.dependency_overrides[get_data_service] = lambda: _FakeData()
+    try:
+        # Buy 10 @ $200 → holding row exists
+        client.post("/trades", data={
+            "ticker": "AAPL", "action": "buy", "quantity": 10, "price": 200,
+        })
+        res = client.get("/stock/AAPL")
+        assert res.status_code == 200
+        assert "持仓" in res.text
+        assert "10" in res.text  # quantity
+        assert "200.00" in res.text  # avg cost
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_stock_page_shows_in_watchlist_state(client: TestClient, monkeypatch) -> None:
+    _login(client, monkeypatch)
+    from marketpulse.web.deps import get_data_service
+    client.app.dependency_overrides[get_data_service] = lambda: _FakeData()
+    try:
+        client.post("/watchlist", data={"ticker": "AAPL"})
+        res = client.get("/stock/AAPL")
+        assert "已自选" in res.text
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_stock_page_shows_recent_trades(client: TestClient, monkeypatch) -> None:
+    _login(client, monkeypatch)
+    from marketpulse.web.deps import get_data_service
+    client.app.dependency_overrides[get_data_service] = lambda: _FakeData()
+    try:
+        client.post("/trades", data={
+            "ticker": "AAPL", "action": "buy", "quantity": 5, "price": 199.50,
+        })
+        res = client.get("/stock/AAPL")
+        assert "最近交易" in res.text
+        assert "199.50" in res.text
+    finally:
+        client.app.dependency_overrides.clear()
+
+
 def test_stock_analyze(client: TestClient, monkeypatch) -> None:
     _login(client, monkeypatch)
     from marketpulse.web.deps import get_ai_service, get_data_service

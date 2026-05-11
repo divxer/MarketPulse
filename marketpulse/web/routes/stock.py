@@ -2,9 +2,11 @@ from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from sqlalchemy.orm import Session
 
 from marketpulse.ai.service import AiService
 from marketpulse.data.service import DataService
+from marketpulse.db.models import Holding, Trade, WatchlistItem
 from marketpulse.logging import get_logger
 from marketpulse.recap.signals import (
     bollinger_series,
@@ -14,7 +16,12 @@ from marketpulse.recap.signals import (
     scan_signal_markers,
     sma,
 )
-from marketpulse.web.deps import get_ai_service, get_data_service, require_auth
+from marketpulse.web.deps import (
+    get_ai_service,
+    get_data_service,
+    get_db,
+    require_auth,
+)
 from marketpulse.web.main import templates
 
 router = APIRouter()
@@ -29,6 +36,7 @@ def stock_page(
     request: Request,
     ticker: str,
     data: DataService = Depends(get_data_service),
+    db: Session = Depends(get_db),
     _: None = Depends(require_auth),
 ):
     ticker = ticker.upper()
@@ -47,9 +55,29 @@ def stock_page(
     except Exception as exc:
         log.warning("stock_page_news_failed", ticker=ticker, error=str(exc))
         news = []
+
+    holding = db.query(Holding).filter(Holding.ticker == ticker).one_or_none()
+    in_watchlist = db.query(WatchlistItem).filter(
+        WatchlistItem.ticker == ticker,
+    ).one_or_none() is not None
+    recent_trades = (
+        db.query(Trade)
+        .filter(Trade.ticker == ticker)
+        .order_by(Trade.executed_at.desc().nulls_last(), Trade.created_at.desc())
+        .limit(5)
+        .all()
+    )
     return templates.TemplateResponse(
         request, "stock.html",
-        {"ticker": ticker, "quote": quote, "bars": bars, "news": news},
+        {
+            "ticker": ticker,
+            "quote": quote,
+            "bars": bars,
+            "news": news,
+            "holding": holding,
+            "in_watchlist": in_watchlist,
+            "recent_trades": recent_trades,
+        },
     )
 
 
