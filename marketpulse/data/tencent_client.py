@@ -92,10 +92,12 @@ class TencentClient:
     def fetch_history(self, ticker: str, period: str = "60d") -> list[Bar]:
         """Daily OHLCV bars from Tencent's front-adjusted kline endpoint.
 
-        URL: https://web.ifzq.gtimg.cn/appstock/app/usFqKline/get?param=usTICKER,day,,,N,qfq
-        Returns a JSON envelope with data at data.{symbol}.qfqday — an array of
-        [date, open, close, high, low, volume, ...] rows (note close/high/low
-        order, NOT the conventional OHLC). Rows are oldest-first.
+        URL: https://web.ifzq.gtimg.cn/appstock/app/Usfqkline/get?param=usTICKER.<MKT>,day,,,N,qfq
+        The symbol MUST include a market suffix (.OQ Nasdaq, .N NYSE) — without
+        it Tencent returns only the earliest+latest bar (2 rows total). Response:
+        data[<symbol>].day → [[date, open, close, high, low, volume, ...], ...]
+        Note (open, close, high, low) order — NOT conventional OHLC. Rows are
+        oldest-first.
         """
         upper = ticker.strip().upper()
         if upper.startswith("^"):
@@ -108,10 +110,11 @@ class TencentClient:
         cutoff = date.today() - timedelta(days=days)
 
         last_err: Exception | None = None
-        for suffix in _SUFFIXES:
+        # Skip the no-suffix variant — kline endpoint requires a market suffix.
+        for suffix in (".OQ", ".N"):
             symbol = f"us{upper}{suffix}"
             url = (
-                f"https://web.ifzq.gtimg.cn/appstock/app/usFqKline/get"
+                f"https://web.ifzq.gtimg.cn/appstock/app/Usfqkline/get"
                 f"?param={symbol},day,,,{n_rows},qfq"
             )
             try:

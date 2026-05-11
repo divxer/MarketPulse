@@ -78,15 +78,9 @@ def test_fetch_history_parses_kline() -> None:
         [yday, "100.00", "101.50", "102.00", "99.50", "1000000"],
         [today, "101.00", "103.00", "103.50", "100.50", "2000000"],
     ]
-    # First (no suffix) returns empty; .OQ returns data.
+    # .OQ is the first suffix tried — return data.
     respx.get(
-        "https://web.ifzq.gtimg.cn/appstock/app/usFqKline/get",
-        params={"param": "usAAPL,day,,,120,qfq"},
-    ).mock(return_value=httpx.Response(
-        200, text=_json.dumps({"code": 0, "data": {}}),
-    ))
-    respx.get(
-        "https://web.ifzq.gtimg.cn/appstock/app/usFqKline/get",
+        "https://web.ifzq.gtimg.cn/appstock/app/Usfqkline/get",
         params={"param": "usAAPL.OQ,day,,,120,qfq"},
     ).mock(return_value=httpx.Response(
         200, text=_kline_envelope("usAAPL.OQ", rows),
@@ -112,8 +106,8 @@ def test_fetch_history_filters_by_period() -> None:
         # 5 days ago — inside
         [(today - _td(days=5)).isoformat(), "10", "11", "12", "9", "100"],
     ]
-    respx.get("https://web.ifzq.gtimg.cn/appstock/app/usFqKline/get").mock(
-        return_value=httpx.Response(200, text=_kline_envelope("usAAPL", rows)),
+    respx.get("https://web.ifzq.gtimg.cn/appstock/app/Usfqkline/get").mock(
+        return_value=httpx.Response(200, text=_kline_envelope("usAAPL.OQ", rows)),
     )
     bars = TencentClient().fetch_history("AAPL", period="30d")
     assert len(bars) == 1
@@ -127,7 +121,7 @@ def test_fetch_history_rejects_index() -> None:
 
 @respx.mock
 def test_fetch_history_raises_when_all_empty() -> None:
-    respx.get("https://web.ifzq.gtimg.cn/appstock/app/usFqKline/get").mock(
+    respx.get("https://web.ifzq.gtimg.cn/appstock/app/Usfqkline/get").mock(
         return_value=httpx.Response(200, text=_json.dumps({"code": 0, "data": {}})),
     )
     with _pytest.raises(ValueError, match="no Tencent kline"):
@@ -143,8 +137,8 @@ def test_fetch_history_accepts_1y_period() -> None:
          "100.00", "101.00", "102.00", "99.00", "1000"],
         [today.isoformat(), "110.00", "111.00", "112.00", "109.00", "2000"],
     ]
-    respx.get("https://web.ifzq.gtimg.cn/appstock/app/usFqKline/get").mock(
-        return_value=httpx.Response(200, text=_kline_envelope("usAAPL", rows)),
+    respx.get("https://web.ifzq.gtimg.cn/appstock/app/Usfqkline/get").mock(
+        return_value=httpx.Response(200, text=_kline_envelope("usAAPL.OQ", rows)),
     )
     bars = TencentClient().fetch_history("AAPL", period="1y")
     # 300 days ago is inside a 1y (365 day) window → both rows kept
@@ -160,8 +154,8 @@ def test_fetch_history_accepts_6m_period() -> None:
          "100.00", "101.00", "102.00", "99.00", "1000"],
         [today.isoformat(), "110.00", "111.00", "112.00", "109.00", "2000"],
     ]
-    respx.get("https://web.ifzq.gtimg.cn/appstock/app/usFqKline/get").mock(
-        return_value=httpx.Response(200, text=_kline_envelope("usAAPL", rows)),
+    respx.get("https://web.ifzq.gtimg.cn/appstock/app/Usfqkline/get").mock(
+        return_value=httpx.Response(200, text=_kline_envelope("usAAPL.OQ", rows)),
     )
     bars = TencentClient().fetch_history("AAPL", period="6m")
     # 200 days ago is OUTSIDE 6m (180 day) window → only today kept
