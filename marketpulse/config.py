@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     notifier_smtp_password: str = Field("", alias="NOTIFIER_SMTP_PASSWORD")
     notifier_email_from: str = Field("", alias="NOTIFIER_EMAIL_FROM")
     notifier_email_to: str = Field("", alias="NOTIFIER_EMAIL_TO")
+    notifier_recap_enabled: bool = Field(True, alias="NOTIFIER_RECAP_ENABLED")
+    public_base_url: str = Field("", alias="PUBLIC_BASE_URL")
 
     # Alert debounce: don't re-fire the same rule within this many minutes
     alert_debounce_minutes: int = Field(60, alias="ALERT_DEBOUNCE_MINUTES", ge=0)

@@ -46,6 +46,8 @@ services:
       NOTIFIER_SMTP_PASSWORD: ${NOTIFIER_SMTP_PASSWORD:-}
       NOTIFIER_EMAIL_FROM: ${NOTIFIER_EMAIL_FROM:-}
       NOTIFIER_EMAIL_TO: ${NOTIFIER_EMAIL_TO:-}
+      NOTIFIER_RECAP_ENABLED: ${NOTIFIER_RECAP_ENABLED:-true}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
       ALERT_DEBOUNCE_MINUTES: ${ALERT_DEBOUNCE_MINUTES:-60}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
