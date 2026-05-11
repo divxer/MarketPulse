@@ -21,10 +21,19 @@ def stock_page(
     ticker = ticker.upper()
     try:
         quote = data.get_quote(ticker)
-        bars = data.get_history(ticker, period="60d")
-        news = data.get_news(ticker, limit=5)
     except Exception as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    # History and news degrade gracefully — page renders without them on failure.
+    try:
+        bars = data.get_history(ticker, period="60d")
+    except Exception as exc:
+        log.warning("stock_page_history_failed", ticker=ticker, error=str(exc))
+        bars = []
+    try:
+        news = data.get_news(ticker, limit=5)
+    except Exception as exc:
+        log.warning("stock_page_news_failed", ticker=ticker, error=str(exc))
+        news = []
     return templates.TemplateResponse(
         request, "stock.html",
         {"ticker": ticker, "quote": quote, "bars": bars, "news": news},

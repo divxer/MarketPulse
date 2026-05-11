@@ -73,9 +73,15 @@ class DataService:
         cached = self.price_cache.get_range(ticker, start, end)
         if cached and (end - cached[-1].date).days <= 1:
             return cached
-        bars = self.yf.fetch_history(ticker, period=period)
-        self.price_cache.upsert(ticker, bars)
-        return bars
+        try:
+            bars = self.yf.fetch_history(ticker, period=period)
+            self.price_cache.upsert(ticker, bars)
+            return bars
+        except Exception as exc:
+            # On fetch failure (rate limit, etc.), serve any cached bars we have
+            # instead of crashing the page. Empty list is fine — UI hides charts.
+            log.warning("history_fetch_failed", ticker=ticker, error=str(exc))
+            return cached
 
     def get_news(self, ticker: str, limit: int = 10) -> list[NewsItem]:
         try:
