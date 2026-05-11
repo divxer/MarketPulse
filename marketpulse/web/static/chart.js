@@ -36,9 +36,17 @@
       autoSize: true,  // resize with the container (mobile-friendly)
       layout: { background: { color: "#ffffff" }, textColor: "#334155" },
       grid: { vertLines: { color: "#e2e8f0" }, horzLines: { color: "#e2e8f0" } },
-      timeScale: { borderColor: "#cbd5e1" },
+      // rightOffset reserves N empty bars on the right so the price-scale labels
+      // ("BB上轨 10.71" etc.) don't overlap the latest candles.
+      timeScale: { borderColor: "#cbd5e1", rightOffset: 12 },
       crosshair: { mode: 0 },  // magnet mode — snaps to bars
     };
+
+    // Per-series default options: suppress dashed horizontal "last price" guide
+    // lines so overlays don't add additional clutter on the chart body.
+    const lineOpts = (extras) => Object.assign({
+      lineWidth: 1, priceLineVisible: false,
+    }, extras);
 
     // === Main chart: candles + EMA/SMA + Bollinger + volume ===
     const mainChart = LightweightCharts.createChart(mainEl, commonOpts);
@@ -55,20 +63,24 @@
       line.setData(data);
       return line;
     }
-    addLineIfData(payload.ema12,   { color: "#0ea5e9", lineWidth: 1, title: "EMA12" });
-    addLineIfData(payload.ema26,   { color: "#f59e0b", lineWidth: 1, title: "EMA26" });
-    seriesRefs.sma50    = addLineIfData(payload.sma50,    { color: "#8b5cf6", lineWidth: 1, title: "SMA50" });
-    seriesRefs.sma200   = addLineIfData(payload.sma200,   { color: "#64748b", lineWidth: 1, title: "SMA200" });
-    seriesRefs.bb_upper = addLineIfData(payload.bb_upper, { color: "#a855f7", lineWidth: 1, lineStyle: 2, title: "BB上轨" });
-    seriesRefs.bb_lower = addLineIfData(payload.bb_lower, { color: "#a855f7", lineWidth: 1, lineStyle: 2, title: "BB下轨" });
+    addLineIfData(payload.ema12,   lineOpts({ color: "#0ea5e9", title: "EMA12" }));
+    addLineIfData(payload.ema26,   lineOpts({ color: "#f59e0b", title: "EMA26" }));
+    seriesRefs.sma50    = addLineIfData(payload.sma50,    lineOpts({ color: "#8b5cf6", title: "SMA50" }));
+    seriesRefs.sma200   = addLineIfData(payload.sma200,   lineOpts({ color: "#64748b", title: "SMA200" }));
+    seriesRefs.bb_upper = addLineIfData(payload.bb_upper, lineOpts({ color: "#a855f7", lineStyle: 2, title: "BB上轨" }));
+    seriesRefs.bb_lower = addLineIfData(payload.bb_lower, lineOpts({ color: "#a855f7", lineStyle: 2, title: "BB下轨" }));
     // Apply current toggle state (in case user toggled off before reload)
     applyToggles();
 
     // Volume as histogram in an overlay pane at the bottom of the main chart.
+    // lastValueVisible=false hides the giant "13.44M" floating label that
+    // was the worst offender obscuring the latest candles.
     const volSeries = mainChart.addHistogramSeries({
       priceFormat: { type: "volume" },
       priceScaleId: "",
       scaleMargins: { top: 0.85, bottom: 0 },
+      lastValueVisible: false,
+      priceLineVisible: false,
     });
     volSeries.setData(payload.bars.map(b => ({
       time: b.time, value: b.volume,
@@ -97,11 +109,16 @@
           rightPriceScale: { scaleMargins: { top: 0.15, bottom: 0.15 } },
         }),
       );
-      const rsiSeries = rsiChart.addLineSeries({ color: "#9333ea", lineWidth: 1 });
+      const rsiSeries = rsiChart.addLineSeries(lineOpts({ color: "#9333ea" }));
       rsiSeries.setData(rsiData);
-      const ob = rsiChart.addLineSeries({ color: "#fca5a5", lineWidth: 1, lineStyle: 2 });
+      // Reference lines: keep the floating label off (70/30 are static).
+      const ob = rsiChart.addLineSeries(lineOpts({
+        color: "#fca5a5", lineStyle: 2, lastValueVisible: false,
+      }));
       ob.setData(rsiData.map(p => ({ time: p.time, value: 70 })));
-      const os = rsiChart.addLineSeries({ color: "#93c5fd", lineWidth: 1, lineStyle: 2 });
+      const os = rsiChart.addLineSeries(lineOpts({
+        color: "#93c5fd", lineStyle: 2, lastValueVisible: false,
+      }));
       os.setData(rsiData.map(p => ({ time: p.time, value: 30 })));
     }
 
@@ -115,11 +132,13 @@
           rightPriceScale: { scaleMargins: { top: 0.15, bottom: 0.15 } },
         }),
       );
-      const line = macdChart.addLineSeries({ color: "#0ea5e9", lineWidth: 1 });
+      const line = macdChart.addLineSeries(lineOpts({ color: "#0ea5e9" }));
       line.setData(macdLine);
-      const sig = macdChart.addLineSeries({ color: "#f59e0b", lineWidth: 1 });
+      const sig = macdChart.addLineSeries(lineOpts({ color: "#f59e0b" }));
       sig.setData(densify(payload.macd.signal));
-      const hist = macdChart.addHistogramSeries();
+      const hist = macdChart.addHistogramSeries({
+        priceLineVisible: false, lastValueVisible: false,
+      });
       hist.setData(densify(payload.macd.histogram).map(p => ({
         time: p.time, value: p.value,
         color: p.value >= 0 ? "rgba(22,163,74,0.6)" : "rgba(220,38,38,0.6)",
