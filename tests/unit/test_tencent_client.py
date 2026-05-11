@@ -132,3 +132,37 @@ def test_fetch_history_raises_when_all_empty() -> None:
     )
     with _pytest.raises(ValueError, match="no Tencent kline"):
         TencentClient().fetch_history("ZZZZ")
+
+
+@respx.mock
+def test_fetch_history_accepts_1y_period() -> None:
+    today = _date.today()
+    from datetime import timedelta as _td
+    rows = [
+        [(today - _td(days=300)).isoformat(),
+         "100.00", "101.00", "102.00", "99.00", "1000"],
+        [today.isoformat(), "110.00", "111.00", "112.00", "109.00", "2000"],
+    ]
+    respx.get("https://web.ifzq.gtimg.cn/appstock/app/usFqKline/get").mock(
+        return_value=httpx.Response(200, text=_kline_envelope("usAAPL", rows)),
+    )
+    bars = TencentClient().fetch_history("AAPL", period="1y")
+    # 300 days ago is inside a 1y (365 day) window → both rows kept
+    assert len(bars) == 2
+
+
+@respx.mock
+def test_fetch_history_accepts_6m_period() -> None:
+    today = _date.today()
+    from datetime import timedelta as _td
+    rows = [
+        [(today - _td(days=200)).isoformat(),
+         "100.00", "101.00", "102.00", "99.00", "1000"],
+        [today.isoformat(), "110.00", "111.00", "112.00", "109.00", "2000"],
+    ]
+    respx.get("https://web.ifzq.gtimg.cn/appstock/app/usFqKline/get").mock(
+        return_value=httpx.Response(200, text=_kline_envelope("usAAPL", rows)),
+    )
+    bars = TencentClient().fetch_history("AAPL", period="6m")
+    # 200 days ago is OUTSIDE 6m (180 day) window → only today kept
+    assert len(bars) == 1

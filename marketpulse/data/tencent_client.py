@@ -35,6 +35,7 @@ log = get_logger(__name__)
 
 _PARSE_RE = re.compile(r'v_[^=]+="([^"]+)"')
 _SUFFIXES = ("", ".OQ", ".N")
+_PERIOD_DAYS = {"30d": 30, "60d": 60, "6m": 180, "1y": 365}
 
 
 class TencentClient:
@@ -100,7 +101,7 @@ class TencentClient:
         if upper.startswith("^"):
             raise ValueError(f"Tencent kline does not cover index {ticker!r}")
 
-        days = int(period.rstrip("d")) if period.endswith("d") else 60
+        days = _PERIOD_DAYS.get(period, 60)
         # Tencent returns trading days only, but we ask for headroom and trim
         # by calendar date to honor the period boundary.
         n_rows = max(days * 2, 60)

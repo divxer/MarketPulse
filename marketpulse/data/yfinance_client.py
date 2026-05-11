@@ -8,6 +8,13 @@ from marketpulse.logging import get_logger
 
 log = get_logger(__name__)
 
+_YF_PERIOD_MAP = {
+    "30d": "1mo",
+    "60d": "3mo",
+    "6m": "6mo",
+    "1y": "1y",
+}
+
 
 def _is_transient(exc: BaseException) -> bool:
     """Network errors AND yfinance rate-limit messages are worth retrying.
@@ -55,7 +62,8 @@ class YFinanceClient:
 
     @_retry
     def fetch_history(self, ticker: str, period: str = "60d") -> list[Bar]:
-        hist = yf.Ticker(ticker).history(period=period, interval="1d")
+        yf_period = _YF_PERIOD_MAP.get(period, "3mo")
+        hist = yf.Ticker(ticker).history(period=yf_period, interval="1d")
         bars: list[Bar] = []
         for idx, row in hist.iterrows():
             bars.append(
