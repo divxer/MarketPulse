@@ -117,6 +117,10 @@
       })));
       mainChart.timeScale().subscribeVisibleTimeRangeChange(r => r && macdChart.timeScale().setVisibleRange(r));
     }
+
+    // Fit all bars to chart width (default barSpacing=6 leaves a 30D window
+    // showing only ~120 px of candles squished to the right).
+    mainChart.timeScale().fitContent();
   }
 
   async function load(ticker, period) {
