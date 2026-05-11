@@ -33,7 +33,11 @@ class FakeData:
 
 
 class FakeAi:
+    def __init__(self) -> None:
+        self.calls = 0
+
     def daily_commentary(self, *, market_summary, watchlist_perf) -> str:
+        self.calls += 1
         return "All good."
 
 
@@ -106,3 +110,14 @@ def test_failed_rerun_clears_stale_success_data(db_session: Session) -> None:
     assert second.watchlist_performance_json is None
     assert second.market_summary_json is None
     assert second.ai_commentary_text is None
+
+
+def test_empty_watchlist_skips_ai_commentary(db_session: Session) -> None:
+    """No tickers → no AI call (saves tokens). Commentary set to placeholder."""
+    ai = FakeAi()
+    svc = RecapService(db_session, data=FakeData(), ai=ai)
+    result = svc.generate(date(2026, 5, 8))
+    assert result.generation_status == "success"
+    assert ai.calls == 0
+    assert result.ai_commentary_text is not None
+    assert "自选股清单为空" in result.ai_commentary_text

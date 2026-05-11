@@ -75,6 +75,41 @@ def test_analyze_invalidates_on_prompt_version_change(
     assert ai.calls == 2
 
 
+def test_analyze_invalidates_on_model_change(db_session: Session) -> None:
+    ai = FakeAi()
+    svc1 = AiService(db_session, ai_client=ai, data=FakeData(), model="m1", ttl_hours=24)
+    svc1.analyze("NVDA")
+    # New service with a different model — cache row from m1 must not satisfy m2.
+    svc2 = AiService(db_session, ai_client=ai, data=FakeData(), model="m2", ttl_hours=24)
+    res = svc2.analyze("NVDA")
+    assert ai.calls == 2
+    assert res.cached is False
+
+
+def test_analyze_persists_full_input_snapshot(db_session: Session) -> None:
+    import json as _json
+
+    from sqlalchemy import select
+
+    from marketpulse.db.models import AiAnalysis
+
+    svc = AiService(
+        db_session, ai_client=FakeAi(), data=FakeData(), model="m1", ttl_hours=24,
+    )
+    svc.analyze("NVDA")
+    row = db_session.execute(select(AiAnalysis)).scalars().first()
+    assert row is not None
+    snap = _json.loads(row.input_data_json)
+    assert snap["ticker"] == "NVDA"
+    assert snap["quote"]["price"] == 100
+    assert snap["quote"]["change_pct"] == 1
+    assert snap["fundamentals"]["pe_ratio"] == 10
+    assert snap["fundamentals"]["sector"] == "t"
+    assert snap["bars"]["count"] == 1
+    assert len(snap["news"]) == 1
+    assert snap["news"][0]["headline"] == "x"
+
+
 def test_daily_commentary_passthrough(db_session: Session) -> None:
     ai = FakeAi(response="Markets were calm.")
     svc = AiService(db_session, ai_client=ai, data=FakeData(), model="m1", ttl_hours=24)

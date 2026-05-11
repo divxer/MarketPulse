@@ -73,11 +73,42 @@ class AiService:
         system, data = _split_prompt(prompt_text)
         response = self.ai.complete(system=system, user=data)
         now = datetime.now(UTC)
+        input_snapshot = {
+            "ticker": quote.ticker,
+            "quote": {
+                "price": quote.price,
+                "change_pct": quote.change_pct,
+                "volume": quote.volume,
+                "avg_volume_20d": quote.avg_volume_20d,
+                "stale": quote.stale,
+            },
+            "fundamentals": {
+                "market_cap": fundamentals.market_cap,
+                "pe_ratio": fundamentals.pe_ratio,
+                "eps": fundamentals.eps,
+                "sector": fundamentals.sector,
+                "industry": fundamentals.industry,
+            },
+            "bars": {
+                "count": len(bars),
+                "first_date": bars[0].date.isoformat() if bars else None,
+                "last_date": bars[-1].date.isoformat() if bars else None,
+            },
+            "news": [
+                {
+                    "headline": n.headline,
+                    "source": n.source,
+                    "url": n.url,
+                    "published_at": n.published_at.isoformat(),
+                }
+                for n in news
+            ],
+        }
         record = AiAnalysis(
             ticker=ticker,
             model=self.model,
             prompt_version=version,
-            input_data_json=json.dumps({"quote": quote.price, "n_news": len(news)}),
+            input_data_json=json.dumps(input_snapshot, default=str),
             response_markdown=response,
             requested_at=now,
             expires_at=now + timedelta(hours=self.ttl_hours),
@@ -103,9 +134,12 @@ class AiService:
         return self.ai.complete(system=system, user=data)
 
     def _lookup_cache(self, ticker: str, version: str) -> AiAnalysis | None:
+        # Cache scoped to (ticker, model, prompt_version) so switching either
+        # the model or the prompt template invalidates and forces a fresh call.
         stmt = (
             select(AiAnalysis)
             .where(AiAnalysis.ticker == ticker)
+            .where(AiAnalysis.model == self.model)
             .where(AiAnalysis.prompt_version == version)
             .where(AiAnalysis.expires_at > datetime.now(UTC))
             .order_by(AiAnalysis.requested_at.desc())

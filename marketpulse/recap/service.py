@@ -48,13 +48,17 @@ class RecapService:
                 if not row.get("error"):
                     news_summary.append({"ticker": item.ticker, "items": row.pop("news_items", [])})
                 perf.append(row)
-            try:
-                commentary = self.ai.daily_commentary(
-                    market_summary=market_summary, watchlist_perf=perf,
-                )
-            except Exception as exc:
-                log.warning("commentary_failed", error=str(exc))
-                commentary = f"AI commentary unavailable ({exc})."
+            if not perf:
+                log.info("recap_empty_watchlist", date=str(target))
+                commentary = "自选股清单为空,无需生成 AI 点评。"
+            else:
+                try:
+                    commentary = self.ai.daily_commentary(
+                        market_summary=market_summary, watchlist_perf=perf,
+                    )
+                except Exception as exc:
+                    log.warning("commentary_failed", error=str(exc))
+                    commentary = f"AI commentary unavailable ({exc})."
 
             recap.market_summary_json = json.dumps(market_summary)
             recap.watchlist_performance_json = json.dumps(perf)
