@@ -53,13 +53,14 @@ find "$BACKUP_REPO/backups" -type f -name '*.sql.gz' -mtime "+$RETENTION_DAYS" -
 # Drop empty year dirs
 find "$BACKUP_REPO/backups" -type d -empty -delete 2>/dev/null || true
 
-# Commit & push
-if git diff --quiet && git diff --cached --quiet; then
+# Commit & push.
+# Stage first so untracked files are detected; then check if anything is staged.
+git add -A
+if git diff --cached --quiet; then
   log "No changes to commit (same-day re-run?)"
   exit 0
 fi
 
-git add -A
 git commit -m "backup: $today ($size)" --quiet
 git push --quiet
 log "Pushed to remote"
