@@ -103,7 +103,7 @@ def test_recap_push_skipped_when_generation_failed(monkeypatch, fake_recap) -> N
     """No point pushing an empty/error summary — skip when status != 'ok'."""
     fake_recap.generation_status = "failed"
     monkeypatch.setenv("APP_PASSWORD_HASH", "x")
-    monkeypatch.setenv("SESSION_SECRET", "y")
+    monkeypatch.setenv("SESSION_SECRET", "y" * 32)
     monkeypatch.setenv("NOTIFIER_KIND", "bark")
     monkeypatch.setenv("NOTIFIER_BARK_URL", "https://api.day.app/abc")
     monkeypatch.setenv("NOTIFIER_RECAP_ENABLED", "true")
