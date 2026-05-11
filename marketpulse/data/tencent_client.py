@@ -22,12 +22,13 @@ We parse field positions empirically observed (May 2026):
     [32] change percent
 """
 
+import json
 import re
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import httpx
 
-from marketpulse.data.types import Quote
+from marketpulse.data.types import Bar, Quote
 from marketpulse.logging import get_logger
 
 log = get_logger(__name__)
@@ -85,4 +86,80 @@ class TencentClient:
         raise ValueError(
             f"no Tencent quote for {ticker!r} "
             f"(last error: {last_err})" if last_err else f"no Tencent quote for {ticker!r}"
+        )
+
+    def fetch_history(self, ticker: str, period: str = "60d") -> list[Bar]:
+        """Daily OHLCV bars from Tencent's front-adjusted kline endpoint.
+
+        URL: https://web.ifzq.gtimg.cn/appstock/app/usFqKline/get?param=usTICKER,day,,,N,qfq
+        Returns a JSON envelope with data at data.{symbol}.qfqday — an array of
+        [date, open, close, high, low, volume, ...] rows (note close/high/low
+        order, NOT the conventional OHLC). Rows are oldest-first.
+        """
+        upper = ticker.strip().upper()
+        if upper.startswith("^"):
+            raise ValueError(f"Tencent kline does not cover index {ticker!r}")
+
+        days = int(period.rstrip("d")) if period.endswith("d") else 60
+        # Tencent returns trading days only, but we ask for headroom and trim
+        # by calendar date to honor the period boundary.
+        n_rows = max(days * 2, 60)
+        cutoff = date.today() - timedelta(days=days)
+
+        last_err: Exception | None = None
+        for suffix in _SUFFIXES:
+            symbol = f"us{upper}{suffix}"
+            url = (
+                f"https://web.ifzq.gtimg.cn/appstock/app/usFqKline/get"
+                f"?param={symbol},day,,,{n_rows},qfq"
+            )
+            try:
+                resp = httpx.get(url, timeout=10)
+                resp.raise_for_status()
+            except Exception as exc:
+                last_err = exc
+                continue
+
+            try:
+                envelope = json.loads(resp.text)
+            except json.JSONDecodeError as exc:
+                last_err = exc
+                continue
+
+            if envelope.get("code") != 0:
+                continue
+            data = envelope.get("data") or {}
+            sym_block = data.get(symbol) or {}
+            rows = sym_block.get("qfqday") or sym_block.get("day") or []
+            if not rows:
+                continue
+
+            bars: list[Bar] = []
+            for r in rows:
+                if len(r) < 6:
+                    continue
+                try:
+                    d = datetime.strptime(r[0], "%Y-%m-%d").date()
+                except ValueError:
+                    continue
+                if d < cutoff:
+                    continue
+                try:
+                    bars.append(Bar(
+                        date=d,
+                        open=float(r[1]),
+                        close=float(r[2]),
+                        high=float(r[3]),
+                        low=float(r[4]),
+                        volume=int(float(r[5])),
+                    ))
+                except (ValueError, IndexError) as exc:
+                    last_err = exc
+                    continue
+            if bars:
+                return bars
+
+        raise ValueError(
+            f"no Tencent kline for {ticker!r}"
+            + (f" (last error: {last_err})" if last_err else ""),
         )

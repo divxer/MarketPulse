@@ -19,15 +19,26 @@ def _q(ticker: str, price: float) -> Quote:
 
 
 class _FakeTencent:
-    def __init__(self, fail: bool = False) -> None:
+    def __init__(self, fail: bool = False, history_fail: bool = False) -> None:
         self.fail = fail
+        self.history_fail = history_fail
         self.calls = 0
+        self.history_calls = 0
 
     def fetch_quote(self, ticker: str) -> Quote:
         self.calls += 1
         if self.fail:
             raise ValueError("tencent unavailable")
         return _q(ticker, 100.0)
+
+    def fetch_history(self, ticker: str, period: str = "60d") -> list[Bar]:
+        self.history_calls += 1
+        if self.history_fail:
+            raise ValueError("tencent kline unavailable")
+        return [Bar(
+            date=datetime.now(UTC).date(),
+            open=1, high=2, low=0.5, close=1.5, volume=100,
+        )]
 
 
 class _FakeYF:
@@ -87,11 +98,28 @@ def test_no_tencent_means_yfinance_only() -> None:
     assert yf.calls == 1
 
 
-def test_history_news_fundamentals_delegate_to_yfinance() -> None:
+def test_news_fundamentals_delegate_to_yfinance() -> None:
     yf = _FakeYF()
     client = HybridClient(yf, tencent=_FakeTencent())
-    client.fetch_history("AAPL")
     client.fetch_news("AAPL")
     client.fetch_fundamentals("AAPL")
     client.fetch_market_overview()
     # Just verifying these calls succeed and route to yfinance (no Tencent fallback)
+
+
+def test_history_prefers_tencent() -> None:
+    tencent = _FakeTencent()
+    yf = _FakeYF()
+    client = HybridClient(yf, tencent=tencent, prefer_tencent=True)
+    bars = client.fetch_history("AAPL")
+    assert len(bars) == 1
+    assert tencent.history_calls == 1
+
+
+def test_history_falls_back_to_yfinance_on_tencent_failure() -> None:
+    tencent = _FakeTencent(history_fail=True)
+    yf = _FakeYF()
+    client = HybridClient(yf, tencent=tencent, prefer_tencent=True)
+    bars = client.fetch_history("AAPL")
+    assert bars == []  # _FakeYF returns empty
+    assert tencent.history_calls == 1

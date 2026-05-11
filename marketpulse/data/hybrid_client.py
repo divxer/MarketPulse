@@ -22,6 +22,7 @@ log = get_logger(__name__)
 
 class _TencentLike(Protocol):
     def fetch_quote(self, ticker: str) -> Quote: ...
+    def fetch_history(self, ticker: str, period: str = ...) -> list[Bar]: ...
 
 
 class _YFLike(Protocol):
@@ -56,6 +57,14 @@ class HybridClient:
         return self.yf.fetch_quote(ticker)
 
     def fetch_history(self, ticker: str, period: str = "60d") -> list[Bar]:
+        if self.tencent and self.prefer_tencent:
+            try:
+                return self.tencent.fetch_history(ticker, period=period)
+            except Exception as exc:
+                log.info(
+                    "tencent_history_failed_falling_back",
+                    ticker=ticker, error=str(exc),
+                )
         return self.yf.fetch_history(ticker, period=period)
 
     def fetch_news(self, ticker: str, limit: int = 10) -> list[NewsItem]:
