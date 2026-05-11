@@ -97,3 +97,26 @@ def test_recap_push_failure_does_not_propagate(monkeypatch, fake_recap) -> None:
         bn.return_value = MagicMock()
         from marketpulse.scheduler.jobs import run_daily_recap
         run_daily_recap()  # must not raise
+
+
+def test_recap_push_skipped_when_generation_failed(monkeypatch, fake_recap) -> None:
+    """No point pushing an empty/error summary — skip when status != 'ok'."""
+    fake_recap.generation_status = "failed"
+    monkeypatch.setenv("APP_PASSWORD_HASH", "x")
+    monkeypatch.setenv("SESSION_SECRET", "y")
+    monkeypatch.setenv("NOTIFIER_KIND", "bark")
+    monkeypatch.setenv("NOTIFIER_BARK_URL", "https://api.day.app/abc")
+    monkeypatch.setenv("NOTIFIER_RECAP_ENABLED", "true")
+    from marketpulse.config import get_settings
+    get_settings.cache_clear()
+
+    with patch("marketpulse.scheduler.jobs.RecapService") as RS, \
+         patch("marketpulse.scheduler.jobs.push_recap_summary") as push, \
+         patch("marketpulse.scheduler.jobs.build_notifier") as bn, \
+         patch("marketpulse.scheduler.jobs._build_quote_client"), \
+         patch("marketpulse.scheduler.jobs.session_scope"):
+        RS.return_value.generate.return_value = fake_recap
+        bn.return_value = MagicMock()
+        from marketpulse.scheduler.jobs import run_daily_recap
+        run_daily_recap()
+        assert not push.called
