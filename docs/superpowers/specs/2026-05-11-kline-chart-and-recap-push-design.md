@@ -71,6 +71,21 @@ Implementation notes:
 - All indicators computed server-side so the frontend stays library-only (no math).
 - `signal_markers`: re-run the existing `marketpulse.recap.signals` detectors at each bar in the visible period. Emit one marker per bar where a signal first triggers (no repeated markers for consecutive same-signal bars).
 
+  Example output for a ticker that crossed EMA golden cross on 2026-04-20 and hit overbought RSI on 2026-05-01:
+
+  ```json
+  "signal_markers": [
+    {"time": "2026-04-20", "type": "ema_golden_cross",
+     "note": "EMA12 ($12.30) crossed above EMA26 ($12.25)"},
+    {"time": "2026-05-01", "type": "rsi_overbought",
+     "note": "RSI(14) = 72.4 (≥ 70)"}
+  ]
+  ```
+
+  Marker types match the existing `signals.Signal` enum: `ema_golden_cross`, `ema_death_cross`, `rsi_overbought`, `rsi_oversold`, `bollinger_upper`, `bollinger_lower`. Frontend renders each type with a distinct shape/color (triangle up/down, dot).
+
+  Non-trading days (weekends, holidays) produce no bars and no markers. lightweight-charts compacts the time axis automatically — there's no visible gap.
+
 ### Signals module additions
 
 In `marketpulse/recap/signals.py`:
@@ -83,9 +98,10 @@ Both reuse the existing `ema()` helper.
 ### Edge cases
 
 - Both data sources fail → empty `bars` array → frontend shows "暂无 K 线数据" placeholder
-- Ticker has < 200 bars of history → `sma200` entries are `null` → frontend skips that series
+- Ticker has < 200 bars of history → `sma200` entries are `null` → frontend skips that series. Frontend rule: any indicator series where every value is `null` is not added to the chart; series with mixed real/null skip the null entries (lightweight-charts handles this natively when given a sparse array)
 - Index ticker (e.g. `^VIX`) → Tencent kline rejects, HybridClient falls back to yfinance automatically
 - Stale cache (`PriceCache` only has 60 days but user requested 1Y) → triggers fresh fetch from Tencent, upsert into cache for next time
+- Concurrent request load: a 1Y response is ≤50 KB. Endpoint sets `Cache-Control: private, max-age=300` so the browser caches each (ticker, period) pair for 5 minutes — toggling between range buttons doesn't re-hit the backend within that window
 
 ## B. Daily Recap Push
 
@@ -102,7 +118,8 @@ def build_summary(recap: DailyRecap, base_url: str | None = None) -> tuple[str, 
 def push_recap_summary(recap: DailyRecap, notifier: Notifier,
                        base_url: str | None = None) -> bool:
     """Build + send. Returns True on success. Catches all notifier
-       exceptions internally (logs warning)."""
+       exceptions internally (logs warning). Retries once after a 2s
+       wait on transient failure (uses tenacity, already a dep)."""
 ```
 
 ### Summary format
@@ -170,7 +187,11 @@ Both also added to `.env.example`, `docker-compose.prod.yml`, `docker-compose.cn
 - `NOTIFIER_KIND=none` → push silently skipped (NoopNotifier check)
 - Notifier raises → logged as warning, recap row stays committed
 - Same-day double execution (rare) → both pushes go out; user sees an updated message rather than missing one
-- Title or body exceeds channel limits → truncate with `…` and append a "see full recap at <link>"
+- Title or body exceeds channel limits → truncate with `…` and append a "see full recap at <link>". Channel limits used by the truncator:
+  - **Bark**: title 256 chars, body 4096 chars (truncate to 3500 for safety + footer)
+  - **Server酱**: title 32 chars, body 32 KB (rarely an issue)
+  - **SMTP**: no limit (no truncation)
+  The notifier exposes its identity via `notifier.kind`; truncator picks limits from a lookup table.
 
 ## Testing
 
@@ -179,7 +200,7 @@ Both also added to `.env.example`, `docker-compose.prod.yml`, `docker-compose.cn
 | `tests/unit/test_signals.py` (extend) | New `sma()` and `macd()` functions: correctness against hand-computed values, leading-None handling, period > input length |
 | `tests/unit/test_recap_push.py` (new) | `build_summary()` with all section permutations: full recap, missing market data, empty holdings, no AI commentary, no signals, with/without base_url, character-limit truncation |
 | `tests/web/test_stock.py` (extend) | `GET /stock/{ticker}/chart-data` returns expected JSON shape; period parameter is honored; unknown ticker returns reasonable error; empty history returns empty arrays not 500 |
-| `tests/unit/test_scheduler_jobs.py` (extend) | Recap push hook: called when notifier is active; not called when `NOTIFIER_KIND=none`; not called when `NOTIFIER_RECAP_ENABLED=false`; notifier exception does not propagate out of `run_daily_recap` |
+| `tests/unit/test_scheduler_jobs.py` (extend) | Recap push hook: called when notifier is active; not called when `NOTIFIER_KIND=none`; not called when `NOTIFIER_RECAP_ENABLED=false`; notifier exception does not propagate out of `run_daily_recap`; persistent failure (mock raises both attempts) logs warning and recap row is still in DB |
 
 Manual verification post-deploy:
 
@@ -207,8 +228,13 @@ Manual verification post-deploy:
 
 ## Out of Scope
 
+Deferred to v2 (called out in the review):
+
 - Adding MACD signals to the alert engine (just rendered on chart, not used for notifications)
 - Customizable indicator periods (always 12/26/50/200, fixed for v1)
 - Saving user's preferred range across sessions
 - Push channel selection per-message (recap and alerts share the single configured notifier)
-- Intraday / real-time chart updates (page reload to refresh)
+- Intraday / real-time chart updates via WebSocket — current model is page-load refresh only
+- Per-user push preferences and multi-language summary content
+- Escalation/paging on persistent notifier failure (current model: 1 retry then log; investigate via NAS logs if it happens repeatedly)
+- Automated UI / visual-regression tests for chart rendering across screen sizes (manual verification only for v1)
