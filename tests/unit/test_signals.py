@@ -1,7 +1,7 @@
 from datetime import date
 
 from marketpulse.data.types import Bar, Quote
-from marketpulse.recap.signals import detect_signals
+from marketpulse.recap.signals import detect_signals, sma
 
 
 def _bar(d: int, close: float, volume: int = 1_000_000) -> Bar:
@@ -105,3 +105,21 @@ def test_no_advanced_signals_on_flat_series() -> None:
               "RSI_OVERBOUGHT", "RSI_OVERSOLD",
               "BOLLINGER_UPPER", "BOLLINGER_LOWER"):
         assert s not in sigs
+
+
+def test_sma_basic() -> None:
+    # SMA with period=3 over [1,2,3,4,5] → [None, None, 2.0, 3.0, 4.0]
+    out = sma([1.0, 2.0, 3.0, 4.0, 5.0], 3)
+    assert out == [None, None, 2.0, 3.0, 4.0]
+
+
+def test_sma_period_longer_than_input() -> None:
+    assert sma([1.0, 2.0], 5) == [None, None]
+
+
+def test_sma_period_one_returns_input() -> None:
+    assert sma([1.0, 2.0, 3.0], 1) == [1.0, 2.0, 3.0]
+
+
+def test_sma_empty_input() -> None:
+    assert sma([], 5) == []

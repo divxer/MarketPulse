@@ -41,6 +41,20 @@ def _ema(values: list[float], period: int) -> list[float] | None:
     return out
 
 
+def sma(values: list[float], period: int) -> list[float | None]:
+    """Simple moving average. Returns one entry per input position.
+    Positions where the window isn't yet filled (< period values seen)
+    return None, matching the lightweight-charts sparse-series convention.
+    """
+    out: list[float | None] = []
+    for i in range(len(values)):
+        if i + 1 < period:
+            out.append(None)
+        else:
+            out.append(sum(values[i - period + 1 : i + 1]) / period)
+    return out
+
+
 def _ema_cross(bars: list[Bar]) -> str | None:
     """Detect EMA12/EMA26 cross on the latest bar. Returns 'GOLDEN', 'DEATH', or None."""
     if len(bars) < EMA_LONG + 1:
