@@ -1,4 +1,5 @@
 import re
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse
@@ -52,12 +53,28 @@ def trades_add(
     price: float = Form(...),
     fees: float = Form(0.0),
     notes: str = Form(""),
+    executed_at: str = Form(""),
     db: Session = Depends(get_db),
     _: None = Depends(require_auth),
 ):
     normalized = ticker.strip().upper()
     if not _TICKER_RE.match(normalized):
         raise HTTPException(status_code=422, detail="invalid ticker")
+
+    executed_at_dt: datetime | None = None
+    if executed_at.strip():
+        try:
+            # Accept YYYY-MM-DD or full ISO 8601. Naive dates are treated as UTC.
+            s = executed_at.strip()
+            if len(s) == 10:  # YYYY-MM-DD
+                executed_at_dt = datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=UTC)
+            else:
+                executed_at_dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+                if executed_at_dt.tzinfo is None:
+                    executed_at_dt = executed_at_dt.replace(tzinfo=UTC)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"invalid executed_at: {exc}") from exc
+
     try:
         record_trade(
             db,
@@ -66,6 +83,7 @@ def trades_add(
             quantity=quantity,
             price=price,
             fees=fees,
+            executed_at=executed_at_dt,
             notes=notes or None,
         )
     except TradeError as exc:

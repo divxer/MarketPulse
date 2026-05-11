@@ -63,6 +63,26 @@ def test_robinhood_import_skips_duplicates(client: TestClient, monkeypatch):
     assert "0 笔为新交易" in res.text or "0</span> 笔为新交易" in res.text
 
 
+def test_trade_post_accepts_executed_at(client: TestClient, monkeypatch):
+    _login(client, monkeypatch)
+    res = client.post("/trades", data={
+        "ticker": "QUBT", "action": "buy", "quantity": 100, "price": 19.70,
+        "fees": 0, "notes": "historical", "executed_at": "2025-06-17",
+    })
+    assert res.status_code == 200
+    res = client.get("/trades")
+    assert "2025-06-17" in res.text or "06-17" in res.text
+
+
+def test_trade_post_rejects_invalid_executed_at(client: TestClient, monkeypatch):
+    _login(client, monkeypatch)
+    res = client.post("/trades", data={
+        "ticker": "QUBT", "action": "buy", "quantity": 1, "price": 1,
+        "executed_at": "not-a-date",
+    })
+    assert res.status_code == 422
+
+
 def test_robinhood_import_bad_csv_returns_422(client: TestClient, monkeypatch):
     _login(client, monkeypatch)
     res = client.post(
