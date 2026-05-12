@@ -81,18 +81,31 @@ def main() -> int:
                          trade_id=t.id, error=str(exc))
                 skipped += 1
 
+            # Delete the hack Trade even on skip — the proper StockSplit already
+            # exists (this is an idempotent re-run), so the hack row is redundant.
             session.delete(t)
 
         session.commit()
 
+        recompute_errors: list[str] = []
         for ticker in affected_tickers:
-            recompute_ticker(session, ticker)
+            try:
+                recompute_ticker(session, ticker)
+            except Exception as exc:  # noqa: BLE001 — best-effort per ticker
+                recompute_errors.append(f"{ticker}: {exc}")
+                log.exception("split_migration_recompute_failed", ticker=ticker)
 
-        print(f"\n✓ Migrated {migrated} hack rows, skipped {skipped} duplicates.")
+        print(f"\n✓ Migrated {migrated} hack rows, skipped {skipped} duplicates "
+              f"(all {len(hack_rows)} hack Trade rows deleted).")
         if unparsed:
             print(f"⚠️  {len(unparsed)} rows used the default 2.0 ratio because "
                   f"the notes didn't parse. Trade IDs: {unparsed}")
             print("   Review each and POST /splits with the correct ratio if needed.")
+        if recompute_errors:
+            print(f"\n⚠️  recompute_ticker failed for {len(recompute_errors)} ticker(s):")
+            for err in recompute_errors:
+                print(f"   - {err}")
+            print("   These tickers' Holdings may be stale; run recompute manually.")
         return 0
     finally:
         session.close()
