@@ -141,6 +141,7 @@ def test_datetime_roundtrip_preserves_utc(db_session: Session) -> None:
 
 def test_stock_split_model_fields(db_session) -> None:
     from datetime import date
+
     from marketpulse.db.models import StockSplit
 
     s = StockSplit(
@@ -163,7 +164,9 @@ def test_stock_split_model_fields(db_session) -> None:
 
 def test_stock_split_unique_constraint(db_session) -> None:
     from datetime import date
+
     from sqlalchemy.exc import IntegrityError
+
     from marketpulse.db.models import StockSplit
 
     db_session.add(StockSplit(ticker="TQQQ", ex_date=date(2025, 11, 20),

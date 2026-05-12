@@ -167,6 +167,7 @@ def test_detect_corporate_actions_idempotent(monkeypatch) -> None:
     """If a split is already recorded, SplitError is swallowed and we move on."""
     from datetime import date
     from unittest.mock import MagicMock, patch
+
     from marketpulse.holdings.splits import SplitError
 
     monkeypatch.setenv("APP_PASSWORD_HASH", "x")

@@ -100,9 +100,10 @@ def test_total_realized_pl_sums_across_trades(db_session: Session) -> None:
 def test_recompute_applies_forward_split(db_session) -> None:
     """1:2 forward split doubles share count and halves avg cost."""
     from datetime import UTC, date, datetime
+
+    from marketpulse.db.models import Holding
     from marketpulse.holdings.splits import record_split
     from marketpulse.holdings.trades import recompute_ticker
-    from marketpulse.db.models import Holding
 
     record_trade(db_session, ticker="TQQQ", action="buy", quantity=20, price=30,
                  executed_at=datetime(2024, 1, 15, tzinfo=UTC))
@@ -117,9 +118,10 @@ def test_recompute_applies_forward_split(db_session) -> None:
 def test_recompute_applies_reverse_split(db_session) -> None:
     """5:1 reverse split (ratio 0.2) cuts shares to 20%, raises avg cost 5x."""
     from datetime import UTC, date, datetime
+
+    from marketpulse.db.models import Holding
     from marketpulse.holdings.splits import record_split
     from marketpulse.holdings.trades import recompute_ticker
-    from marketpulse.db.models import Holding
 
     record_trade(db_session, ticker="X", action="buy", quantity=100, price=10,
                  executed_at=datetime(2024, 1, 15, tzinfo=UTC))
@@ -134,9 +136,10 @@ def test_recompute_applies_reverse_split(db_session) -> None:
 def test_recompute_applies_consecutive_splits(db_session) -> None:
     """Two splits compound: 1:2 then 1:3 on 10 shares = 60 shares."""
     from datetime import UTC, date, datetime
+
+    from marketpulse.db.models import Holding
     from marketpulse.holdings.splits import record_split
     from marketpulse.holdings.trades import recompute_ticker
-    from marketpulse.db.models import Holding
 
     record_trade(db_session, ticker="X", action="buy", quantity=10, price=60,
                  executed_at=datetime(2024, 1, 15, tzinfo=UTC))
@@ -152,9 +155,10 @@ def test_recompute_applies_consecutive_splits(db_session) -> None:
 def test_same_day_trade_executes_before_split(db_session) -> None:
     """A trade on the same date as the split sorts BEFORE the split."""
     from datetime import UTC, date, datetime
+
+    from marketpulse.db.models import Holding
     from marketpulse.holdings.splits import record_split
     from marketpulse.holdings.trades import recompute_ticker
-    from marketpulse.db.models import Holding
 
     record_trade(db_session, ticker="X", action="buy", quantity=10, price=60,
                  executed_at=datetime(2025, 11, 20, 9, 30, tzinfo=UTC))
@@ -169,6 +173,7 @@ def test_same_day_trade_executes_before_split(db_session) -> None:
 def test_recompute_handles_sell_after_split(db_session) -> None:
     """Sells use POST-split avg_cost when computing realized P&L."""
     from datetime import UTC, date, datetime
+
     from marketpulse.db.models import Trade
     from marketpulse.holdings.splits import record_split
     from marketpulse.holdings.trades import recompute_ticker
@@ -191,6 +196,7 @@ def test_recompute_handles_sell_after_split(db_session) -> None:
 def test_recompute_after_split_delete_restores(db_session) -> None:
     """Delete a split → recompute → state matches as if split never existed."""
     from datetime import UTC, date, datetime
+
     from marketpulse.db.models import Holding
     from marketpulse.holdings.splits import delete_split, record_split
     from marketpulse.holdings.trades import recompute_ticker
@@ -262,6 +268,7 @@ def test_same_day_sell_executes_before_split(db_session) -> None:
 def test_fractional_shares_after_reverse_split_precise(db_session) -> None:
     """7 shares × 0.2 (5:1 reverse) = 1.4 shares; float64 should preserve this."""
     from datetime import UTC, date, datetime
+
     from marketpulse.db.models import Holding
     from marketpulse.holdings.splits import record_split
     from marketpulse.holdings.trades import recompute_ticker
