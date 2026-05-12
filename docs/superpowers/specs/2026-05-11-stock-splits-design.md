@@ -42,8 +42,13 @@ class StockSplit(Base):
 
     __table_args__ = (
         UniqueConstraint("ticker", "ex_date", name="uq_splits_ticker_date"),
+        CheckConstraint("ratio > 0 AND ratio != 1", name="ck_splits_ratio_valid"),
     )
 ```
+
+The CHECK constraint is belt-and-suspenders alongside service-layer
+validation — a ratio of 0 would divide-by-zero in `avg_cost / ratio`, and a
+ratio of 1 is a no-op that shouldn't be in the table.
 
 `ratio` is stored as a single float because real splits are always exact
 integer ratios where float64 has more than enough precision (smallest real
@@ -137,6 +142,7 @@ Scheduled alongside the existing daily recap (16:30 ET, Mon-Fri). Adds a
 
 ```
 POST   /splits             — body: ticker, ex_date, ratio, notes
+                             Validates ratio > 0 and ratio != 1 (HTTP 422 otherwise)
                              Returns: JSON of created row
                              Calls recompute_ticker after insert
 GET    /splits             — Query: ?ticker=X (optional)
@@ -187,10 +193,18 @@ hack_rows = session.query(Trade).filter(
     Trade.notes.like("%拆股%"),
 ).all()
 
+unparsed: list[int] = []  # trade IDs where notes didn't match — flagged for review
+
 for t in hack_rows:
     # Parse ratio from notes (formats seen: "1:2", "1 → 2", "1拆2")
     m = re.search(r"(\d+)\s*[:→拆\-]\s*(\d+)", t.notes)
-    ratio = (int(m.group(2)) / int(m.group(1))) if m else 2.0  # default 1:2
+    if m:
+        ratio = int(m.group(2)) / int(m.group(1))
+    else:
+        ratio = 2.0  # default 1:2
+        unparsed.append(t.id)
+        log.warning("split_migration_fallback", trade_id=t.id,
+                    notes=t.notes, defaulted_ratio=ratio)
 
     try:
         record_split(session, ticker=t.ticker,
@@ -206,10 +220,16 @@ session.commit()
 
 for ticker in {t.ticker for t in hack_rows}:
     recompute_ticker(session, ticker)
+
+if unparsed:
+    print(f"⚠️  {len(unparsed)} hack rows used the default 2.0 ratio "
+          f"because notes didn't parse: trade_ids={unparsed}")
+    print("Review these manually and POST /splits with the correct ratio if wrong.")
 ```
 
 Not run inside alembic — too much potential for ambiguity on rerun. Operator
-runs this once after deploy, then deletes the script from the repo.
+runs this once after deploy, reviews any fallback warnings, then deletes the
+script from the repo.
 
 ## Edge Cases
 
@@ -229,7 +249,7 @@ runs this once after deploy, then deletes the script from the repo.
 | File | Coverage |
 |---|---|
 | `tests/unit/test_splits.py` (new) | `record_split`, `total_split_factor`, ratio bounds (0 < ratio, ratio != 1), uniqueness |
-| `tests/integration/test_trades.py` (extend) | `recompute_ticker` with: 1× forward split, 1× reverse split, 2× consecutive splits, split + delete = restore |
+| `tests/integration/test_trades.py` (extend) | `recompute_ticker` with: 1× forward split, 1× reverse split, 2× consecutive splits, split + delete = restore, fractional-share precision after reverse split |
 | `tests/web/test_splits.py` (new) | POST /splits creates row + triggers recompute; GET filters; DELETE recomputes |
 | `tests/web/test_trades.py` (extend) | /trades timeline shows split events with correct chip; filter strip works |
 | `tests/unit/test_scheduler_jobs.py` (extend) | `detect_corporate_actions`: idempotent re-runs, yfinance failure does not propagate |
@@ -254,6 +274,22 @@ runs this once after deploy, then deletes the script from the repo.
 - `marketpulse/web/templates/trades.html` — type filter strip + form dropdown
 - `marketpulse/web/templates/partials/trades_table.html` — three row shapes
 - `marketpulse/web/main.py` — register splits router
+
+## Future Optimizations
+
+Not needed at current scale (single user, <100 tickers, <1000 trades per
+ticker), but documented so future-us doesn't re-derive:
+
+- **recompute_ticker caching:** For tickers with many splits + thousands of
+  trades, cache a per-ticker `(splits_hash, cumulative_factor)` tuple in
+  Holding so we can skip the full walk when nothing relevant changed.
+- **yfinance concurrency:** `detect_corporate_actions` is currently serial
+  (~10s/ticker). If the universe grows past ~50 tickers, batch with a
+  thread pool (yfinance is I/O-bound) and add exponential-backoff retries
+  for transient HTTP failures.
+- **Broker-reconciled fractional handling:** Real brokers cash out
+  fractional shares after reverse splits. We keep floats; if the user
+  ever syncs with a real brokerage feed, we'll need a reconciliation pass.
 
 ## Out of Scope
 
