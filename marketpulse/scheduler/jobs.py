@@ -161,9 +161,15 @@ def run_detect_corporate_actions() -> None:
                 except SplitError:
                     pass  # already recorded
 
-            # Dividends: only record when shares held on ex_date.
+            # Dividends: only record when shares held the day BEFORE ex_date.
+            # US dividend entitlement = "holder of record at close of T-1",
+            # i.e. you must already own the shares the trading day before
+            # ex-date. Selling ON ex-date does not forfeit the dividend;
+            # buying ON ex-date does not earn it. Pass `ex_date - 1 day` so
+            # same-day trades and same-day splits are correctly excluded
+            # from the qty snapshot.
             for ex_date, per_share in actions.dividends:
-                qty = quantity_as_of(db, t, ex_date)
+                qty = quantity_as_of(db, t, ex_date - timedelta(days=1))
                 if qty <= 0:
                     continue
                 try:

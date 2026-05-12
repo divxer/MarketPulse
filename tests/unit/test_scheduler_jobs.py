@@ -159,7 +159,7 @@ def test_detect_corporate_actions_records_tencent_splits_and_dividends(monkeypat
          patch("marketpulse.scheduler.jobs.record_split") as rs, \
          patch("marketpulse.scheduler.jobs.record_dividend") as rd, \
          patch("marketpulse.scheduler.jobs.quantity_as_of",
-               return_value=20.0), \
+               return_value=20.0) as qa, \
          patch("marketpulse.scheduler.jobs.recompute_ticker") as rc:
         from marketpulse.scheduler.jobs import run_detect_corporate_actions
         run_detect_corporate_actions()
@@ -178,6 +178,11 @@ def test_detect_corporate_actions_records_tencent_splits_and_dividends(monkeypat
     assert dkw["amount_per_share"] == 0.10
     assert dkw["total_amount"] == 2.0  # 20 * 0.10
     assert dkw["source"] == "tencent"
+
+    # quantity_as_of must be invoked with ex_date - 1 day (T-1 holder-of-record),
+    # not the ex_date itself.
+    assert qa.call_args.args[1] == "TQQQ"
+    assert qa.call_args.args[2] == date(2025, 9, 23)
 
     # recompute_ticker called once per ticker with new splits
     assert rc.call_count == 2
