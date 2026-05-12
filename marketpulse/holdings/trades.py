@@ -94,12 +94,20 @@ def record_trade(
 
 
 def recompute_ticker(session: Session, ticker: str) -> None:
-    """Rebuild Holding row + realized_pl values from the full Trade history for ticker.
+    """Rebuild Holding row + realized_pl values from the full Trade + StockSplit
+    history for ticker.
 
-    Used when a trade is deleted: prior buys/sells may have affected the avg_cost basis,
-    so realized P&L on sells needs recomputation. Walks all remaining trades in
-    chronological order and reconstructs Holding state.
+    Walks both timelines merged in chronological order. Splits are anchored to
+    end-of-day so any same-day trade sorts BEFORE the split takes effect, which
+    matches real-world execution (the split is applied at market open of the
+    next session, but ex_date is a date, not a datetime).
+
+    Trade rows are never mutated — only `realized_pl` on sells is recomputed.
     """
+    from datetime import UTC, datetime, time
+
+    from marketpulse.db.models import StockSplit
+
     ticker = ticker.strip().upper()
     trades = (
         session.query(Trade)
@@ -107,19 +115,51 @@ def recompute_ticker(session: Session, ticker: str) -> None:
         .order_by(Trade.executed_at.asc().nulls_last(), Trade.created_at.asc())
         .all()
     )
+    splits = (
+        session.query(StockSplit)
+        .filter(StockSplit.ticker == ticker)
+        .order_by(StockSplit.ex_date.asc())
+        .all()
+    )
+
+    # Normalize event times to datetime so heterogeneous tuple comparison
+    # never raises. Splits anchor at end-of-day (kind=1) so same-day trades
+    # (kind=0) sort first.
+    _EOD = time(23, 59, 59, tzinfo=UTC)
+
+    def _trade_when(t: Trade) -> datetime:
+        if t.executed_at:
+            return t.executed_at
+        return t.created_at
+
+    events: list[tuple[datetime, int, str, object]] = []
+    for t in trades:
+        events.append((_trade_when(t), 0, "trade", t))
+    for s in splits:
+        events.append((datetime.combine(s.ex_date, _EOD), 1, "split", s))
+    events.sort(key=lambda x: (x[0], x[1]))
+
     qty = 0.0
     avg_cost = 0.0
-    for t in trades:
-        if t.action == "buy":
-            new_qty = qty + t.quantity
-            total_cost = qty * avg_cost + t.quantity * t.price + t.fees
-            avg_cost = total_cost / new_qty if new_qty else 0
-            qty = new_qty
-            t.realized_pl = None
-        else:  # sell
-            t.realized_pl = (t.price - avg_cost) * t.quantity - t.fees
-            qty -= t.quantity
-            # avg_cost unchanged on partial sell
+    for _when, _order, kind, evt in events:
+        if kind == "trade":
+            t = evt  # type: ignore[assignment]
+            if t.action == "buy":
+                new_qty = qty + t.quantity
+                total_cost = qty * avg_cost + t.quantity * t.price + t.fees
+                avg_cost = total_cost / new_qty if new_qty else 0
+                qty = new_qty
+                t.realized_pl = None
+            else:  # sell
+                t.realized_pl = (t.price - avg_cost) * t.quantity - t.fees
+                qty -= t.quantity
+                # avg_cost unchanged on partial sell
+        else:  # split
+            s = evt  # type: ignore[assignment]
+            qty = qty * s.ratio
+            # Inverse adjustment keeps total_cost invariant.
+            if s.ratio:
+                avg_cost = avg_cost / s.ratio
 
     holding = session.query(Holding).filter(Holding.ticker == ticker).one_or_none()
     if qty <= _EPSILON:
