@@ -184,11 +184,18 @@
       })));
     }
 
-    // Sync time scale across panes (main ↔ RSI ↔ MACD).
+    // Sync time scale across panes (main ↔ RSI ↔ MACD) via LOGICAL range.
+    // Time-range sync was fragile under setData(prepended): candle.setData
+    // auto-shifts logical range and preserves time range, but line.setData
+    // preserves logical and lets time range shift to older bars — the
+    // mismatch made syncPair propagate a stale time range and snap main
+    // back to the left edge, causing the cascade loop. Logical sync is
+    // correct because withWhitespace() (above) keeps all panes' arrays
+    // the same length, so logical index N means the same bar everywhere.
     const syncPair = (a, b) => {
-      a.timeScale().subscribeVisibleTimeRangeChange(r => {
+      a.timeScale().subscribeVisibleLogicalRangeChange(r => {
         if (!r) return;
-        b.timeScale().setVisibleRange(r);
+        b.timeScale().setVisibleLogicalRange(r);
       });
     };
     if (s.rsiChart)  { syncPair(s.mainChart, s.rsiChart);  syncPair(s.rsiChart, s.mainChart); }
