@@ -338,25 +338,62 @@ Cron schedule unchanged: `CronTrigger(hour=17, minute=0, day_of_week="mon-fri")`
 
 After this PR merges and deploys:
 
-1. Apply Alembic migration 0008. Existing 14 manual TQQQ dividend rows get
+1. **Back up the production DB first.** Step 3 below wipes data; if anything
+   goes sideways we want a quick restore path:
+   ```bash
+   cp data/marketpulse.db data/marketpulse.db.bak-pre-0008
+   ```
+2. Apply Alembic migration 0008. Existing 14 manual TQQQ dividend rows get
    `source="manual"` via `server_default`.
-2. **Wipe the manual dividend rows** so the new auto-detection path can
+3. **Wipe the manual dividend rows** so the new auto-detection path can
    repopulate them from a single trusted source with `quantity_as_of`-computed
    totals:
    ```sql
    DELETE FROM dividends WHERE source = 'manual';
    ```
-3. Trigger the scheduler job manually (or wait for the next 17:00 ET run):
+4. Trigger the scheduler job manually (or wait for the next 17:00 ET run):
    ```bash
    python -c "from marketpulse.scheduler.jobs import run_detect_corporate_actions; \
               run_detect_corporate_actions()"
    ```
-4. Verify on `/trades` that the 14+ TQQQ dividends reappear from Tencent. Spot-check
+5. Verify on `/trades` that the 14+ TQQQ dividends reappear from Tencent. Spot-check
    3-4 ex_dates against the original screenshots — `amount_per_share` should
    match exactly; `total_amount` may differ slightly if the old import used
    a different share-count snapshot.
 
 This is one-time operator work; not codified as a migration script.
+
+**Data quality caveat:** auto-computed `total_amount` is only as accurate as the
+Trade history in the DB. If a ticker's pre-2022 trades were never imported,
+the `quantity_as_of` for old ex_dates may under-report share count and
+therefore under-report the dividend total. The job logs `dividend_recorded`
+with `qty=` so anomalies are visible in structured logs. For tickers with
+known gaps, dropping the auto rows and entering manually via the UI remains
+the escape hatch.
+
+## Future Optimizations
+
+Documented so future-us doesn't re-derive. Not needed at current scale
+(single user, <100 tickers).
+
+- **Parser-failure alerting:** today `log.warning` for unparseable `FHcontent`
+  / `hgcgContent` is silent unless the operator greps logs. A simple counter
+  exposed at `/health` (or a Bark push when the daily rate exceeds N) would
+  catch schema drift in Tencent's payload format early.
+- **Concurrent fetch:** `fetch_corporate_actions` is serial today (~1-2s per
+  ticker including the network round-trip). With >50 tickers, parallelize
+  via a thread pool (the work is I/O-bound; Tencent has no documented rate
+  limit but a small pool — say 4 — is polite).
+- **`quantity_as_of` memoization:** for tickers with many trades+splits, a
+  per-ticker cache keyed by `(events_hash, as_of)` would skip the timeline
+  walk on repeat queries within the same job run. Not measurable today.
+- **Tighter lookback for established tickers:** the 1825-day full pull is
+  cheap when run, but reducing to e.g. 60 days for tickers we've already
+  seen in this DB would cut Tencent payload size ~30×. Trade-off: less
+  resilience to recovering after a long downtime.
+- **Special-dividend / stock-dividend / spinoff parsing:** today these
+  produce log.warning and skip. When we have real examples to test against,
+  extend the parser.
 
 ## Out of Scope
 
