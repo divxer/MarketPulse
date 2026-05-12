@@ -1,6 +1,10 @@
 # K-Line Chart Lazy-Load — Design Spec
 
-**Status:** Approved, ready for implementation plan
+> ⚠️ **SUPERSEDED** by [`2026-05-12-chart-logical-sync-design.md`](2026-05-12-chart-logical-sync-design.md).
+>
+> This spec landed the initial lazy-load feature (PR #12) — backend `/chart-data?before=&count=`, yfinance integration, `window.__mpChartState` — all of which are still correct and in use. But its **frontend trigger** (`range.from < 60`) caused a cascade-fetch loop because `range.from`'s semantic meaning drifts after every `setData` prepend. Five follow-up PRs (#13–#18) chased the symptom without finding the root cause. PR #20 ultimately traced it to the **cross-pane time-range syncPair** firing stale ranges back to the main chart during `setData`; the canonical fix uses logical-range sync with whitespace-filled indicators. Retained for the diagnostic record.
+
+**Status:** Superseded — see canonical spec above
 **Author:** harvey
 **Date:** 2026-05-12
 

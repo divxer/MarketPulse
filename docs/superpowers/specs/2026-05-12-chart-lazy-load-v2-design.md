@@ -1,6 +1,10 @@
 # K-Line Chart Lazy-Load v2 — Design Spec
 
-**Status:** Approved, ready for implementation plan
+> ⚠️ **SUPERSEDED** by [`2026-05-12-chart-logical-sync-design.md`](2026-05-12-chart-logical-sync-design.md).
+>
+> This spec correctly diagnosed that `range.from < 60` was an unstable trigger metric and replaced it with TradingView's official `barsInLogicalRange(range).barsBefore` pattern (PR #19) — the trigger logic in the canonical spec is unchanged from here. But it missed one layer deeper: the cascade loop persisted because the **cross-pane time-range syncPair** propagated stale time ranges from RSI/MACD back to main during `setData`, snapping main's view to the left edge. PR #20 fixed that root cause with logical-range sync + whitespace-filled indicators. Retained for the diagnostic record.
+
+**Status:** Superseded — see canonical spec above
 **Author:** harvey
 **Date:** 2026-05-12
 
