@@ -1,5 +1,5 @@
 import re
-from datetime import UTC, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse
@@ -25,6 +25,65 @@ router = APIRouter()
 log = get_logger(__name__)
 
 _TICKER_RE = re.compile(r"^[A-Z\^][A-Z0-9.\-]{0,15}$")
+
+
+def _parse_executed_at(
+    executed_at: str,
+    tz_offset_minutes: int,
+    original_iso: str = "",
+) -> datetime:
+    """Resolve form `executed_at` to a UTC datetime.
+
+    Priority:
+    1. Preserve-original: if `original_iso` is provided AND its user-local
+       date (per tz_offset_minutes) equals the form's YYYY-MM-DD string,
+       the trade is being edited without a date change — return the
+       original full timestamp byte-for-byte. Sub-second precision intact.
+    2. Blank → datetime.now(UTC).
+    3. YYYY-MM-DD → combine with user's current local clock time → UTC.
+    4. Full ISO 8601 → parse as-is; naive treated as UTC.
+
+    `tz_offset_minutes` follows JS Date.getTimezoneOffset() convention:
+    Beijing (UTC+8) → -480. Formula: utc_naive = local_naive + offset.
+    """
+    s = executed_at.strip()
+    orig = original_iso.strip()
+
+    # Priority 1: preserve-original
+    if orig:
+        try:
+            orig_dt = datetime.fromisoformat(orig.replace("Z", "+00:00"))
+            if orig_dt.tzinfo is None:
+                orig_dt = orig_dt.replace(tzinfo=UTC)
+            orig_local = orig_dt + timedelta(minutes=-tz_offset_minutes)
+            if s and len(s) == 10 and orig_local.date().isoformat() == s:
+                return orig_dt
+        except ValueError:
+            pass  # bad original_iso → fall through to normal parsing
+
+    # Priority 2: blank
+    if not s:
+        return datetime.now(UTC)
+
+    try:
+        # Priority 3: YYYY-MM-DD
+        if len(s) == 10:
+            local_date = date.fromisoformat(s)
+            now_utc_naive = datetime.now(UTC).replace(tzinfo=None)
+            now_local_naive = now_utc_naive + timedelta(minutes=-tz_offset_minutes)
+            local_dt_naive = datetime.combine(local_date, now_local_naive.time())
+            return (
+                local_dt_naive + timedelta(minutes=tz_offset_minutes)
+            ).replace(tzinfo=UTC)
+        # Priority 4: full ISO 8601
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422, detail=f"invalid executed_at: {exc}",
+        ) from exc
 
 
 @router.get("/trades", response_class=HTMLResponse)
@@ -99,6 +158,7 @@ def trades_add(
     fees: float = Form(0.0),
     notes: str = Form(""),
     executed_at: str = Form(""),
+    tz_offset_minutes: int = Form(0),
     db: Session = Depends(get_db),
     _: None = Depends(require_auth),
 ):
@@ -106,25 +166,7 @@ def trades_add(
     if not _TICKER_RE.match(normalized):
         raise HTTPException(status_code=422, detail="invalid ticker")
 
-    # Blank form field → use the current UTC datetime. This preserves
-    # sub-second ordering for same-day trades and keeps newly recorded
-    # trades correctly ordered against future events in the timeline
-    # (a NULL executed_at sorts via datetime.max which is wrong for "now").
-    executed_at_dt: datetime
-    if executed_at.strip():
-        try:
-            # Accept YYYY-MM-DD or full ISO 8601. Naive dates are treated as UTC.
-            s = executed_at.strip()
-            if len(s) == 10:  # YYYY-MM-DD
-                executed_at_dt = datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=UTC)
-            else:
-                executed_at_dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-                if executed_at_dt.tzinfo is None:
-                    executed_at_dt = executed_at_dt.replace(tzinfo=UTC)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=f"invalid executed_at: {exc}") from exc
-    else:
-        executed_at_dt = datetime.now(UTC)
+    executed_at_dt = _parse_executed_at(executed_at, tz_offset_minutes)
 
     try:
         record_trade(
@@ -176,6 +218,8 @@ def trades_update(
     fees: float = Form(0.0),
     notes: str = Form(""),
     executed_at: str = Form(""),
+    tz_offset_minutes: int = Form(0),
+    original_executed_at_iso: str = Form(""),
     db: Session = Depends(get_db),
     _: None = Depends(require_auth),
 ):
@@ -206,23 +250,9 @@ def trades_update(
     if fees < 0:
         raise HTTPException(status_code=422, detail="fees cannot be negative")
 
-    # Same date parsing as trades_add.
-    executed_at_dt: datetime
-    if executed_at.strip():
-        try:
-            s = executed_at.strip()
-            if len(s) == 10:
-                executed_at_dt = datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=UTC)
-            else:
-                executed_at_dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-                if executed_at_dt.tzinfo is None:
-                    executed_at_dt = executed_at_dt.replace(tzinfo=UTC)
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=422, detail=f"invalid executed_at: {exc}",
-            ) from exc
-    else:
-        executed_at_dt = datetime.now(UTC)
+    executed_at_dt = _parse_executed_at(
+        executed_at, tz_offset_minutes, original_executed_at_iso,
+    )
 
     old_ticker = trade.ticker
 
