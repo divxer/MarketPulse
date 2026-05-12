@@ -389,3 +389,104 @@ def test_trades_table_has_edit_button(client: TestClient, monkeypatch):
     assert "exitEditMode" in body, "exitEditMode function missing"
     assert 'id="trade-id-input"' in body, "trade_id input missing"
     assert 'id="cancel-edit-btn"' in body, "cancel button missing"
+
+
+def test_trade_post_with_tz_offset_combines_with_local_now(client: TestClient, monkeypatch):
+    """When tz_offset_minutes is provided and executed_at is YYYY-MM-DD,
+    the stored datetime is (user's chosen date in their TZ) at (current
+    local clock time), converted to UTC."""
+    from datetime import UTC, timedelta
+    _login(client, monkeypatch)
+    tz_offset = -480  # Beijing UTC+8
+    res = client.post("/trades", data={
+        "ticker": "TZA", "action": "buy", "quantity": 1, "price": 10,
+        "fees": 0, "executed_at": "2026-05-12",
+        "tz_offset_minutes": str(tz_offset),
+    })
+    assert res.status_code == 200
+
+    from marketpulse.db import base as db_base
+    from marketpulse.db.models import Trade
+    s = next(db_base.session_scope())
+    t = s.query(Trade).filter(Trade.ticker == "TZA").one()
+    # The stored datetime, when converted back to Beijing local, must land on 2026-05-12.
+    stored = t.executed_at
+    if stored.tzinfo is None:
+        stored = stored.replace(tzinfo=UTC)
+    local_dt = stored - timedelta(minutes=tz_offset)
+    assert local_dt.date().isoformat() == "2026-05-12"
+
+
+def test_trade_post_zero_tz_offset_uses_now_time_of_day(client: TestClient, monkeypatch):
+    """With tz_offset_minutes=0 (UTC client), YYYY-MM-DD picks current UTC
+    time-of-day, NOT the old midnight default."""
+    from datetime import UTC, datetime
+    _login(client, monkeypatch)
+    res = client.post("/trades", data={
+        "ticker": "TZB", "action": "buy", "quantity": 1, "price": 10,
+        "fees": 0, "executed_at": "2026-05-12",
+        "tz_offset_minutes": "0",
+    })
+    assert res.status_code == 200
+
+    from marketpulse.db import base as db_base
+    from marketpulse.db.models import Trade
+    s = next(db_base.session_scope())
+    t = s.query(Trade).filter(Trade.ticker == "TZB").one()
+    assert t.executed_at.year == 2026 and t.executed_at.month == 5 and t.executed_at.day == 12
+    stored = t.executed_at if t.executed_at.tzinfo else t.executed_at.replace(tzinfo=UTC)
+    # Time-of-day should not be exactly 00:00:00 unless the test runs at exactly UTC midnight.
+    # Fall back to "stored time-of-day equals 'now's' time-of-day within the test window".
+    assert stored.time() != datetime.min.time(), (
+        "TZ-aware parsing should use current time-of-day, not arbitrary 00:00"
+    )
+
+
+def test_trade_post_blank_date_unchanged_by_tz_offset(client: TestClient, monkeypatch):
+    """Blank executed_at + any tz_offset → still datetime.now(UTC)."""
+    from datetime import UTC, datetime
+    _login(client, monkeypatch)
+    before = datetime.now(UTC)
+    res = client.post("/trades", data={
+        "ticker": "TZC", "action": "buy", "quantity": 1, "price": 10,
+        "fees": 0, "executed_at": "",
+        "tz_offset_minutes": "-480",
+    })
+    after = datetime.now(UTC)
+    assert res.status_code == 200
+
+    from marketpulse.db import base as db_base
+    from marketpulse.db.models import Trade
+    s = next(db_base.session_scope())
+    t = s.query(Trade).filter(Trade.ticker == "TZC").one()
+    stored = t.executed_at if t.executed_at.tzinfo else t.executed_at.replace(tzinfo=UTC)
+    assert before <= stored <= after
+
+
+def test_trades_update_respects_tz_offset(client: TestClient, monkeypatch):
+    """PUT /trades/{id} with YYYY-MM-DD + tz_offset combines date with current
+    local clock time, same as POST."""
+    from datetime import UTC, timedelta
+    _login(client, monkeypatch)
+    client.post("/trades", data={
+        "ticker": "TZD", "action": "buy", "quantity": 1, "price": 10,
+        "executed_at": "",
+    })
+    from marketpulse.db import base as db_base
+    from marketpulse.db.models import Trade
+    s = next(db_base.session_scope())
+    trade_id = s.query(Trade).filter(Trade.ticker == "TZD").one().id
+
+    tz_offset = -480
+    res = client.put(f"/trades/{trade_id}", data={
+        "ticker": "TZD", "action": "buy", "quantity": 1, "price": 10,
+        "fees": 0, "executed_at": "2026-05-10",
+        "tz_offset_minutes": str(tz_offset),
+    })
+    assert res.status_code == 200
+
+    s2 = next(db_base.session_scope())
+    t = s2.query(Trade).filter(Trade.id == trade_id).one()
+    stored = t.executed_at if t.executed_at.tzinfo else t.executed_at.replace(tzinfo=UTC)
+    local_dt = stored - timedelta(minutes=tz_offset)
+    assert local_dt.date().isoformat() == "2026-05-10"
