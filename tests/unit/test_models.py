@@ -155,6 +155,7 @@ def test_stock_split_model_fields(db_session) -> None:
     db_session.refresh(s)
     assert s.id is not None
     assert s.ticker == "TQQQ"
+    assert s.ex_date == date(2025, 11, 20)
     assert s.ratio == 2.0
     assert s.source == "yfinance"
     assert s.created_at is not None
@@ -173,3 +174,20 @@ def test_stock_split_unique_constraint(db_session) -> None:
     with pytest.raises(IntegrityError):
         db_session.commit()
     db_session.rollback()
+
+
+def test_stock_split_check_constraint_rejects_bad_ratio(db_session) -> None:
+    """The DB-level CHECK constraint rejects ratio=1 (no-op) and ratio<=0."""
+    from datetime import date
+
+    from sqlalchemy.exc import IntegrityError
+
+    from marketpulse.db.models import StockSplit
+
+    for bad in (1.0, 0.0, -0.5):
+        db_session.add(StockSplit(
+            ticker="X", ex_date=date(2025, 1, 1), ratio=bad, source="manual",
+        ))
+        with pytest.raises(IntegrityError):
+            db_session.commit()
+        db_session.rollback()
