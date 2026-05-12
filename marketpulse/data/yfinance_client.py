@@ -1,5 +1,5 @@
 import contextlib
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import yfinance as yf
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
@@ -121,6 +121,27 @@ class YFinanceClient:
                     summary=summary,
                 )
             )
+        return out
+
+    @_retry
+    def fetch_splits(self, ticker: str) -> list[tuple[date, float]]:
+        """Return historical splits for a ticker as (ex_date, ratio) pairs.
+
+        ratio = new_shares / old_shares (forward 1:2 = 2.0, reverse 5:1 = 0.2).
+        Returns an empty list if yfinance has no split history. Network and
+        rate-limit errors propagate through `_retry` and surface to the caller.
+        """
+        s = yf.Ticker(ticker).splits
+        if s is None or s.empty:
+            return []
+        out: list[tuple[date, float]] = []
+        for ts, ratio in s.items():
+            try:
+                d = ts.date()
+            except AttributeError:
+                # Defensive: yfinance has historically returned naive datetimes.
+                d = datetime.fromisoformat(str(ts)).date()
+            out.append((d, float(ratio)))
         return out
 
     @_retry
