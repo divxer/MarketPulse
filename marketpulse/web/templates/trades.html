@@ -53,6 +53,7 @@
     <input name="fees" type="number" step="any" min="0" placeholder="手续费 $" value="0"
            class="border rounded px-3 py-1 trade-field" />
     <input name="executed_at" type="date" title="交易日期 (留空=今天)"
+           data-optional="true"
            class="border rounded px-3 py-1 trade-field" />
 
     <!-- Split-only fields -->
@@ -89,7 +90,10 @@
       let showGroup = tradeFields;
       if (kind === 'split') { action = '/splits'; showGroup = splitFields; }
       else if (kind === 'dividend') { action = '/dividends'; showGroup = dividendFields; }
-      showGroup.forEach(el => { el.classList.remove('hidden'); el.required = true; });
+      showGroup.forEach(el => {
+        el.classList.remove('hidden');
+        if (!el.dataset.optional) el.required = true;
+      });
       form.setAttribute('hx-post', action);
       // For trade kinds we need an `action` form field carrying buy/sell.
       let actionInput = form.querySelector('input[name="action"]');

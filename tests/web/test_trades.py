@@ -264,3 +264,27 @@ def test_trades_form_after_request_resyncs_action(client: TestClient, monkeypatc
     expr = m.group(1)
     assert "this.reset()" in expr
     assert "onEventKindChange" in expr
+
+
+def test_trade_form_executed_at_is_optional(client: TestClient, monkeypatch):
+    """The date input is documented as 'blank = today' and the backend
+    accepts blank. The template must NOT mark it as required via the
+    onEventKindChange JS — it carries data-optional="true" which the JS
+    must skip when setting required."""
+    _login(client, monkeypatch)
+    r = client.get("/trades")
+    assert r.status_code == 200
+    body = r.text
+    # The executed_at input must have data-optional="true".
+    import re
+    m = re.search(
+        r'<input\s+name="executed_at"[^>]*data-optional="true"', body,
+    )
+    assert m is not None, (
+        "executed_at input must have data-optional=\"true\" "
+        "(so onEventKindChange skips required=true on it)"
+    )
+    # The JS function must check dataset.optional before setting required.
+    assert "dataset.optional" in body, (
+        "onEventKindChange must check dataset.optional to honor the flag"
+    )
