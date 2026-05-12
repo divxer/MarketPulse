@@ -258,6 +258,15 @@
       }
       prependChunk(chunk);
       s.oldestLoaded = chunk.bars[0].time;
+      // Hold loadingMore=true across 2 animation frames. setData() inside
+      // prependChunk schedules a deferred range-change to refit to all data,
+      // which fires AFTER this function's finally block under the default
+      // microtask vs rAF ordering. If we cleared loadingMore immediately,
+      // that deferred range-change would re-trigger loadMoreHistory in an
+      // infinite loop. Two frames is enough for lightweight-charts to
+      // settle, plus our explicit setVisibleLogicalRange in prependChunk
+      // wins the final state.
+      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
     } catch (exc) {
       console.warn("lazy-load failed:", exc);
     } finally {
