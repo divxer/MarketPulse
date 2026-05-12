@@ -102,6 +102,42 @@ def dividends_create(
     })
 
 
+@router.get("/dividends")
+def dividends_list(
+    ticker: str | None = None,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_auth),
+):
+    """List all dividends, optionally filtered by ticker. Useful for the
+    import script to check what's already recorded before reposting."""
+    from marketpulse.db.models import Dividend
+    q = db.query(Dividend).order_by(Dividend.ex_date.desc())
+    if ticker:
+        q = q.filter(Dividend.ticker == ticker.upper())
+    rows = q.all()
+    return JSONResponse([
+        {"id": d.id, "ticker": d.ticker, "ex_date": d.ex_date.isoformat(),
+         "amount_per_share": d.amount_per_share, "total_amount": d.total_amount}
+        for d in rows
+    ])
+
+
+@router.delete("/dividends/{div_id}", response_class=HTMLResponse)
+def dividends_delete(
+    div_id: int,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_auth),
+):
+    """Delete a dividend row. Used for cleanup / re-imports."""
+    from marketpulse.db.models import Dividend
+    div = db.query(Dividend).filter(Dividend.id == div_id).one_or_none()
+    if not div:
+        raise HTTPException(status_code=404, detail="dividend not found")
+    db.delete(div)
+    db.commit()
+    return HTMLResponse("")
+
+
 @router.post("/holdings/risk-analysis", response_class=HTMLResponse)
 def holdings_risk_analysis(
     request: Request,
