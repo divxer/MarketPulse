@@ -1,5 +1,8 @@
 # Chart Lazy-Load v2 Implementation Plan
 
+> ⚠️ **SUPERSEDED.** See [`2026-05-12-chart-logical-sync.md`](2026-05-12-chart-logical-sync.md) for the canonical chart sync plan. The `barsBefore` trigger from this plan is retained in the canonical version; the explicit post-prepend shift was kept too. Only the syncPair mechanism and indicator densification were rewritten on top. Retained for historical record.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace `range.from < 60` cascade-prone trigger with TradingView's official `barsInLogicalRange().barsBefore` pattern + explicit visible-range shift after prepend.

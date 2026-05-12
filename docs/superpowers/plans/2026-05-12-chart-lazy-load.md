@@ -1,5 +1,8 @@
 # K-Line Chart Lazy-Load Implementation Plan
 
+> ⚠️ **SUPERSEDED.** See [`2026-05-12-chart-logical-sync.md`](2026-05-12-chart-logical-sync.md) for the canonical chart sync plan. The lazy-load infrastructure built by this plan (backend `/chart-data?before=&count=`, yfinance integration, state machine) is still in use; only the frontend trigger and cross-pane sync logic were rewritten. Retained for historical record.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Mimic TradingView's infinite-scroll behavior — when the user mouse-wheel scrolls toward the left edge of the K-line chart, automatically fetch earlier historical data via yfinance and prepend it to the visible series without jumping the scroll position.
