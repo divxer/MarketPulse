@@ -185,25 +185,18 @@
     if (s.rsiChart)  { syncPair(s.mainChart, s.rsiChart);  syncPair(s.rsiChart, s.mainChart); }
     if (s.macdChart) { syncPair(s.mainChart, s.macdChart); syncPair(s.macdChart, s.mainChart); }
 
-    // Set the initial visible window explicitly instead of fitContent().
-    // fitContent() puts the chart in sticky "auto-fit to all data" mode —
-    // EVERY subsequent setData() (including lazy-load prepends) re-fits
-    // to all data, which sets range.from=0 and re-triggers the lazy-load
-    // subscription. Using setVisibleLogicalRange avoids the sticky mode:
-    // setData on a non-sticky chart preserves the visible TIME range, so
-    // after a prepend the user's view stays anchored on the same bars and
-    // range.from grows naturally (older bars now sit further left in
-    // logical-index space). This is the pattern from TradingView's own
-    // lazy-load example for lightweight-charts.
-    s.mainChart.timeScale().setVisibleLogicalRange({
-      from: 0,
-      to: s.bars.length,
-    });
-
-    // No window-resize listener: `autoSize: true` on the chart options
-    // makes lightweight-charts resize its canvas when the container
-    // resizes, while preserving the visible time range. Bars stretch to
-    // fill the new width automatically.
+    // No fitContent(), no setVisibleLogicalRange — let lightweight-charts
+    // pick the default initial view (shows all initial bars given the
+    // `rightOffset: 12` above). The crucial property we rely on: as long
+    // as fitContent() is NEVER called, every subsequent setData()
+    // preserves the visible TIME range. After a lazy-load prepend the
+    // user's view stays anchored on the same bars, and `range.from` in
+    // logical-index space grows by chunk.bars.length — naturally rising
+    // above the trigger threshold so no feedback loop is possible.
+    //
+    // `autoSize: true` (in commonOpts) handles window/container resizes
+    // by stretching the canvas while preserving the visible time range,
+    // so we don't need ResizeObserver or window.resize listeners.
 
     // Lazy-load trigger: re-fetch older history when scroll nears left edge.
     s.mainChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
