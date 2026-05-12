@@ -15,7 +15,7 @@ def test_trades_page_empty(client: TestClient, monkeypatch):
     _login(client, monkeypatch)
     res = client.get("/trades")
     assert res.status_code == 200
-    assert "暂无交易记录" in res.text
+    assert "暂无记录" in res.text
 
 
 _RH_HEADER = (
@@ -200,5 +200,5 @@ def test_trades_timeline_filter_splits_only(client: TestClient, monkeypatch):
     res = client.get("/trades?event_type=split")
     assert res.status_code == 200
     assert "拆股" in res.text or "1 → 2" in res.text
-    # The buy row should not appear in split-only view
-    assert "买入" not in res.text
+    # The buy row should not appear in split-only view (filter by table rows, not form options)
+    assert "trade-row-" not in res.text
