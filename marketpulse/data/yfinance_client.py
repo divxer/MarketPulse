@@ -87,8 +87,9 @@ class YFinanceClient:
 
         Used by the chart-data endpoint's lazy-load path which needs to fetch
         an arbitrary historical slice (Tencent's Usfqkline only returns the
-        latest N rows). Inclusive of both endpoints. Returns Bars sorted
-        oldest-first; empty list if yfinance has no data in the window.
+        latest N rows). `start` is inclusive, `end` is exclusive (matches
+        yfinance's underlying convention). Returns Bars sorted oldest-first;
+        empty list if yfinance has no data in the window.
         """
         hist = yf.Ticker(ticker).history(start=start, end=end, interval="1d")
         bars: list[Bar] = []
