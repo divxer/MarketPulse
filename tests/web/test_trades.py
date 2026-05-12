@@ -239,3 +239,153 @@ def test_trade_post_blank_executed_at_defaults_to_now(client: TestClient, monkey
     t = s.query(Trade).filter(Trade.ticker == "ABC").one()
     assert t.executed_at is not None
     assert before <= t.executed_at <= after
+
+
+def test_trades_form_after_request_resyncs_action(client: TestClient, monkeypatch):
+    """Regression for the bug where form.reset() after submit left the hidden
+    `action` input at its previous value, causing the next submission to use
+    the stale action even though the visible select showed a different one.
+    The fix is in the template's `hx-on::after-request` attribute, which
+    must call onEventKindChange() after this.reset()."""
+    _login(client, monkeypatch)
+    r = client.get("/trades")
+    assert r.status_code == 200
+    body = r.text
+    # The attribute must include a call back into onEventKindChange after reset
+    # (exitEditMode internally calls form.reset() and onEventKindChange)
+    assert "onEventKindChange" in body
+    # Specifically, the after-request hook must re-sync (the JS function call
+    # must appear inside the hx-on::after-request expression):
+    assert "hx-on::after-request" in body
+    # Crude but effective: the two pieces must be in the same attribute value.
+    import re
+    m = re.search(r'hx-on::after-request="([^"]+)"', body)
+    assert m is not None, "hx-on::after-request attribute missing"
+    expr = m.group(1)
+    assert "exitEditMode" in expr, (
+        "after-request must call exitEditMode (which internally resets and "
+        "re-syncs the hidden action input via onEventKindChange)"
+    )
+
+
+def test_trade_form_executed_at_is_optional(client: TestClient, monkeypatch):
+    """The date input is documented as 'blank = today' and the backend
+    accepts blank. The template must NOT mark it as required via the
+    onEventKindChange JS — it carries data-optional="true" which the JS
+    must skip when setting required."""
+    _login(client, monkeypatch)
+    r = client.get("/trades")
+    assert r.status_code == 200
+    body = r.text
+    # The executed_at input must have data-optional="true".
+    import re
+    m = re.search(
+        r'<input\s+name="executed_at"[^>]*data-optional="true"', body,
+    )
+    assert m is not None, (
+        "executed_at input must have data-optional=\"true\" "
+        "(so onEventKindChange skips required=true on it)"
+    )
+    # The JS function must check dataset.optional before setting required.
+    assert "dataset.optional" in body, (
+        "onEventKindChange must check dataset.optional to honor the flag"
+    )
+
+
+def test_trades_update_basic(client: TestClient, monkeypatch):
+    """Editing a trade updates its fields and recomputes the ticker holding."""
+    _login(client, monkeypatch)
+    # Create a buy
+    r = client.post("/trades", data={
+        "ticker": "AAPL", "action": "buy",
+        "quantity": 10, "price": 100.0, "fees": 0,
+    })
+    assert r.status_code == 200
+    # Look up the trade we just made
+    from marketpulse.db import base as db_base
+    from marketpulse.db.models import Holding, Trade
+    s = next(db_base.session_scope())
+    trade_id = s.query(Trade).filter(Trade.ticker == "AAPL").one().id
+    # Edit it: change price from 100 to 120
+    r = client.put(f"/trades/{trade_id}", data={
+        "ticker": "AAPL", "action": "buy",
+        "quantity": 10, "price": 120.0, "fees": 0,
+    })
+    assert r.status_code == 200
+    # Verify the trade and the holding now reflect the new price
+    s2 = next(db_base.session_scope())
+    t = s2.query(Trade).filter(Trade.id == trade_id).one()
+    assert t.price == 120.0
+    h = s2.query(Holding).filter(Holding.ticker == "AAPL").one()
+    assert h.avg_cost == 120.0  # single buy, avg = price
+
+
+def test_trades_update_404_unknown_id(client: TestClient, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.put("/trades/99999", data={
+        "ticker": "AAPL", "action": "buy", "quantity": 1, "price": 1.0,
+    })
+    assert r.status_code == 404
+
+
+def test_trades_update_invalid_ticker_422(client: TestClient, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.post("/trades", data={
+        "ticker": "AAPL", "action": "buy",
+        "quantity": 1, "price": 100.0,
+    })
+    from marketpulse.db import base as db_base
+    from marketpulse.db.models import Trade
+    s = next(db_base.session_scope())
+    trade_id = s.query(Trade).filter(Trade.ticker == "AAPL").one().id
+    r = client.put(f"/trades/{trade_id}", data={
+        "ticker": "bad ticker with spaces!", "action": "buy",
+        "quantity": 1, "price": 100.0,
+    })
+    assert r.status_code == 422
+
+
+def test_trades_update_ticker_change_recomputes_both(client: TestClient, monkeypatch):
+    """Changing the ticker on an edit must recompute both the old and new
+    ticker holdings."""
+    _login(client, monkeypatch)
+    # Create AAPL buy
+    client.post("/trades", data={
+        "ticker": "AAPL", "action": "buy",
+        "quantity": 5, "price": 100.0,
+    })
+    from marketpulse.db import base as db_base
+    from marketpulse.db.models import Holding, Trade
+    s = next(db_base.session_scope())
+    trade_id = s.query(Trade).filter(Trade.ticker == "AAPL").one().id
+    # Edit: change ticker AAPL → MSFT
+    r = client.put(f"/trades/{trade_id}", data={
+        "ticker": "MSFT", "action": "buy",
+        "quantity": 5, "price": 100.0,
+    })
+    assert r.status_code == 200
+    s2 = next(db_base.session_scope())
+    # AAPL holding gone, MSFT holding present
+    assert s2.query(Holding).filter(Holding.ticker == "AAPL").one_or_none() is None
+    msft = s2.query(Holding).filter(Holding.ticker == "MSFT").one()
+    assert msft.quantity == 5
+
+
+def test_trades_table_has_edit_button(client: TestClient, monkeypatch):
+    """After creating a trade, the rendered timeline must include an Edit
+    button whose onclick payload carries the trade fields."""
+    _login(client, monkeypatch)
+    r = client.post("/trades", data={
+        "ticker": "AAPL", "action": "buy",
+        "quantity": 5, "price": 100.0,
+    })
+    assert r.status_code == 200
+    r = client.get("/trades")
+    assert r.status_code == 200
+    body = r.text
+    assert "loadTradeIntoForm" in body, "Edit button JS call missing"
+    assert "编辑" in body, "Edit button label missing"
+    assert "&quot;ticker&quot;: &quot;AAPL&quot;" in body or '"ticker": "AAPL"' in body
+    assert "exitEditMode" in body, "exitEditMode function missing"
+    assert 'id="trade-id-input"' in body, "trade_id input missing"
+    assert 'id="cancel-edit-btn"' in body, "cancel button missing"

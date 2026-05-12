@@ -32,7 +32,7 @@
   <!-- Type-aware form. JS swaps which fields are visible based on the type select. -->
   <form id="event-form"
         hx-post="/trades" hx-target="#trades-container" hx-swap="innerHTML"
-        hx-on::after-request="if(event.detail.successful) this.reset()"
+        hx-on::after-request="if(event.detail.successful) exitEditMode();"
         class="grid grid-cols-2 md:grid-cols-7 gap-2 mb-4 text-sm">
     <select name="event_kind" id="event-kind"
             onchange="onEventKindChange(this.value)"
@@ -53,6 +53,7 @@
     <input name="fees" type="number" step="any" min="0" placeholder="手续费 $" value="0"
            class="border rounded px-3 py-1 trade-field" />
     <input name="executed_at" type="date" title="交易日期 (留空=今天)"
+           data-optional="true"
            class="border rounded px-3 py-1 trade-field" />
 
     <!-- Split-only fields -->
@@ -69,7 +70,11 @@
 
     <input name="notes" placeholder="备注(可选)"
            class="border rounded px-3 py-1 col-span-2 md:col-span-1 min-w-0" />
-    <button class="bg-slate-900 text-white px-3 py-1 rounded">记录</button>
+    <input type="hidden" name="trade_id" id="trade-id-input" value="" />
+    <button id="submit-btn" type="submit"
+            class="bg-slate-900 text-white px-3 py-1 rounded">记录</button>
+    <button id="cancel-edit-btn" type="button" onclick="exitEditMode()"
+            class="bg-slate-200 text-slate-700 px-3 py-1 rounded hidden">取消编辑</button>
   </form>
 
   <script>
@@ -89,7 +94,10 @@
       let showGroup = tradeFields;
       if (kind === 'split') { action = '/splits'; showGroup = splitFields; }
       else if (kind === 'dividend') { action = '/dividends'; showGroup = dividendFields; }
-      showGroup.forEach(el => { el.classList.remove('hidden'); el.required = true; });
+      showGroup.forEach(el => {
+        el.classList.remove('hidden');
+        if (!el.dataset.optional) el.required = true;
+      });
       form.setAttribute('hx-post', action);
       // For trade kinds we need an `action` form field carrying buy/sell.
       let actionInput = form.querySelector('input[name="action"]');
@@ -107,6 +115,35 @@
     }
     // Initialize on load (default kind is "buy").
     onEventKindChange(document.getElementById('event-kind').value);
+
+    function loadTradeIntoForm(data) {
+      const form = document.getElementById('event-form');
+      form.querySelector('[name="ticker"]').value = data.ticker || '';
+      form.querySelector('[name="quantity"]').value = data.quantity ?? '';
+      form.querySelector('[name="price"]').value = data.price ?? '';
+      form.querySelector('[name="fees"]').value = data.fees ?? 0;
+      form.querySelector('[name="notes"]').value = data.notes || '';
+      form.querySelector('[name="executed_at"]').value = data.executed_at || '';
+      document.getElementById('event-kind').value = data.action;
+      onEventKindChange(data.action);
+      document.getElementById('trade-id-input').value = data.id;
+      form.setAttribute('hx-put', '/trades/' + data.id);
+      form.removeAttribute('hx-post');
+      document.getElementById('submit-btn').textContent = '保存修改';
+      document.getElementById('cancel-edit-btn').classList.remove('hidden');
+      form.scrollIntoView({behavior: 'smooth', block: 'start'});
+    }
+
+    function exitEditMode() {
+      const form = document.getElementById('event-form');
+      form.reset();
+      document.getElementById('trade-id-input').value = '';
+      form.removeAttribute('hx-put');
+      form.setAttribute('hx-post', '/trades');
+      document.getElementById('submit-btn').textContent = '记录';
+      document.getElementById('cancel-edit-btn').classList.add('hidden');
+      onEventKindChange(document.getElementById('event-kind').value);
+    }
   </script>
 
   <div id="trades-container">

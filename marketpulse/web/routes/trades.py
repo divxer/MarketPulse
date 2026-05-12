@@ -165,6 +165,108 @@ def trades_add(
     )
 
 
+@router.put("/trades/{trade_id}", response_class=HTMLResponse)
+def trades_update(
+    request: Request,
+    trade_id: int,
+    ticker: str = Form(...),
+    action: str = Form(...),
+    quantity: float = Form(...),
+    price: float = Form(...),
+    fees: float = Form(0.0),
+    notes: str = Form(""),
+    executed_at: str = Form(""),
+    db: Session = Depends(get_db),
+    _: None = Depends(require_auth),
+):
+    """Edit an existing trade. Mutates the row in place, then runs
+    recompute_ticker for the affected ticker(s) so Holding + realized_pl
+    are rebuilt from the full event history.
+
+    Validation mirrors trades_add (POST). If the ticker changes, both
+    the old and new ticker are recomputed."""
+    trade = db.query(Trade).filter(Trade.id == trade_id).one_or_none()
+    if not trade:
+        raise HTTPException(status_code=404, detail="trade not found")
+
+    normalized = ticker.strip().upper()
+    if not _TICKER_RE.match(normalized):
+        raise HTTPException(status_code=422, detail="invalid ticker")
+
+    action_norm = action.lower().strip()
+    if action_norm not in ("buy", "sell"):
+        raise HTTPException(
+            status_code=422,
+            detail=f"invalid action {action!r}, must be 'buy' or 'sell'",
+        )
+    if quantity <= 0:
+        raise HTTPException(status_code=422, detail="quantity must be positive")
+    if price < 0:
+        raise HTTPException(status_code=422, detail="price cannot be negative")
+    if fees < 0:
+        raise HTTPException(status_code=422, detail="fees cannot be negative")
+
+    # Same date parsing as trades_add.
+    executed_at_dt: datetime
+    if executed_at.strip():
+        try:
+            s = executed_at.strip()
+            if len(s) == 10:
+                executed_at_dt = datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=UTC)
+            else:
+                executed_at_dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+                if executed_at_dt.tzinfo is None:
+                    executed_at_dt = executed_at_dt.replace(tzinfo=UTC)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422, detail=f"invalid executed_at: {exc}",
+            ) from exc
+    else:
+        executed_at_dt = datetime.now(UTC)
+
+    old_ticker = trade.ticker
+
+    trade.ticker = normalized
+    trade.action = action_norm
+    trade.quantity = quantity
+    trade.price = price
+    trade.fees = fees
+    trade.executed_at = executed_at_dt
+    trade.notes = notes or None
+    db.commit()
+
+    # Recompute the old ticker first (so its Holding reflects the removal
+    # of this trade), then the new ticker (to apply the trade there).
+    # When ticker is unchanged, the second call is a no-op (same ticker).
+    recompute_ticker(db, old_ticker)
+    if normalized != old_ticker:
+        recompute_ticker(db, normalized)
+
+    # Re-render the timeline (same logic as trades_add).
+    events: list[dict] = []
+    for t in db.query(Trade).all():
+        when = t.executed_at or t.created_at
+        events.append({"kind": "trade", "when": when, "obj": t})
+    _EOD = time(23, 59, 59, tzinfo=UTC)
+    for sp in db.query(StockSplit).all():
+        events.append({"kind": "split", "when": datetime.combine(sp.ex_date, _EOD), "obj": sp})
+    for d in db.query(Dividend).all():
+        events.append({"kind": "dividend", "when": datetime.combine(d.ex_date, _EOD), "obj": d})
+    events.sort(key=lambda e: e["when"], reverse=True)
+    events = events[:200]
+
+    return templates.TemplateResponse(
+        request,
+        "partials/trades_table.html",
+        {
+            "events": events,
+            "filter_ticker": None,
+            "filter_event_type": None,
+            "realized_pl_total": total_realized_pl(db),
+        },
+    )
+
+
 @router.delete("/trades/{trade_id}", response_class=HTMLResponse)
 def trades_delete(
     trade_id: int,
