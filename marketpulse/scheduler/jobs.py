@@ -1,4 +1,4 @@
-from datetime import date, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -22,6 +22,7 @@ from marketpulse.holdings.trades import recompute_ticker
 from marketpulse.logging import get_logger
 from marketpulse.recap.push import push_recap_summary
 from marketpulse.recap.service import RecapService
+from marketpulse.scheduler.state import record_run_summary
 
 log = get_logger(__name__)
 
@@ -132,6 +133,12 @@ def run_detect_corporate_actions() -> None:
     today = date.today()
     since = today - timedelta(days=1825)  # ~5 years lookback
 
+    # Per-ticker accumulator. Populated as the loop runs; persisted to
+    # AppSetting in `finally` so a mid-run exception still leaves a useful
+    # diagnostic for /health/scheduler.
+    results: list[dict[str, object]] = []
+    started_at = datetime.now(UTC)
+
     gen = session_scope()
     db = next(gen)
     try:
@@ -147,7 +154,15 @@ def run_detect_corporate_actions() -> None:
         for t in tickers:
             actions, src = _fetch_corp_actions(t, tencent, yf_client, since, today)
             if actions is None:
+                results.append({
+                    "ticker": t, "source": "none",
+                    "splits_added": 0, "dividends_added": 0,
+                    "error": "both sources failed",
+                })
                 continue  # both sources logged + failed
+
+            splits_added = 0
+            dividends_added = 0
 
             # Splits: record for all tickers (watchlist-only included).
             for ex_date, ratio in actions.splits:
@@ -157,6 +172,7 @@ def run_detect_corporate_actions() -> None:
                     )
                     log.info("split_recorded", ticker=t,
                              ex_date=str(ex_date), ratio=ratio, source=src)
+                    splits_added += 1
                 except SplitError:
                     pass  # already recorded
 
@@ -181,6 +197,7 @@ def run_detect_corporate_actions() -> None:
                     log.info("dividend_recorded", ticker=t,
                              ex_date=str(ex_date), per_share=per_share,
                              qty=qty, source=src)
+                    dividends_added += 1
                 except DividendError:
                     pass  # already recorded
 
@@ -189,7 +206,27 @@ def run_detect_corporate_actions() -> None:
             # record_trade uses raw arithmetic and would leave the Holding row
             # missing the split multiplication. Cost: one short walk per ticker.
             recompute_ticker(db, t)
+
+            results.append({
+                "ticker": t, "source": src,
+                "splits_added": splits_added,
+                "dividends_added": dividends_added,
+                "error": None,
+            })
     finally:
+        # Best-effort summary write. If even this fails, log it but don't crash
+        # the scheduler — the job's actual work was already committed above.
+        try:
+            record_run_summary(db, {
+                "ran_at": started_at.isoformat(),
+                "finished_at": datetime.now(UTC).isoformat(),
+                "tickers": results,
+                "total_splits": sum(r["splits_added"] for r in results),
+                "total_dividends": sum(r["dividends_added"] for r in results),
+                "total_failures": sum(1 for r in results if r["error"]),
+            })
+        except Exception as exc:  # noqa: BLE001
+            log.warning("scheduler_state_write_failed", error=str(exc))
         db.close()
     log.info("detect_corporate_actions_done")
 
