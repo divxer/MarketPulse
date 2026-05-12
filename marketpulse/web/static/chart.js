@@ -38,7 +38,15 @@
       grid: { vertLines: { color: "#e2e8f0" }, horzLines: { color: "#e2e8f0" } },
       // rightOffset reserves N empty bars on the right so the price-scale labels
       // ("BB上轨 10.71" etc.) don't overlap the latest candles.
-      timeScale: { borderColor: "#cbd5e1", rightOffset: 12 },
+      // fixLeftEdge / fixRightEdge prevent the mouse-wheel/drag from scrolling
+      // past the data on either side — without them, scrolling leaves blank
+      // padding on whichever edge the user pushes past.
+      timeScale: {
+        borderColor: "#cbd5e1",
+        rightOffset: 12,
+        fixLeftEdge: true,
+        fixRightEdge: true,
+      },
       crosshair: { mode: 0 },  // magnet mode — snaps to bars
     };
 
