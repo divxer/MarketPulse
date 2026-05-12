@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from marketpulse.ai.service import AiService
 from marketpulse.data.service import DataService
+from marketpulse.data.yfinance_client import YFinanceClient
 from marketpulse.db.models import Holding, Trade, WatchlistItem
 from marketpulse.logging import get_logger
 from marketpulse.recap.signals import (
@@ -152,7 +153,6 @@ def _chart_data_lazy(ticker: str, before_str: str, count: int) -> JSONResponse:
     fetch_start = before_date - timedelta(days=count + _LOOKBACK_DAYS)
     fetch_end = before_date - timedelta(days=1)  # exclusive of `before`
 
-    from marketpulse.data.yfinance_client import YFinanceClient
     try:
         all_bars = YFinanceClient().fetch_history_range(
             ticker, start=fetch_start, end=fetch_end,
