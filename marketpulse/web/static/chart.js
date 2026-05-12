@@ -198,16 +198,17 @@
     // by stretching the canvas while preserving the visible time range,
     // so we don't need ResizeObserver or window.resize listeners.
 
-    // Lazy-load trigger: re-fetch older history when scroll nears left edge.
+    // Lazy-load trigger: TradingView's official barsInLogicalRange pattern.
+    // barsBefore = count of bars in the dataset earlier than the visible
+    // range. Unlike range.from, this is invariant to prepend — after a
+    // chunk lands, barsBefore grows by chunk.bars.length, so the same
+    // trigger expression stays stable across cascading loads. Threshold
+    // 50 is TradingView's example value; gives the yfinance fetch (~1-3s
+    // through Mihomo) headroom before a fast-scrolling user hits the edge.
     s.mainChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
       if (!range) return;
-      // range.from is the LEFTMOST visible logical index relative to bars[0].
-      // Trigger fetch when leftmost visible bar is within 60 of bars[0] —
-      // gives the yfinance fetch (~1-3s through Mihomo) headroom to land
-      // before a fast-scrolling user hits the edge.
-      if (range.from < 60) {
-        loadMoreHistory();
-      }
+      const info = s.candleSeries.barsInLogicalRange(range);
+      if (info && info.barsBefore < 50) loadMoreHistory();
     });
   }
 
