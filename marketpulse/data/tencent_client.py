@@ -209,9 +209,12 @@ class TencentClient:
 
         start_s = start.strftime("%Y-%m-%d")
         end_s = end.strftime("%Y-%m-%d")
-        # 1825 = ~5 years headroom in trading days; covers the lookback the
-        # scheduler asks for.
-        n_rows = 1825
+        # Tencent's Usfqkline caps requested rows at ~1200 — values past that
+        # return {"code": -1, "msg": "limit error"}. 1200 trading days is
+        # ~4.75 years, plenty for our daily-job lookback. Note: the start/end
+        # date params appear to be decorative; Tencent always returns the
+        # latest N rows regardless of `start`.
+        n_rows = 1200
 
         last_err: Exception | None = None
         # Skip the no-suffix variant — Usfqkline requires a market suffix.
