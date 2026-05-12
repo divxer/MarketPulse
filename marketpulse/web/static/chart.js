@@ -256,17 +256,30 @@
         s.hasMoreHistory = false;
         return;
       }
+      // Capture the user's visible window BEFORE prepend so we can restore
+      // it AFTER the auto-fit dust settles.
+      const prevRange = s.mainChart.timeScale().getVisibleLogicalRange();
       prependChunk(chunk);
       s.oldestLoaded = chunk.bars[0].time;
-      // Hold loadingMore=true across 2 animation frames. setData() inside
-      // prependChunk schedules a deferred range-change to refit to all data,
-      // which fires AFTER this function's finally block under the default
-      // microtask vs rAF ordering. If we cleared loadingMore immediately,
-      // that deferred range-change would re-trigger loadMoreHistory in an
-      // infinite loop. Two frames is enough for lightweight-charts to
-      // settle, plus our explicit setVisibleLogicalRange in prependChunk
-      // wins the final state.
+      // setData() inside prependChunk schedules a deferred auto-fit for the
+      // next animation frame. Wait two frames so the auto-fit fires while
+      // loadingMore is still true (guarded by the early-return at the top of
+      // this function); the loop is then broken.
       await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+      // Now that auto-fit has fired (which forced range.from back to 0),
+      // restore the user's visible window shifted right by the chunk size.
+      // This must happen AFTER the rAF wait, otherwise auto-fit overwrites
+      // our shift. With range.from > 60 the subscription stops triggering;
+      // the user can scroll left again to trigger the next chunk.
+      if (prevRange) {
+        s.mainChart.timeScale().setVisibleLogicalRange({
+          from: prevRange.from + chunk.bars.length,
+          to: prevRange.to + chunk.bars.length,
+        });
+        // One more rAF to absorb the range-change event triggered by our
+        // setVisibleLogicalRange — fires while loadingMore is still true.
+        await new Promise(r => requestAnimationFrame(r));
+      }
     } catch (exc) {
       console.warn("lazy-load failed:", exc);
     } finally {
@@ -277,8 +290,6 @@
 
   function prependChunk(chunk) {
     const s = window.__mpChartState;
-    const prevRange = s.mainChart.timeScale().getVisibleLogicalRange();
-    const shift = chunk.bars.length;
     // Bars: prepend, then setData on candle + volume series.
     s.bars = chunk.bars.concat(s.bars);
     s.candleSeries.setData(s.bars);
@@ -331,18 +342,9 @@
       });
       s.candleSeries.setMarkers(markers);
     }
-
-    // Restore the user's visible window, shifted right by the number of new
-    // bars. Without this, lightweight-charts re-fits the time scale to
-    // include ALL data after setData (because the chart was in fitContent
-    // mode), which sets range.from back to 0 and re-triggers the lazy-load
-    // subscription. Forcing range.from > 60 breaks that feedback loop.
-    if (prevRange) {
-      s.mainChart.timeScale().setVisibleLogicalRange({
-        from: prevRange.from + shift,
-        to: prevRange.to + shift,
-      });
-    }
+    // NOTE: visible-range restoration moved to loadMoreHistory (after rAF
+    // wait) because lightweight-charts' auto-fit fires on the NEXT frame
+    // and overrides any setVisibleLogicalRange called synchronously here.
   }
 
   function showLoadingDot(on) {
