@@ -187,23 +187,29 @@
 
     s.mainChart.timeScale().fitContent();
 
-    // Refit on container resize. autoSize:true resizes the canvas but keeps
-    // the visible time range fixed — so when the user widens the window,
-    // bars stay at their original pixel width and empty space appears on
-    // both sides. Re-fitting on resize stretches the bars to the new width.
-    if (window.ResizeObserver) {
-      // Disconnect any observer from a previous render so we don't accumulate.
-      if (window.__mpChartResizeObserver) {
-        window.__mpChartResizeObserver.disconnect();
-      }
-      const ro = new ResizeObserver(() => {
-        s.mainChart.timeScale().fitContent();
-        if (s.rsiChart)  s.rsiChart.timeScale().fitContent();
-        if (s.macdChart) s.macdChart.timeScale().fitContent();
-      });
-      ro.observe(mainEl);
-      window.__mpChartResizeObserver = ro;
+    // Refit on browser window resize. autoSize:true resizes the canvas but
+    // keeps the visible time range fixed — so when the user widens the
+    // window, bars stay at their original pixel width and empty space
+    // appears on both sides. Re-fitting on resize stretches the bars to
+    // the new width.
+    //
+    // NOTE: we listen to `window.resize` instead of using ResizeObserver
+    // on the chart container because lightweight-charts triggers minor
+    // container-size changes internally (price-scale label width recalc
+    // after setData). ResizeObserver would treat those as resizes and
+    // call fitContent, which combined with the lazy-load trigger below
+    // would form a feedback loop (lazy-load → setData → "resize" →
+    // fitContent → range.from=0 → lazy-load again).
+    if (window.__mpChartResizeHandler) {
+      window.removeEventListener("resize", window.__mpChartResizeHandler);
     }
+    const onWindowResize = () => {
+      s.mainChart.timeScale().fitContent();
+      if (s.rsiChart)  s.rsiChart.timeScale().fitContent();
+      if (s.macdChart) s.macdChart.timeScale().fitContent();
+    };
+    window.addEventListener("resize", onWindowResize);
+    window.__mpChartResizeHandler = onWindowResize;
 
     // Lazy-load trigger: re-fetch older history when scroll nears left edge.
     s.mainChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
