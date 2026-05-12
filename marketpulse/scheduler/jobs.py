@@ -121,8 +121,10 @@ def run_detect_corporate_actions() -> None:
     Idempotent — duplicate (ticker, ex_date) at the service layer is swallowed.
     Dividends are only recorded when shares were held on ex_date (per
     quantity_as_of). Splits are always recorded so future buys recompute
-    correctly. recompute_ticker is only called when at least one new split
-    actually landed.
+    correctly. recompute_ticker is called unconditionally per ticker so that
+    Holdings stay consistent with the timeline even when no new splits land
+    (e.g. after a trade re-import where existing splits should still
+    multiply the qty into the Holding row).
     """
     log.info("detect_corporate_actions_start")
     tencent = TencentClient()
@@ -147,8 +149,6 @@ def run_detect_corporate_actions() -> None:
             if actions is None:
                 continue  # both sources logged + failed
 
-            recompute_needed = False
-
             # Splits: record for all tickers (watchlist-only included).
             for ex_date, ratio in actions.splits:
                 try:
@@ -157,7 +157,6 @@ def run_detect_corporate_actions() -> None:
                     )
                     log.info("split_recorded", ticker=t,
                              ex_date=str(ex_date), ratio=ratio, source=src)
-                    recompute_needed = True
                 except SplitError:
                     pass  # already recorded
 
@@ -185,8 +184,11 @@ def run_detect_corporate_actions() -> None:
                 except DividendError:
                     pass  # already recorded
 
-            if recompute_needed:
-                recompute_ticker(db, t)
+            # Always recompute, even if no new splits landed. Catches the case
+            # where trades were imported after splits already existed in DB —
+            # record_trade uses raw arithmetic and would leave the Holding row
+            # missing the split multiplication. Cost: one short walk per ticker.
+            recompute_ticker(db, t)
     finally:
         db.close()
     log.info("detect_corporate_actions_done")
