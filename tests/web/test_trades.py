@@ -288,3 +288,82 @@ def test_trade_form_executed_at_is_optional(client: TestClient, monkeypatch):
     assert "dataset.optional" in body, (
         "onEventKindChange must check dataset.optional to honor the flag"
     )
+
+
+def test_trades_update_basic(client: TestClient, monkeypatch):
+    """Editing a trade updates its fields and recomputes the ticker holding."""
+    _login(client, monkeypatch)
+    # Create a buy
+    r = client.post("/trades", data={
+        "ticker": "AAPL", "action": "buy",
+        "quantity": 10, "price": 100.0, "fees": 0,
+    })
+    assert r.status_code == 200
+    # Look up the trade we just made
+    from marketpulse.db import base as db_base
+    from marketpulse.db.models import Trade, Holding
+    s = next(db_base.session_scope())
+    trade_id = s.query(Trade).filter(Trade.ticker == "AAPL").one().id
+    # Edit it: change price from 100 to 120
+    r = client.put(f"/trades/{trade_id}", data={
+        "ticker": "AAPL", "action": "buy",
+        "quantity": 10, "price": 120.0, "fees": 0,
+    })
+    assert r.status_code == 200
+    # Verify the trade and the holding now reflect the new price
+    s2 = next(db_base.session_scope())
+    t = s2.query(Trade).filter(Trade.id == trade_id).one()
+    assert t.price == 120.0
+    h = s2.query(Holding).filter(Holding.ticker == "AAPL").one()
+    assert h.avg_cost == 120.0  # single buy, avg = price
+
+
+def test_trades_update_404_unknown_id(client: TestClient, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.put("/trades/99999", data={
+        "ticker": "AAPL", "action": "buy", "quantity": 1, "price": 1.0,
+    })
+    assert r.status_code == 404
+
+
+def test_trades_update_invalid_ticker_422(client: TestClient, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.post("/trades", data={
+        "ticker": "AAPL", "action": "buy",
+        "quantity": 1, "price": 100.0,
+    })
+    from marketpulse.db import base as db_base
+    from marketpulse.db.models import Trade
+    s = next(db_base.session_scope())
+    trade_id = s.query(Trade).filter(Trade.ticker == "AAPL").one().id
+    r = client.put(f"/trades/{trade_id}", data={
+        "ticker": "bad ticker with spaces!", "action": "buy",
+        "quantity": 1, "price": 100.0,
+    })
+    assert r.status_code == 422
+
+
+def test_trades_update_ticker_change_recomputes_both(client: TestClient, monkeypatch):
+    """Changing the ticker on an edit must recompute both the old and new
+    ticker holdings."""
+    _login(client, monkeypatch)
+    # Create AAPL buy
+    client.post("/trades", data={
+        "ticker": "AAPL", "action": "buy",
+        "quantity": 5, "price": 100.0,
+    })
+    from marketpulse.db import base as db_base
+    from marketpulse.db.models import Trade, Holding
+    s = next(db_base.session_scope())
+    trade_id = s.query(Trade).filter(Trade.ticker == "AAPL").one().id
+    # Edit: change ticker AAPL → MSFT
+    r = client.put(f"/trades/{trade_id}", data={
+        "ticker": "MSFT", "action": "buy",
+        "quantity": 5, "price": 100.0,
+    })
+    assert r.status_code == 200
+    s2 = next(db_base.session_scope())
+    # AAPL holding gone, MSFT holding present
+    assert s2.query(Holding).filter(Holding.ticker == "AAPL").one_or_none() is None
+    msft = s2.query(Holding).filter(Holding.ticker == "MSFT").one()
+    assert msft.quantity == 5
