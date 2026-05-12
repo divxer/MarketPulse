@@ -122,6 +122,26 @@
     document.getElementById('tz-offset-input').value =
       new Date().getTimezoneOffset();
 
+    // Convert all <time data-utc> elements to user-local format.
+    // Runs once on load and again after every HTMX swap so newly-rendered
+    // rows (after add/edit) are converted too.
+    function formatLocalTime(isoUtc) {
+      const d = new Date(isoUtc);
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      return `${y}-${m}-${day} ${hh}:${mm}`;
+    }
+    function applyLocalTime(root) {
+      (root || document).querySelectorAll('time[data-utc]').forEach(el => {
+        el.textContent = formatLocalTime(el.dataset.utc);
+      });
+    }
+    applyLocalTime();
+    document.body.addEventListener('htmx:afterSwap', e => applyLocalTime(e.detail.target));
+
     function loadTradeIntoForm(data) {
       const form = document.getElementById('event-form');
       form.querySelector('[name="ticker"]').value = data.ticker || '';

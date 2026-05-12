@@ -576,3 +576,25 @@ def test_trades_form_has_tz_and_original_iso_inputs(client: TestClient, monkeypa
     )
     assert 'id="original-executed-at-iso"' in orig_m.group(0)
     assert "getTimezoneOffset" in body, "JS must populate tz_offset on load"
+
+
+def test_trades_table_renders_time_with_data_utc(client: TestClient, monkeypatch):
+    """Trade rows must wrap the time cell in <time data-utc=...> so JS can
+    convert to user-local TZ on the client side."""
+    _login(client, monkeypatch)
+    client.post("/trades", data={
+        "ticker": "TZTAB", "action": "buy", "quantity": 1, "price": 10,
+        "executed_at": "", "tz_offset_minutes": "-480",
+    })
+    r = client.get("/trades")
+    assert r.status_code == 200
+    body = r.text
+    assert "<time data-utc=" in body, (
+        "trade time cells must be wrapped in <time data-utc=...>"
+    )
+    assert "applyLocalTime" in body, (
+        "trades.html must include applyLocalTime() to convert times"
+    )
+    assert "htmx:afterSwap" in body, (
+        "trades.html must re-apply local time after HTMX swaps the table"
+    )

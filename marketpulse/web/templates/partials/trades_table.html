@@ -16,7 +16,7 @@
         {% set t = e.obj %}
         <tr class="border-t" id="trade-row-{{ t.id }}">
           <td class="px-2 py-1 text-slate-500 text-xs">
-            {{ (t.executed_at or t.created_at).strftime("%Y-%m-%d %H:%M") }}
+            <time data-utc="{{ (t.executed_at or t.created_at).isoformat() }}">{{ (t.executed_at or t.created_at).strftime("%Y-%m-%d %H:%M") }}</time>
           </td>
           <td><a href="/stock/{{ t.ticker }}" class="font-medium">{{ t.ticker }}</a></td>
           <td>
