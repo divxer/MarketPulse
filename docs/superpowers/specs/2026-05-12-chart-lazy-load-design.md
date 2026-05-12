@@ -20,6 +20,7 @@ Currently the chart loads N days based on the period selector (30D / 60D / 6M / 
 2. **Lazy-load via new endpoint params.** Scrolling near the left edge triggers `GET /stock/{ticker}/chart-data?before=<YYYY-MM-DD>&count=180`. This new code path uses **yfinance** (the only source that supports arbitrary historical date ranges).
 3. **Backend pads indicators with lookback.** To compute SMA200 / EMA26 / Bollinger correctly inside the requested 180-day window, yfinance fetches `180 + 250 = 430` days before `before`, then the response trims indicators to the 180-day window before returning.
 4. **Frontend prepends.** Client maintains a module-level state (`window.__mpChartState`) with all loaded data. On lazy-load success, prepend new bars/indicators and call `series.setData(combined)` for each. Lightweight-charts preserves the visible time range across `setData()`, so the user's scroll position doesn't jump.
+5. **Loading indicator.** A small absolutely-positioned pulsing dot lives at the top-left corner of the main chart container. It fades in when `loadingMore = true` and fades out on success/failure. CSS-only (no library), ~10 lines.
 
 ## Components
 
@@ -131,6 +132,17 @@ async function loadMoreHistory() {
 
 **State reset**: `renderCharts(payload)` (the existing initial-render function) reinitializes `window.__mpChartState` — sets `ticker`, copies all initial arrays from `payload`, sets `oldestLoaded = bars[0].time`, `hasMoreHistory = true`, `loadingMore = false`, stores series handles.
 
+**Loading indicator** — minimal CSS-only pulse dot, inserted once into the main chart's parent on first render:
+
+```html
+<div id="chart-loading-dot"
+     class="absolute top-2 left-2 w-2 h-2 rounded-full bg-slate-400
+            opacity-0 transition-opacity duration-200 pointer-events-none
+            animate-pulse"></div>
+```
+
+`loadMoreHistory` toggles `opacity-0` ↔ `opacity-70` via classList around the fetch. No spinner library; just a 2×2 px dot the user can ignore but provides feedback if they're looking.
+
 ## Data Flow
 
 ```
@@ -207,3 +219,4 @@ Frontend JS has no test harness (project doesn't ship vitest/jest). Manual verif
 - **Browser cache (HTTP Cache-Control)**: historical bars don't change, so `Cache-Control: max-age=86400` on the `before=` response cuts server load on revisits
 - **WebSocket for right-side intraday**: subscribe to live Tencent quotes during market hours, append today's bar in real time
 - **Indicator computation off the hot path**: precompute SMA200/EMA26 for popular tickers nightly; serve from a cache table
+- **Memory cap on long sessions**: if a user scrolls back 20+ years on a wide-history ticker (AAPL, KO, etc.) the in-browser state holds ~5000+ bars × 8 indicator series ≈ 40k points. Not painful today but a multi-MB JS heap. Could cap at e.g. 10k bars and drop the oldest chunk when exceeded — but this conflicts with "scroll back to see what you saw before", so the cleaner version is virtual scroll (LOD on far-out bars). Defer until someone actually notices browser sluggishness
