@@ -120,3 +120,109 @@ def test_recap_push_skipped_when_generation_failed(monkeypatch, fake_recap) -> N
         from marketpulse.scheduler.jobs import run_daily_recap
         run_daily_recap()
         assert not push.called
+
+
+def test_detect_corporate_actions_records_new_splits(monkeypatch) -> None:
+    """Job should call fetch_splits per held/watched ticker and persist new rows."""
+    from datetime import date
+    from unittest.mock import MagicMock, patch
+
+    monkeypatch.setenv("APP_PASSWORD_HASH", "x")
+    monkeypatch.setenv("SESSION_SECRET", "y" * 32)
+    from marketpulse.config import get_settings
+    get_settings.cache_clear()
+
+    fake_session = MagicMock()
+    fake_session.query.return_value.all.side_effect = [
+        [MagicMock(ticker="TQQQ")],
+        [MagicMock(ticker="NVDA")],
+    ]
+
+    def fake_session_scope():
+        yield fake_session
+
+    fake_yf = MagicMock()
+    fake_yf.fetch_splits.side_effect = [
+        [(date(2025, 11, 20), 2.0)],  # TQQQ
+        [],                            # NVDA
+    ]
+
+    with patch("marketpulse.scheduler.jobs.session_scope", fake_session_scope), \
+         patch("marketpulse.scheduler.jobs.YFinanceClient", return_value=fake_yf), \
+         patch("marketpulse.scheduler.jobs.record_split") as rs, \
+         patch("marketpulse.scheduler.jobs.recompute_ticker") as rc:
+        from marketpulse.scheduler.jobs import run_detect_corporate_actions
+        run_detect_corporate_actions()
+
+    assert rs.call_count == 1
+    args, kwargs = rs.call_args
+    assert kwargs["ticker"] == "TQQQ"
+    assert kwargs["ex_date"] == date(2025, 11, 20)
+    assert kwargs["ratio"] == 2.0
+    assert kwargs["source"] == "yfinance"
+    rc.assert_called_once_with(fake_session, "TQQQ")
+
+
+def test_detect_corporate_actions_idempotent(monkeypatch) -> None:
+    """If a split is already recorded, SplitError is swallowed and we move on."""
+    from datetime import date
+    from unittest.mock import MagicMock, patch
+    from marketpulse.holdings.splits import SplitError
+
+    monkeypatch.setenv("APP_PASSWORD_HASH", "x")
+    monkeypatch.setenv("SESSION_SECRET", "y" * 32)
+    from marketpulse.config import get_settings
+    get_settings.cache_clear()
+
+    fake_session = MagicMock()
+    fake_session.query.return_value.all.side_effect = [
+        [MagicMock(ticker="TQQQ")],
+        [],
+    ]
+
+    def fake_session_scope():
+        yield fake_session
+
+    fake_yf = MagicMock()
+    fake_yf.fetch_splits.return_value = [(date(2025, 11, 20), 2.0)]
+
+    with patch("marketpulse.scheduler.jobs.session_scope", fake_session_scope), \
+         patch("marketpulse.scheduler.jobs.YFinanceClient", return_value=fake_yf), \
+         patch("marketpulse.scheduler.jobs.record_split",
+               side_effect=SplitError("already recorded")), \
+         patch("marketpulse.scheduler.jobs.recompute_ticker") as rc:
+        from marketpulse.scheduler.jobs import run_detect_corporate_actions
+        run_detect_corporate_actions()
+
+    rc.assert_not_called()
+
+
+def test_detect_corporate_actions_yfinance_failure_does_not_propagate(monkeypatch) -> None:
+    """A yfinance exception on one ticker must not abort the whole job."""
+    from unittest.mock import MagicMock, patch
+
+    monkeypatch.setenv("APP_PASSWORD_HASH", "x")
+    monkeypatch.setenv("SESSION_SECRET", "y" * 32)
+    from marketpulse.config import get_settings
+    get_settings.cache_clear()
+
+    fake_session = MagicMock()
+    fake_session.query.return_value.all.side_effect = [
+        [MagicMock(ticker="TQQQ"), MagicMock(ticker="NVDA")],
+        [],
+    ]
+
+    def fake_session_scope():
+        yield fake_session
+
+    fake_yf = MagicMock()
+    fake_yf.fetch_splits.side_effect = [RuntimeError("yahoo timeout"), []]
+
+    with patch("marketpulse.scheduler.jobs.session_scope", fake_session_scope), \
+         patch("marketpulse.scheduler.jobs.YFinanceClient", return_value=fake_yf), \
+         patch("marketpulse.scheduler.jobs.record_split"), \
+         patch("marketpulse.scheduler.jobs.recompute_ticker"):
+        from marketpulse.scheduler.jobs import run_detect_corporate_actions
+        run_detect_corporate_actions()
+
+    assert fake_yf.fetch_splits.call_count == 2
