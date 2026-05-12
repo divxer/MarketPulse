@@ -202,3 +202,40 @@ def test_trades_timeline_filter_splits_only(client: TestClient, monkeypatch):
     assert "拆股" in res.text or "1 → 2" in res.text
     # The buy row should not appear in split-only view (filter by table rows, not form options)
     assert "trade-row-" not in res.text
+
+
+def test_trade_form_includes_executed_at_input(client: TestClient, monkeypatch):
+    """Regression: the unified /trades form must include an executed_at
+    date input for backfilling historical trades. Without it, manually-entered
+    trades can only be dated 'today'."""
+    _login(client, monkeypatch)
+    res = client.get("/trades")
+    assert res.status_code == 200
+    # The input must be in the trade-field group (visible when 买入/卖出
+    # is selected, hidden for splits/dividends).
+    assert 'name="executed_at"' in res.text
+    assert 'trade-field' in res.text
+
+
+def test_trade_post_blank_executed_at_defaults_to_now(client: TestClient, monkeypatch):
+    """Regression: empty executed_at in the form must persist as the current
+    UTC datetime (not NULL). NULL would make the trade sort last via the
+    sentinel, which is wrong for 'I just made this trade today'."""
+    from datetime import UTC, datetime
+    _login(client, monkeypatch)
+    before = datetime.now(UTC)
+    res = client.post("/trades", data={
+        "ticker": "ABC", "action": "buy", "quantity": 1, "price": 10,
+        "fees": 0, "executed_at": "",  # blank
+    })
+    assert res.status_code == 200
+    after = datetime.now(UTC)
+
+    # Query the DB directly to confirm executed_at is not None and is "recent"
+    from marketpulse.db import base as db_base
+    from marketpulse.db.models import Trade
+    gen = db_base.session_scope()
+    s = next(gen)
+    t = s.query(Trade).filter(Trade.ticker == "ABC").one()
+    assert t.executed_at is not None
+    assert before <= t.executed_at <= after
