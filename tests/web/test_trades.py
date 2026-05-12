@@ -555,3 +555,24 @@ def test_trades_update_recomputes_when_date_changed(client: TestClient, monkeypa
     stored = t2.executed_at if t2.executed_at.tzinfo else t2.executed_at.replace(tzinfo=UTC)
     local_dt = stored - timedelta(minutes=-480)
     assert local_dt.date().isoformat() == new_date
+
+
+def test_trades_form_has_tz_and_original_iso_inputs(client: TestClient, monkeypatch):
+    """The /trades page must include hidden tz_offset_minutes and
+    original_executed_at_iso inputs, plus JS that populates tz_offset on load."""
+    _login(client, monkeypatch)
+    r = client.get("/trades")
+    assert r.status_code == 200
+    body = r.text
+    import re
+    tz_m = re.search(r'<input[^>]*name="tz_offset_minutes"[^>]*>', body)
+    assert tz_m is not None and 'type="hidden"' in tz_m.group(0), (
+        "hidden tz_offset_minutes input missing"
+    )
+    assert 'id="tz-offset-input"' in tz_m.group(0)
+    orig_m = re.search(r'<input[^>]*name="original_executed_at_iso"[^>]*>', body)
+    assert orig_m is not None and 'type="hidden"' in orig_m.group(0), (
+        "hidden original_executed_at_iso input missing"
+    )
+    assert 'id="original-executed-at-iso"' in orig_m.group(0)
+    assert "getTimezoneOffset" in body, "JS must populate tz_offset on load"

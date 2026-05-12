@@ -71,6 +71,8 @@
     <input name="notes" placeholder="备注(可选)"
            class="border rounded px-3 py-1 col-span-2 md:col-span-1 min-w-0" />
     <input type="hidden" name="trade_id" id="trade-id-input" value="" />
+    <input type="hidden" name="tz_offset_minutes" id="tz-offset-input" value="0" />
+    <input type="hidden" name="original_executed_at_iso" id="original-executed-at-iso" value="" />
     <button id="submit-btn" type="submit"
             class="bg-slate-900 text-white px-3 py-1 rounded">记录</button>
     <button id="cancel-edit-btn" type="button" onclick="exitEditMode()"
@@ -115,6 +117,10 @@
     }
     // Initialize on load (default kind is "buy").
     onEventKindChange(document.getElementById('event-kind').value);
+    // Populate tz_offset on load so the backend can interpret YYYY-MM-DD
+    // dates in the user's local TZ. Beijing (UTC+8) → -480.
+    document.getElementById('tz-offset-input').value =
+      new Date().getTimezoneOffset();
 
     function loadTradeIntoForm(data) {
       const form = document.getElementById('event-form');
@@ -123,7 +129,8 @@
       form.querySelector('[name="price"]').value = data.price ?? '';
       form.querySelector('[name="fees"]').value = data.fees ?? 0;
       form.querySelector('[name="notes"]').value = data.notes || '';
-      form.querySelector('[name="executed_at"]').value = data.executed_at || '';
+      form.querySelector('[name="executed_at"]').value = data.executed_at_date || '';
+      document.getElementById('original-executed-at-iso').value = data.executed_at_iso || '';
       document.getElementById('event-kind').value = data.action;
       onEventKindChange(data.action);
       document.getElementById('trade-id-input').value = data.id;
@@ -138,6 +145,7 @@
       const form = document.getElementById('event-form');
       form.reset();
       document.getElementById('trade-id-input').value = '';
+      document.getElementById('original-executed-at-iso').value = '';
       form.removeAttribute('hx-put');
       form.setAttribute('hx-post', '/trades');
       document.getElementById('submit-btn').textContent = '记录';
