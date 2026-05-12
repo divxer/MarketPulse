@@ -6,12 +6,6 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-
-# Sort key: real trade time (executed_at) when present, fallback to record time.
-# Defined once so all trade-listing endpoints stay consistent.
-def _trade_sort_key():
-    return func.coalesce(Trade.executed_at, Trade.created_at).desc()
-
 from marketpulse.db.models import Trade
 from marketpulse.holdings.robinhood_import import (
     ParsedTrade,
@@ -32,6 +26,12 @@ router = APIRouter()
 log = get_logger(__name__)
 
 _TICKER_RE = re.compile(r"^[A-Z\^][A-Z0-9.\-]{0,15}$")
+
+
+# Sort key: real trade time (executed_at) when present, fallback to record time.
+# Defined once so all trade-listing endpoints stay consistent.
+def _trade_sort_key():
+    return func.coalesce(Trade.executed_at, Trade.created_at).desc()
 
 
 @router.get("/trades", response_class=HTMLResponse)

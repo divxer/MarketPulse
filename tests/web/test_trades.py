@@ -86,8 +86,12 @@ def test_trade_post_rejects_invalid_executed_at(client: TestClient, monkeypatch)
 def test_delete_trade_recomputes_holding(client: TestClient, monkeypatch):
     _login(client, monkeypatch)
     # Buy 100 @ 10, buy 100 @ 20 → avg 15. Sell 50 @ 25 → realized +500.
-    client.post("/trades", data={"ticker": "ZZZ", "action": "buy", "quantity": 100, "price": 10})
-    r = client.post("/trades", data={"ticker": "ZZZ", "action": "buy", "quantity": 100, "price": 20})
+    client.post("/trades", data={
+        "ticker": "ZZZ", "action": "buy", "quantity": 100, "price": 10,
+    })
+    r = client.post("/trades", data={
+        "ticker": "ZZZ", "action": "buy", "quantity": 100, "price": 20,
+    })
     # Get second buy's id from the response (its row id appears in trade-row-N).
     import re as _re
     ids = sorted(int(m) for m in _re.findall(r'id="trade-row-(\d+)"', r.text))

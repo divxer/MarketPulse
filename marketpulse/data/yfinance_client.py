@@ -1,3 +1,4 @@
+import contextlib
 from datetime import UTC, datetime
 
 import yfinance as yf
@@ -104,10 +105,8 @@ class YFinanceClient:
             pub_iso = content.get("pubDate") or content.get("displayTime")
             ts = item.get("providerPublishTime")
             if pub_iso:
-                try:
+                with contextlib.suppress(ValueError):
                     published = datetime.fromisoformat(pub_iso.replace("Z", "+00:00"))
-                except ValueError:
-                    pass
             elif ts:
                 published = datetime.fromtimestamp(ts, tz=UTC)
             if not headline and not url:

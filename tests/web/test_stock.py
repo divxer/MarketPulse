@@ -49,7 +49,9 @@ def test_stock_page(client: TestClient, monkeypatch) -> None:
         client.app.dependency_overrides.clear()
 
 
-def test_stock_page_shows_holding_strip_when_position_exists(client: TestClient, monkeypatch) -> None:
+def test_stock_page_shows_holding_strip_when_position_exists(
+    client: TestClient, monkeypatch,
+) -> None:
     """When the user holds the ticker, /stock shows current shares + avg cost + live P&L."""
     _login(client, monkeypatch)
     from marketpulse.web.deps import get_data_service

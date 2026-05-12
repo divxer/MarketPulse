@@ -33,7 +33,9 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('id')
     )
     with op.batch_alter_table('ai_analyses', schema=None) as batch_op:
-        batch_op.create_index('ix_ai_analyses_ticker_expires', ['ticker', 'expires_at'], unique=False)
+        batch_op.create_index(
+            'ix_ai_analyses_ticker_expires', ['ticker', 'expires_at'], unique=False,
+        )
 
     op.create_table('app_settings',
     sa.Column('key', sa.String(length=64), nullable=False),
@@ -65,7 +67,9 @@ def upgrade() -> None:
     sa.UniqueConstraint('ticker', 'url', name='uq_news_ticker_url')
     )
     with op.batch_alter_table('news_cache', schema=None) as batch_op:
-        batch_op.create_index('ix_news_cache_ticker_published_at', ['ticker', 'published_at'], unique=False)
+        batch_op.create_index(
+            'ix_news_cache_ticker_published_at', ['ticker', 'published_at'], unique=False,
+        )
 
     op.create_table('price_cache',
     sa.Column('ticker', sa.String(length=16), nullable=False),

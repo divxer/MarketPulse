@@ -1,11 +1,11 @@
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy import engine_from_config, pool
 
+from alembic import context
 from marketpulse.config import get_settings
-from marketpulse.db.base import Base
 from marketpulse.db import models  # noqa: F401  ensure models are imported
+from marketpulse.db.base import Base
 
 config = context.config
 if config.config_file_name is not None:
