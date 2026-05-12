@@ -6,6 +6,7 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+
 # Sort key: real trade time (executed_at) when present, fallback to record time.
 # Defined once so all trade-listing endpoints stay consistent.
 def _trade_sort_key():

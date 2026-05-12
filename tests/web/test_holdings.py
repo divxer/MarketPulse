@@ -217,3 +217,42 @@ def test_risk_analysis_renders_markdown_to_html(client: TestClient, monkeypatch)
         assert "## 风险" not in res.text
     finally:
         client.app.dependency_overrides.clear()
+
+
+def test_post_dividend_records_to_db(client: TestClient, monkeypatch):
+    _login(client, monkeypatch)
+    res = client.post("/dividends", data={
+        "ticker": "TQQQ", "ex_date": "2024-03-20",
+        "amount_per_share": 0.22, "total_amount": 6.02,
+    })
+    assert res.status_code == 200
+    j = res.json()
+    assert j["ticker"] == "TQQQ"
+    assert j["ex_date"] == "2024-03-20"
+    assert j["total_amount"] == 6.02
+
+
+def test_post_dividend_bad_date_returns_422(client: TestClient, monkeypatch):
+    _login(client, monkeypatch)
+    res = client.post("/dividends", data={
+        "ticker": "TQQQ", "ex_date": "not-a-date",
+        "amount_per_share": 0.22, "total_amount": 6.02,
+    })
+    assert res.status_code == 422
+
+
+def test_holdings_page_shows_total_dividends_kpi(client: TestClient, monkeypatch):
+    _login(client, monkeypatch)
+    fake = _FakeData()
+    from marketpulse.web.deps import get_data_service
+    client.app.dependency_overrides[get_data_service] = lambda: fake
+    try:
+        client.post("/dividends", data={
+            "ticker": "TQQQ", "ex_date": "2024-03-20",
+            "amount_per_share": 0.22, "total_amount": 6.02,
+        })
+        page = client.get("/holdings")
+        assert "累计分红" in page.text
+        assert "+6.02" in page.text
+    finally:
+        client.app.dependency_overrides.clear()

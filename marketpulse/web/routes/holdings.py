@@ -1,10 +1,19 @@
-from fastapi import APIRouter, Depends, Request
-from fastapi.responses import HTMLResponse
+from datetime import datetime
+
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy.orm import Session
 
 from marketpulse.ai.service import AiService
 from marketpulse.data.service import DataService
 from marketpulse.db.models import Holding
+from marketpulse.holdings.dividends import (
+    DividendError,
+    monthly_dividends,
+    per_ticker_dividends,
+    record_dividend,
+    total_dividends,
+)
 from marketpulse.holdings.service import (
     allocation_breakdown,
     compute_totals,
@@ -38,6 +47,11 @@ def holdings_page(
     rows = enrich_holdings(holdings, data)
     totals = compute_totals(rows)
     realized = total_realized_pl(db)
+    dividends_by_ticker = per_ticker_dividends(db)
+    # Attach per-ticker dividend total to each enriched row so the table can
+    # show it inline without a second query loop.
+    for r in rows:
+        r["dividends_received"] = dividends_by_ticker.get(r["ticker"], 0.0)
     return templates.TemplateResponse(
         request,
         "holdings.html",
@@ -46,11 +60,46 @@ def holdings_page(
             "ranked_rows": sort_by_pl_impact(rows),
             "totals": totals,
             "realized_pl": realized,
+            "total_dividends": total_dividends(db),
             "allocation": allocation_breakdown(rows),
             "monthly_pl": monthly_realized_pl(db),
+            "monthly_dividends": monthly_dividends(db),
             "trade_stats": trading_stats(db),
         },
     )
+
+
+@router.post("/dividends", response_class=HTMLResponse)
+def dividends_create(
+    request: Request,
+    ticker: str = Form(...),
+    ex_date: str = Form(...),
+    amount_per_share: float = Form(...),
+    total_amount: float = Form(...),
+    notes: str = Form(""),
+    db: Session = Depends(get_db),
+    _: None = Depends(require_auth),
+):
+    """Record a cash dividend. Used by the import script and (future) a UI form."""
+    try:
+        ex_dt = datetime.strptime(ex_date.strip(), "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"invalid ex_date: {exc}") from exc
+    try:
+        d = record_dividend(
+            db,
+            ticker=ticker,
+            ex_date=ex_dt,
+            amount_per_share=amount_per_share,
+            total_amount=total_amount,
+            notes=notes or None,
+        )
+    except DividendError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse({
+        "id": d.id, "ticker": d.ticker, "ex_date": d.ex_date.isoformat(),
+        "total_amount": d.total_amount,
+    })
 
 
 @router.post("/holdings/risk-analysis", response_class=HTMLResponse)

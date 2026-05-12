@@ -2,7 +2,7 @@
 {% block content %}
 
 {# ===== Top KPI strip ===== #}
-<section class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+<section class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
   <div class="bg-white rounded-md shadow-sm p-3">
     <div class="text-xs text-slate-500">总成本</div>
     <div class="text-xl font-semibold mt-1">${{ "%.2f"|format(totals.cost) }}</div>
@@ -26,6 +26,16 @@
       {{ "%+.2f"|format(realized_pl) }}
     </div>
     <div class="text-xs text-slate-500">{{ trade_stats.total_trades }} 笔交易 · 胜率 {{ "%.0f"|format(trade_stats.win_rate_pct) }}%</div>
+  </div>
+  <div class="bg-white rounded-md shadow-sm p-3">
+    <div class="text-xs text-slate-500">累计分红</div>
+    <div class="text-xl font-semibold mt-1 text-green-600">
+      {{ "%+.2f"|format(total_dividends) }}
+    </div>
+    {% set combined = realized_pl + total_dividends %}
+    <div class="text-xs text-slate-500">含分红总收益
+      <span class="{% if combined >= 0 %}text-green-600{% else %}text-red-600{% endif %}">{{ "%+.0f"|format(combined) }}</span>
+    </div>
   </div>
 </section>
 

@@ -60,10 +60,9 @@ def test_http_error_tries_next_suffix() -> None:
 # Kline (历史K线) tests. Response shape mirrors a live capture for AAPL.
 # Row format: [date, open, close, high, low, volume, ...]  (close/high/low order)
 import json as _json  # noqa: E402
+from datetime import date as _date  # noqa: E402, I001
 
 import pytest as _pytest  # noqa: E402
-
-from datetime import date as _date  # noqa: E402, I001
 
 
 def _kline_envelope(symbol: str, rows: list) -> str:

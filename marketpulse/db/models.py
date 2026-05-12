@@ -90,6 +90,25 @@ class Trade(Base):
     __table_args__ = (Index("ix_trades_ticker_created", "ticker", "created_at"),)
 
 
+class Dividend(Base):
+    """Cash dividend received on a held position. Separate from Trade because
+    dividends don't change share count or cost basis — they're income only.
+    """
+    __tablename__ = "dividends"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ticker: Mapped[str] = mapped_column(String(16), nullable=False)
+    ex_date: Mapped[date] = mapped_column(Date, nullable=False)
+    # Per-share payout; total = per_share * shares held at record date.
+    # Both are stored explicitly so we can round-trip the original 腾讯自选股 entry.
+    amount_per_share: Mapped[float] = mapped_column(Float, nullable=False)
+    total_amount: Mapped[float] = mapped_column(Float, nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow, nullable=False)
+
+    __table_args__ = (Index("ix_dividends_ticker_ex_date", "ticker", "ex_date"),)
+
+
 class AlertRule(Base):
     __tablename__ = "alert_rules"
 
