@@ -37,8 +37,17 @@
     };
   }
 
-  function densify(series) {
-    return series.filter(p => p.value !== null && p.value !== undefined);
+  // Convert null/undefined indicator points into lightweight-charts
+  // whitespace items ({time: T}). The series array length now matches
+  // the candle series, so logical indices align across all panes — this
+  // is what allows syncPair to use logical-range subscription (see below)
+  // and what prevents the prepend-cascade loop diagnosed on 2026-05-12.
+  // Whitespace items reserve the bar's time-axis slot without drawing,
+  // so the visual result is identical to filtering them out.
+  function withWhitespace(series) {
+    return series.map(p =>
+      (p.value === null || p.value === undefined) ? { time: p.time } : p
+    );
   }
 
   function renderCharts(payload, ticker) {
@@ -94,7 +103,7 @@
     s.candleSeries.setData(s.bars);
 
     function addLineIfData(data, opts, handleKey) {
-      const dense = densify(data);
+      const dense = withWhitespace(data);
       if (dense.length === 0) return null;
       const line = s.mainChart.addLineSeries(opts);
       line.setData(dense);
@@ -133,7 +142,7 @@
     }
 
     // === RSI pane ===
-    const rsiData = densify(s.rsi);
+    const rsiData = withWhitespace(s.rsi);
     if (rsiData.length > 0) {
       s.rsiChart = LightweightCharts.createChart(
         document.getElementById("chart-rsi"),
@@ -154,7 +163,7 @@
     }
 
     // === MACD pane ===
-    const macdLine = densify(s.macd.line);
+    const macdLine = withWhitespace(s.macd.line);
     if (macdLine.length > 0) {
       s.macdChart = LightweightCharts.createChart(
         document.getElementById("chart-macd"),
@@ -165,11 +174,11 @@
       s.macdLineSeries = s.macdChart.addLineSeries(lineOpts({ color: "#0ea5e9" }));
       s.macdLineSeries.setData(macdLine);
       s.macdSignalSeries = s.macdChart.addLineSeries(lineOpts({ color: "#f59e0b" }));
-      s.macdSignalSeries.setData(densify(s.macd.signal));
+      s.macdSignalSeries.setData(withWhitespace(s.macd.signal));
       s.macdHistSeries = s.macdChart.addHistogramSeries({
         priceLineVisible: false, lastValueVisible: false,
       });
-      s.macdHistSeries.setData(densify(s.macd.histogram).map(p => ({
+      s.macdHistSeries.setData(withWhitespace(s.macd.histogram).map(p => ({
         time: p.time, value: p.value,
         color: p.value >= 0 ? "rgba(22,163,74,0.6)" : "rgba(220,38,38,0.6)",
       })));
@@ -292,7 +301,7 @@
       if (!handle) return;
       const incoming = chunk[key] || [];
       s[key] = incoming.concat(s[key]);
-      handle.setData(densify(s[key]));
+      handle.setData(withWhitespace(s[key]));
     };
     extendAndSet("ema12",   s.ema12Series);
     extendAndSet("ema26",   s.ema26Series);
@@ -305,15 +314,15 @@
     // MACD has a nested shape.
     if (s.macdLineSeries) {
       s.macd.line = (chunk.macd?.line || []).concat(s.macd.line);
-      s.macdLineSeries.setData(densify(s.macd.line));
+      s.macdLineSeries.setData(withWhitespace(s.macd.line));
     }
     if (s.macdSignalSeries) {
       s.macd.signal = (chunk.macd?.signal || []).concat(s.macd.signal);
-      s.macdSignalSeries.setData(densify(s.macd.signal));
+      s.macdSignalSeries.setData(withWhitespace(s.macd.signal));
     }
     if (s.macdHistSeries) {
       s.macd.histogram = (chunk.macd?.histogram || []).concat(s.macd.histogram);
-      s.macdHistSeries.setData(densify(s.macd.histogram).map(p => ({
+      s.macdHistSeries.setData(withWhitespace(s.macd.histogram).map(p => ({
         time: p.time, value: p.value,
         color: p.value >= 0 ? "rgba(22,163,74,0.6)" : "rgba(220,38,38,0.6)",
       })));
