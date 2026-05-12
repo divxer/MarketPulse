@@ -40,8 +40,10 @@ def record_trade(
         raise TradeError(f"invalid action {action!r}, must be 'buy' or 'sell'")
     if quantity <= 0:
         raise TradeError("quantity must be positive")
-    if price <= 0:
-        raise TradeError("price must be positive")
+    if price < 0:
+        raise TradeError("price cannot be negative")
+    # price == 0 is allowed: represents stock splits, share gifts, or
+    # employer-granted shares where no cash changed hands.
     if fees < 0:
         raise TradeError("fees cannot be negative")
 

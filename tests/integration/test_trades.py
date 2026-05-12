@@ -71,9 +71,20 @@ def test_non_positive_values_rejected(db_session: Session) -> None:
     with pytest.raises(TradeError, match="quantity"):
         record_trade(db_session, ticker="X", action="buy", quantity=0, price=10)
     with pytest.raises(TradeError, match="price"):
-        record_trade(db_session, ticker="X", action="buy", quantity=1, price=0)
+        record_trade(db_session, ticker="X", action="buy", quantity=1, price=-5)
     with pytest.raises(TradeError, match="fees"):
         record_trade(db_session, ticker="X", action="buy", quantity=1, price=10, fees=-1)
+
+
+def test_zero_price_buy_allowed_for_splits(db_session: Session) -> None:
+    """price=0 is valid: represents stock splits, gifts, or share dividends."""
+    record_trade(db_session, ticker="X", action="buy", quantity=10, price=10)
+    record_trade(db_session, ticker="X", action="buy", quantity=10, price=0,
+                 notes="1:2 split adjustment")
+    from marketpulse.db.models import Holding
+    h = db_session.query(Holding).filter(Holding.ticker == "X").one()
+    assert h.quantity == 20
+    assert h.avg_cost == 5.0  # $100 total cost / 20 shares
 
 
 def test_total_realized_pl_sums_across_trades(db_session: Session) -> None:
