@@ -1,12 +1,11 @@
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from marketpulse.db.models import Trade
+from marketpulse.db.models import Dividend, StockSplit, Trade
 from marketpulse.holdings.robinhood_import import (
     ParsedTrade,
     RobinhoodParseError,
@@ -28,30 +27,64 @@ log = get_logger(__name__)
 _TICKER_RE = re.compile(r"^[A-Z\^][A-Z0-9.\-]{0,15}$")
 
 
-# Sort key: real trade time (executed_at) when present, fallback to record time.
-# Defined once so all trade-listing endpoints stay consistent.
-def _trade_sort_key():
-    return func.coalesce(Trade.executed_at, Trade.created_at).desc()
-
-
 @router.get("/trades", response_class=HTMLResponse)
 def trades_page(
     request: Request,
     ticker: str | None = None,
+    event_type: str | None = None,
     db: Session = Depends(get_db),
     _: None = Depends(require_auth),
 ):
-    q = db.query(Trade).order_by(_trade_sort_key())
-    if ticker:
-        q = q.filter(Trade.ticker == ticker.upper())
-    trades = q.limit(200).all()
+    """Unified timeline of Trade + StockSplit + Dividend events.
+
+    `event_type` filter values: "trade" | "split" | "dividend" | None (all).
+    """
+    tnorm = ticker.upper() if ticker else None
+    events: list[dict] = []
+
+    if event_type in (None, "trade"):
+        tq = db.query(Trade)
+        if tnorm:
+            tq = tq.filter(Trade.ticker == tnorm)
+        for t in tq.all():
+            when = t.executed_at or t.created_at
+            events.append({"kind": "trade", "when": when, "obj": t})
+
+    _EOD = time(23, 59, 59, tzinfo=UTC)
+    if event_type in (None, "split"):
+        sq = db.query(StockSplit)
+        if tnorm:
+            sq = sq.filter(StockSplit.ticker == tnorm)
+        for s in sq.all():
+            events.append({
+                "kind": "split",
+                "when": datetime.combine(s.ex_date, _EOD),
+                "obj": s,
+            })
+
+    if event_type in (None, "dividend"):
+        dq = db.query(Dividend)
+        if tnorm:
+            dq = dq.filter(Dividend.ticker == tnorm)
+        for d in dq.all():
+            events.append({
+                "kind": "dividend",
+                "when": datetime.combine(d.ex_date, _EOD),
+                "obj": d,
+            })
+
+    # Newest first, capped at 200.
+    events.sort(key=lambda e: e["when"], reverse=True)
+    events = events[:200]
+
     return templates.TemplateResponse(
         request,
         "trades.html",
         {
-            "trades": trades,
-            "filter_ticker": ticker.upper() if ticker else None,
-            "realized_pl_total": total_realized_pl(db, ticker=ticker),
+            "events": events,
+            "filter_ticker": tnorm,
+            "filter_event_type": event_type,
+            "realized_pl_total": total_realized_pl(db, ticker=tnorm),
         },
     )
 
@@ -101,22 +134,27 @@ def trades_add(
     except TradeError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    # Re-render the full trades table so totals + new row both refresh.
-    trades = (
-        db.query(Trade)
-        .filter(Trade.ticker == normalized)
-        .order_by(_trade_sort_key())
-        .limit(200)
-        .all()
-    )
+    # Re-render the full timeline so the new row + totals refresh.
+    events: list[dict] = []
+    for t in db.query(Trade).all():
+        when = t.executed_at or t.created_at
+        events.append({"kind": "trade", "when": when, "obj": t})
+    _EOD = time(23, 59, 59, tzinfo=UTC)
+    for s in db.query(StockSplit).all():
+        events.append({"kind": "split", "when": datetime.combine(s.ex_date, _EOD), "obj": s})
+    for d in db.query(Dividend).all():
+        events.append({"kind": "dividend", "when": datetime.combine(d.ex_date, _EOD), "obj": d})
+    events.sort(key=lambda e: e["when"], reverse=True)
+    events = events[:200]
+
     return templates.TemplateResponse(
         request,
         "partials/trades_table.html",
         {
-            "trades": db.query(Trade).order_by(_trade_sort_key()).limit(200).all(),
-            "realized_pl_total": total_realized_pl(db),
+            "events": events,
             "filter_ticker": None,
-            "_just_added": trades[0] if trades else None,
+            "filter_event_type": None,
+            "realized_pl_total": total_realized_pl(db),
         },
     )
 

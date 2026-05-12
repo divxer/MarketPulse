@@ -4,11 +4,11 @@ Buy: increases quantity, recomputes weighted-average cost basis (including fees)
 Sell: decreases quantity, records realized P&L = (sell_price - avg_cost) * qty - fees.
       Holding row is deleted when quantity reaches zero.
 """
-from datetime import datetime
+from datetime import UTC, datetime, time
 
 from sqlalchemy.orm import Session
 
-from marketpulse.db.models import Holding, Trade
+from marketpulse.db.models import Holding, StockSplit, Trade
 
 
 class TradeError(ValueError):
@@ -17,6 +17,12 @@ class TradeError(ValueError):
 
 # Float comparison tolerance — quantities under this round to zero (holding deleted).
 _EPSILON = 1e-9
+
+# Sentinel for trades with executed_at=None — sorts them LAST, matching SQL NULLS LAST.
+_NULL_EXECUTED_AT_SENTINEL = datetime.max.replace(tzinfo=UTC)
+
+# End-of-day anchor used to sort splits after same-day trades.
+_EOD = time(23, 59, 59, tzinfo=UTC)
 
 
 def record_trade(
@@ -94,11 +100,15 @@ def record_trade(
 
 
 def recompute_ticker(session: Session, ticker: str) -> None:
-    """Rebuild Holding row + realized_pl values from the full Trade history for ticker.
+    """Rebuild Holding row + realized_pl values from the full Trade + StockSplit
+    history for ticker.
 
-    Used when a trade is deleted: prior buys/sells may have affected the avg_cost basis,
-    so realized P&L on sells needs recomputation. Walks all remaining trades in
-    chronological order and reconstructs Holding state.
+    Walks both timelines merged in chronological order. Splits are anchored to
+    end-of-day so any same-day trade sorts BEFORE the split takes effect, which
+    matches real-world execution (the split is applied at market open of the
+    next session, but ex_date is a date, not a datetime).
+
+    Trade rows are never mutated — only `realized_pl` on sells is recomputed.
     """
     ticker = ticker.strip().upper()
     trades = (
@@ -107,19 +117,43 @@ def recompute_ticker(session: Session, ticker: str) -> None:
         .order_by(Trade.executed_at.asc().nulls_last(), Trade.created_at.asc())
         .all()
     )
+    splits = (
+        session.query(StockSplit)
+        .filter(StockSplit.ticker == ticker)
+        .order_by(StockSplit.ex_date.asc())
+        .all()
+    )
+
+    def _trade_when(t: Trade) -> datetime:
+        """Trades without an executed_at sort last — matches the old SQL NULLS LAST."""
+        return t.executed_at if t.executed_at else _NULL_EXECUTED_AT_SENTINEL
+
+    events: list[tuple[datetime, int, str, Trade | StockSplit]] = []
+    for t in trades:
+        events.append((_trade_when(t), 0, "trade", t))
+    for s in splits:
+        events.append((datetime.combine(s.ex_date, _EOD), 1, "split", s))
+    events.sort(key=lambda x: (x[0], x[1]))
+
     qty = 0.0
     avg_cost = 0.0
-    for t in trades:
-        if t.action == "buy":
-            new_qty = qty + t.quantity
-            total_cost = qty * avg_cost + t.quantity * t.price + t.fees
-            avg_cost = total_cost / new_qty if new_qty else 0
-            qty = new_qty
-            t.realized_pl = None
-        else:  # sell
-            t.realized_pl = (t.price - avg_cost) * t.quantity - t.fees
-            qty -= t.quantity
-            # avg_cost unchanged on partial sell
+    for _when, _order, kind, evt in events:
+        if kind == "trade":
+            t = evt
+            if t.action == "buy":
+                new_qty = qty + t.quantity
+                total_cost = qty * avg_cost + t.quantity * t.price + t.fees
+                avg_cost = total_cost / new_qty if new_qty else 0
+                qty = new_qty
+                t.realized_pl = None
+            else:  # sell
+                t.realized_pl = (t.price - avg_cost) * t.quantity - t.fees
+                qty -= t.quantity
+                # avg_cost unchanged on partial sell
+        else:  # split
+            s = evt
+            qty = qty * s.ratio
+            avg_cost = avg_cost / s.ratio
 
     holding = session.query(Holding).filter(Holding.ticker == ticker).one_or_none()
     if qty <= _EPSILON:

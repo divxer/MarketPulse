@@ -15,7 +15,7 @@ def test_trades_page_empty(client: TestClient, monkeypatch):
     _login(client, monkeypatch)
     res = client.get("/trades")
     assert res.status_code == 200
-    assert "暂无交易记录" in res.text
+    assert "暂无记录" in res.text
 
 
 _RH_HEADER = (
@@ -160,3 +160,45 @@ def test_holdings_page_shows_realized_pl(client: TestClient, monkeypatch):
     assert res.status_code == 200
     assert "已实现盈亏" in res.text
     assert "+500.00" in res.text  # (150-100)*10
+
+
+def test_trades_timeline_shows_splits_and_dividends(client: TestClient, monkeypatch):
+    _login(client, monkeypatch)
+    # Trade
+    client.post("/trades", data={
+        "ticker": "TQQQ", "action": "buy", "quantity": 20, "price": 30,
+        "fees": 0, "executed_at": "2024-01-15",
+    })
+    # Split
+    client.post("/splits", data={
+        "ticker": "TQQQ", "ex_date": "2025-11-20", "ratio": 2,
+    })
+    # Dividend
+    client.post("/dividends", data={
+        "ticker": "TQQQ", "ex_date": "2025-09-24",
+        "amount_per_share": 0.10, "total_amount": 4.0,
+    })
+
+    res = client.get("/trades")
+    assert res.status_code == 200
+    # All three event types render
+    assert "买入" in res.text
+    assert "拆股" in res.text or "1 → 2" in res.text
+    assert "分红" in res.text
+
+
+def test_trades_timeline_filter_splits_only(client: TestClient, monkeypatch):
+    _login(client, monkeypatch)
+    client.post("/trades", data={
+        "ticker": "X", "action": "buy", "quantity": 10, "price": 100,
+        "fees": 0, "executed_at": "2024-01-15",
+    })
+    client.post("/splits", data={
+        "ticker": "X", "ex_date": "2025-01-01", "ratio": 2,
+    })
+
+    res = client.get("/trades?event_type=split")
+    assert res.status_code == 200
+    assert "拆股" in res.text or "1 → 2" in res.text
+    # The buy row should not appear in split-only view (filter by table rows, not form options)
+    assert "trade-row-" not in res.text

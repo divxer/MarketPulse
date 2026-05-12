@@ -14,6 +14,9 @@ from marketpulse.data.service import DataService
 from marketpulse.data.tencent_client import TencentClient
 from marketpulse.data.yfinance_client import YFinanceClient
 from marketpulse.db.base import session_scope
+from marketpulse.db.models import Holding, WatchlistItem
+from marketpulse.holdings.splits import SplitError, record_split
+from marketpulse.holdings.trades import recompute_ticker
 from marketpulse.logging import get_logger
 from marketpulse.recap.push import push_recap_summary
 from marketpulse.recap.service import RecapService
@@ -109,6 +112,53 @@ def run_news_purge() -> None:
         db.close()
 
 
+def run_detect_corporate_actions() -> None:
+    """Pull split history from yfinance for every held/watched ticker.
+
+    Idempotent — re-runs are safe because (ticker, ex_date) is unique and
+    SplitError on duplicates is swallowed. New splits trigger recompute_ticker
+    for that ticker only. yfinance failures log a warning and are skipped.
+    """
+    log.info("detect_corporate_actions_start")
+    yf_client = YFinanceClient()
+    gen = session_scope()
+    db = next(gen)
+    try:
+        held = [h.ticker for h in db.query(Holding).all()]
+        watched = [w.ticker for w in db.query(WatchlistItem).all()]
+        seen: set[str] = set()
+        tickers: list[str] = []
+        for t in held + watched:
+            if t not in seen:
+                seen.add(t)
+                tickers.append(t)
+        for t in tickers:
+            try:
+                splits = yf_client.fetch_splits(t)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("split_fetch_failed", ticker=t, error=str(exc))
+                continue
+            recompute_needed = False
+            for ex_date, ratio in splits:
+                try:
+                    record_split(
+                        db, ticker=t, ex_date=ex_date, ratio=ratio,
+                        source="yfinance",
+                    )
+                    log.info("split_recorded", ticker=t,
+                             ex_date=str(ex_date), ratio=ratio)
+                    recompute_needed = True
+                except SplitError:
+                    # Already recorded — uniqueness constraint hit. Expected
+                    # on every re-run; no log spam.
+                    pass
+            if recompute_needed:
+                recompute_ticker(db, t)
+    finally:
+        db.close()
+    log.info("detect_corporate_actions_done")
+
+
 def build_scheduler() -> BackgroundScheduler:
     settings = get_settings()
     sched = BackgroundScheduler(timezone="America/New_York")
@@ -131,6 +181,13 @@ def build_scheduler() -> BackgroundScheduler:
         run_news_purge,
         trigger=CronTrigger(day_of_week="sun", hour=3),
         id="news_purge", replace_existing=True,
+    )
+    # Daily split-detection: runs once at 17:00 ET (after the daily recap)
+    # so any same-day splits show up in the next morning's view.
+    sched.add_job(
+        run_detect_corporate_actions,
+        trigger=CronTrigger(hour=17, minute=0, day_of_week="mon-fri"),
+        id="detect_corporate_actions", replace_existing=True, misfire_grace_time=3600,
     )
     # Alert checker: every 5 min during US market hours (Mon-Fri 09:30-16:00 ET)
     sched.add_job(

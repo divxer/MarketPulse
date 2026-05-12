@@ -137,3 +137,60 @@ def test_datetime_roundtrip_preserves_utc(db_session: Session) -> None:
     assert fetched.added_at.tzinfo is not None
     # delta should be tiny — same call site
     assert abs((fetched.added_at - now).total_seconds()) < 5
+
+
+def test_stock_split_model_fields(db_session) -> None:
+    from datetime import date
+
+    from marketpulse.db.models import StockSplit
+
+    s = StockSplit(
+        ticker="TQQQ",
+        ex_date=date(2025, 11, 20),
+        ratio=2.0,
+        source="yfinance",
+        notes=None,
+    )
+    db_session.add(s)
+    db_session.commit()
+    db_session.refresh(s)
+    assert s.id is not None
+    assert s.ticker == "TQQQ"
+    assert s.ex_date == date(2025, 11, 20)
+    assert s.ratio == 2.0
+    assert s.source == "yfinance"
+    assert s.created_at is not None
+
+
+def test_stock_split_unique_constraint(db_session) -> None:
+    from datetime import date
+
+    from sqlalchemy.exc import IntegrityError
+
+    from marketpulse.db.models import StockSplit
+
+    db_session.add(StockSplit(ticker="TQQQ", ex_date=date(2025, 11, 20),
+                              ratio=2.0, source="yfinance"))
+    db_session.commit()
+    db_session.add(StockSplit(ticker="TQQQ", ex_date=date(2025, 11, 20),
+                              ratio=3.0, source="manual"))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()
+
+
+def test_stock_split_check_constraint_rejects_bad_ratio(db_session) -> None:
+    """The DB-level CHECK constraint rejects ratio=1 (no-op) and ratio<=0."""
+    from datetime import date
+
+    from sqlalchemy.exc import IntegrityError
+
+    from marketpulse.db.models import StockSplit
+
+    for bad in (1.0, 0.0, -0.5):
+        db_session.add(StockSplit(
+            ticker="X", ex_date=date(2025, 1, 1), ratio=bad, source="manual",
+        ))
+        with pytest.raises(IntegrityError):
+            db_session.commit()
+        db_session.rollback()
