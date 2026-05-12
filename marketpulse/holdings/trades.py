@@ -4,7 +4,7 @@ Buy: increases quantity, recomputes weighted-average cost basis (including fees)
 Sell: decreases quantity, records realized P&L = (sell_price - avg_cost) * qty - fees.
       Holding row is deleted when quantity reaches zero.
 """
-from datetime import UTC, datetime, time
+from datetime import UTC, date, datetime, time
 
 from sqlalchemy.orm import Session
 
@@ -99,16 +99,22 @@ def record_trade(
     return trade
 
 
-def recompute_ticker(session: Session, ticker: str) -> None:
-    """Rebuild Holding row + realized_pl values from the full Trade + StockSplit
-    history for ticker.
+def _walk_events(
+    session: Session, ticker: str, *, until: date | None = None,
+) -> tuple[float, float, list[Trade]]:
+    """Walk Trade + StockSplit events for `ticker` in chronological order.
 
-    Walks both timelines merged in chronological order. Splits are anchored to
-    end-of-day so any same-day trade sorts BEFORE the split takes effect, which
-    matches real-world execution (the split is applied at market open of the
-    next session, but ex_date is a date, not a datetime).
+    Returns (final_quantity, final_avg_cost, processed_trades). The trades
+    list is needed by recompute_ticker to set realized_pl on sells;
+    callers that only need qty can ignore it.
 
-    Trade rows are never mutated — only `realized_pl` on sells is recomputed.
+    If `until` is provided, stops including events whose `when` date is
+    strictly after `until`. Splits are EOD-anchored, so a split with
+    ex_date == until is INCLUDED (the holding state at end-of-day `until`
+    reflects the split).
+
+    Trade rows are mutated (realized_pl on sells) — the caller decides
+    whether to session.commit().
     """
     ticker = ticker.strip().upper()
     trades = (
@@ -125,7 +131,7 @@ def recompute_ticker(session: Session, ticker: str) -> None:
     )
 
     def _trade_when(t: Trade) -> datetime:
-        """Trades without an executed_at sort last — matches the old SQL NULLS LAST."""
+        """Trades without an executed_at sort last — matches old SQL NULLS LAST."""
         return t.executed_at if t.executed_at else _NULL_EXECUTED_AT_SENTINEL
 
     events: list[tuple[datetime, int, str, Trade | StockSplit]] = []
@@ -135,8 +141,14 @@ def recompute_ticker(session: Session, ticker: str) -> None:
         events.append((datetime.combine(s.ex_date, _EOD), 1, "split", s))
     events.sort(key=lambda x: (x[0], x[1]))
 
+    # If `until` is set, stop at the last event whose date is <= until.
+    if until is not None:
+        cutoff = datetime.combine(until, _EOD)
+        events = [e for e in events if e[0] <= cutoff]
+
     qty = 0.0
     avg_cost = 0.0
+    processed: list[Trade] = []
     for _when, _order, kind, evt in events:
         if kind == "trade":
             t = evt
@@ -150,10 +162,25 @@ def recompute_ticker(session: Session, ticker: str) -> None:
                 t.realized_pl = (t.price - avg_cost) * t.quantity - t.fees
                 qty -= t.quantity
                 # avg_cost unchanged on partial sell
+            processed.append(t)
         else:  # split
             s = evt
             qty = qty * s.ratio
             avg_cost = avg_cost / s.ratio
+
+    return qty, avg_cost, processed
+
+
+def recompute_ticker(session: Session, ticker: str) -> None:
+    """Rebuild Holding row + realized_pl values from the full Trade + StockSplit
+    history for ticker.
+
+    Thin wrapper over `_walk_events` — the heavy lifting (chronological
+    merge, EOD anchoring, realized_pl recompute) lives there so
+    `quantity_as_of` can share the walk without re-implementing it.
+    """
+    ticker = ticker.strip().upper()
+    qty, avg_cost, _ = _walk_events(session, ticker)
 
     holding = session.query(Holding).filter(Holding.ticker == ticker).one_or_none()
     if qty <= _EPSILON:

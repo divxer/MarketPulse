@@ -72,3 +72,63 @@ def test_monthly_dividends_groups_and_sorts(db_session) -> None:
     assert abs(rows[0]["amount"] - 9.12) < 1e-9
     assert rows[1]["month"] == "2024-06"
     assert abs(rows[1]["amount"] - 24.88) < 1e-9
+
+
+def test_record_dividend_persists_source(db_session) -> None:
+    """Non-default source is persisted and round-trips."""
+    d = record_dividend(
+        db_session, ticker="TQQQ", ex_date=date(2025, 9, 24),
+        amount_per_share=0.10, total_amount=2.00, source="tencent",
+    )
+    assert d.source == "tencent"
+
+
+def test_record_dividend_duplicate_raises(db_session) -> None:
+    """(ticker, ex_date) duplicate → DividendError 'already recorded'."""
+    record_dividend(
+        db_session, ticker="TQQQ", ex_date=date(2025, 9, 24),
+        amount_per_share=0.10, total_amount=2.00,
+    )
+    with pytest.raises(DividendError, match="already recorded"):
+        record_dividend(
+            db_session, ticker="TQQQ", ex_date=date(2025, 9, 24),
+            amount_per_share=0.12, total_amount=2.40,
+        )
+
+
+def test_record_dividend_session_clean_after_duplicate(db_session) -> None:
+    """After a duplicate raises, the session must still be usable."""
+    record_dividend(
+        db_session, ticker="TQQQ", ex_date=date(2025, 9, 24),
+        amount_per_share=0.10, total_amount=2.00,
+    )
+    with pytest.raises(DividendError, match="already recorded"):
+        record_dividend(
+            db_session, ticker="TQQQ", ex_date=date(2025, 9, 24),
+            amount_per_share=0.12, total_amount=2.40,
+        )
+    # Different ex_date — must succeed.
+    d = record_dividend(
+        db_session, ticker="TQQQ", ex_date=date(2025, 12, 24),
+        amount_per_share=0.09, total_amount=3.42,
+    )
+    assert d.id is not None
+
+
+def test_delete_dividend_returns_ticker(db_session) -> None:
+    from marketpulse.holdings.dividends import delete_dividend
+
+    d = record_dividend(
+        db_session, ticker="TQQQ", ex_date=date(2025, 9, 24),
+        amount_per_share=0.10, total_amount=2.00,
+    )
+    t = delete_dividend(db_session, d.id)
+    assert t == "TQQQ"
+    assert total_dividends(db_session, ticker="TQQQ") == 0
+
+
+def test_delete_dividend_missing_raises(db_session) -> None:
+    from marketpulse.holdings.dividends import delete_dividend
+
+    with pytest.raises(DividendError, match="not found"):
+        delete_dividend(db_session, 9999)

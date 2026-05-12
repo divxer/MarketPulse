@@ -145,6 +145,26 @@ class YFinanceClient:
         return out
 
     @_retry
+    def fetch_dividends(self, ticker: str) -> list[tuple[date, float]]:
+        """Return historical cash dividends for a ticker as (ex_date, amount_per_share).
+
+        Returns an empty list if yfinance has no dividend history. Network and
+        rate-limit errors propagate through `_retry`. Mirrors `fetch_splits` so
+        the scheduler can swap sources cleanly when Tencent is unavailable.
+        """
+        s = yf.Ticker(ticker).dividends
+        if s is None or s.empty:
+            return []
+        out: list[tuple[date, float]] = []
+        for ts, amount in s.items():
+            try:
+                d = ts.date()
+            except AttributeError:
+                d = datetime.fromisoformat(str(ts)).date()
+            out.append((d, float(amount)))
+        return out
+
+    @_retry
     def fetch_fundamentals(self, ticker: str) -> Fundamentals:
         info = yf.Ticker(ticker).info or {}
         return Fundamentals(

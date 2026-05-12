@@ -8,13 +8,14 @@ from collections import defaultdict
 from datetime import date
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from marketpulse.db.models import Dividend
 
 
 class DividendError(ValueError):
-    """Raised on invalid dividend input."""
+    """Raised on invalid dividend input or duplicate (ticker, ex_date)."""
 
 
 def record_dividend(
@@ -24,9 +25,12 @@ def record_dividend(
     ex_date: date,
     amount_per_share: float,
     total_amount: float,
+    source: str = "manual",
     notes: str | None = None,
 ) -> Dividend:
-    """Persist a dividend payout. Commits within."""
+    """Persist a dividend payout. Commits within. Raises DividendError on
+    invalid input or duplicate (ticker, ex_date).
+    """
     ticker = ticker.strip().upper()
     if not ticker:
         raise DividendError("ticker is required")
@@ -40,12 +44,32 @@ def record_dividend(
         ex_date=ex_date,
         amount_per_share=amount_per_share,
         total_amount=total_amount,
+        source=source,
         notes=notes or None,
     )
     session.add(div)
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        raise DividendError(
+            f"dividend already recorded for {ticker} on {ex_date}",
+        ) from exc
     session.refresh(div)
     return div
+
+
+def delete_dividend(session: Session, dividend_id: int) -> str:
+    """Delete a dividend by id. Returns the affected ticker. Raises
+    DividendError if not found.
+    """
+    div = session.query(Dividend).filter(Dividend.id == dividend_id).one_or_none()
+    if not div:
+        raise DividendError(f"dividend {dividend_id} not found")
+    ticker = div.ticker
+    session.delete(div)
+    session.commit()
+    return ticker
 
 
 def total_dividends(session: Session, *, ticker: str | None = None) -> float:

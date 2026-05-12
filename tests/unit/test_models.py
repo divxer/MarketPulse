@@ -194,3 +194,58 @@ def test_stock_split_check_constraint_rejects_bad_ratio(db_session) -> None:
         with pytest.raises(IntegrityError):
             db_session.commit()
         db_session.rollback()
+
+
+def test_dividend_source_field_default(db_session) -> None:
+    """Dividend.source defaults to 'manual' when not specified."""
+    from datetime import date
+
+    from marketpulse.db.models import Dividend
+
+    d = Dividend(ticker="TQQQ", ex_date=date(2025, 9, 24),
+                 amount_per_share=0.10, total_amount=2.00)
+    db_session.add(d)
+    db_session.commit()
+    db_session.refresh(d)
+    assert d.source == "manual"
+
+
+def test_dividend_unique_constraint(db_session) -> None:
+    """(ticker, ex_date) must be unique to support idempotent auto-record."""
+    from datetime import date
+
+    from sqlalchemy.exc import IntegrityError
+
+    from marketpulse.db.models import Dividend
+
+    db_session.add(Dividend(ticker="TQQQ", ex_date=date(2025, 9, 24),
+                            amount_per_share=0.10, total_amount=2.00))
+    db_session.commit()
+    db_session.add(Dividend(ticker="TQQQ", ex_date=date(2025, 9, 24),
+                            amount_per_share=0.12, total_amount=2.40))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()
+
+
+def test_dividend_check_constraint_rejects_negative_amounts(db_session) -> None:
+    """DB-level CHECK rejects negative amount_per_share or total_amount."""
+    from datetime import date
+
+    from sqlalchemy.exc import IntegrityError
+
+    from marketpulse.db.models import Dividend
+
+    # Negative per-share
+    db_session.add(Dividend(ticker="X", ex_date=date(2025, 1, 1),
+                            amount_per_share=-0.10, total_amount=1.0))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()
+
+    # Negative total
+    db_session.add(Dividend(ticker="X", ex_date=date(2025, 1, 1),
+                            amount_per_share=0.10, total_amount=-1.0))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()

@@ -104,10 +104,20 @@ class Dividend(Base):
     # Both are stored explicitly so we can round-trip the original 腾讯自选股 entry.
     amount_per_share: Mapped[float] = mapped_column(Float, nullable=False)
     total_amount: Mapped[float] = mapped_column(Float, nullable=False)
+    # Source of this dividend: "manual" | "tencent" | "yfinance" | "import".
+    # Lets reconciliation prefer one over another and helps debug data origin.
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="manual")
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow, nullable=False)
 
-    __table_args__ = (Index("ix_dividends_ticker_ex_date", "ticker", "ex_date"),)
+    __table_args__ = (
+        Index("ix_dividends_ticker_ex_date", "ticker", "ex_date"),
+        UniqueConstraint("ticker", "ex_date", name="uq_dividends_ticker_date"),
+        CheckConstraint(
+            "amount_per_share >= 0 AND total_amount >= 0",
+            name="ck_dividends_amounts_non_negative",
+        ),
+    )
 
 
 class StockSplit(Base):

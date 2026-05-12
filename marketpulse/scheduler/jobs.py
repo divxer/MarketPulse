@@ -1,4 +1,4 @@
-from datetime import date, time
+from datetime import date, time, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -11,10 +11,12 @@ from marketpulse.config import get_settings
 from marketpulse.data.cache import NewsCache
 from marketpulse.data.hybrid_client import HybridClient
 from marketpulse.data.service import DataService
-from marketpulse.data.tencent_client import TencentClient
+from marketpulse.data.tencent_client import CorporateActions, TencentClient
 from marketpulse.data.yfinance_client import YFinanceClient
 from marketpulse.db.base import session_scope
 from marketpulse.db.models import Holding, WatchlistItem
+from marketpulse.holdings.dividends import DividendError, record_dividend
+from marketpulse.holdings.quantity_history import quantity_as_of
 from marketpulse.holdings.splits import SplitError, record_split
 from marketpulse.holdings.trades import recompute_ticker
 from marketpulse.logging import get_logger
@@ -113,14 +115,21 @@ def run_news_purge() -> None:
 
 
 def run_detect_corporate_actions() -> None:
-    """Pull split history from yfinance for every held/watched ticker.
+    """Daily 17:00 ET: pull dividends + splits from Tencent for every
+    held/watched ticker; fall back to yfinance on Tencent failure.
 
-    Idempotent — re-runs are safe because (ticker, ex_date) is unique and
-    SplitError on duplicates is swallowed. New splits trigger recompute_ticker
-    for that ticker only. yfinance failures log a warning and are skipped.
+    Idempotent — duplicate (ticker, ex_date) at the service layer is swallowed.
+    Dividends are only recorded when shares were held on ex_date (per
+    quantity_as_of). Splits are always recorded so future buys recompute
+    correctly. recompute_ticker is only called when at least one new split
+    actually landed.
     """
     log.info("detect_corporate_actions_start")
+    tencent = TencentClient()
     yf_client = YFinanceClient()
+    today = date.today()
+    since = today - timedelta(days=1825)  # ~5 years lookback
+
     gen = session_scope()
     db = next(gen)
     try:
@@ -132,31 +141,70 @@ def run_detect_corporate_actions() -> None:
             if t not in seen:
                 seen.add(t)
                 tickers.append(t)
+
         for t in tickers:
-            try:
-                splits = yf_client.fetch_splits(t)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("split_fetch_failed", ticker=t, error=str(exc))
-                continue
+            actions, src = _fetch_corp_actions(t, tencent, yf_client, since, today)
+            if actions is None:
+                continue  # both sources logged + failed
+
             recompute_needed = False
-            for ex_date, ratio in splits:
+
+            # Splits: record for all tickers (watchlist-only included).
+            for ex_date, ratio in actions.splits:
                 try:
                     record_split(
-                        db, ticker=t, ex_date=ex_date, ratio=ratio,
-                        source="yfinance",
+                        db, ticker=t, ex_date=ex_date, ratio=ratio, source=src,
                     )
                     log.info("split_recorded", ticker=t,
-                             ex_date=str(ex_date), ratio=ratio)
+                             ex_date=str(ex_date), ratio=ratio, source=src)
                     recompute_needed = True
                 except SplitError:
-                    # Already recorded — uniqueness constraint hit. Expected
-                    # on every re-run; no log spam.
-                    pass
+                    pass  # already recorded
+
+            # Dividends: only record when shares held on ex_date.
+            for ex_date, per_share in actions.dividends:
+                qty = quantity_as_of(db, t, ex_date)
+                if qty <= 0:
+                    continue
+                try:
+                    record_dividend(
+                        db, ticker=t, ex_date=ex_date,
+                        amount_per_share=per_share,
+                        total_amount=qty * per_share,
+                        source=src,
+                    )
+                    log.info("dividend_recorded", ticker=t,
+                             ex_date=str(ex_date), per_share=per_share,
+                             qty=qty, source=src)
+                except DividendError:
+                    pass  # already recorded
+
             if recompute_needed:
                 recompute_ticker(db, t)
     finally:
         db.close()
     log.info("detect_corporate_actions_done")
+
+
+def _fetch_corp_actions(ticker, tencent, yf_client, since, today):
+    """Try Tencent first; fall back to yfinance on any exception.
+    Returns (CorporateActions, source_label) or (None, "none") on total failure.
+    Never raises.
+    """
+    try:
+        actions = tencent.fetch_corporate_actions(ticker, start=since, end=today)
+        return actions, "tencent"
+    except Exception as exc:  # noqa: BLE001 — best-effort across data sources
+        log.warning("tencent_corp_actions_failed",
+                    ticker=ticker, error=str(exc))
+    try:
+        splits = yf_client.fetch_splits(ticker)
+        dividends = yf_client.fetch_dividends(ticker)
+        return CorporateActions(dividends=dividends, splits=splits), "yfinance"
+    except Exception as exc:  # noqa: BLE001
+        log.warning("corp_actions_all_sources_failed",
+                    ticker=ticker, error=str(exc))
+        return None, "none"
 
 
 def build_scheduler() -> BackgroundScheduler:
