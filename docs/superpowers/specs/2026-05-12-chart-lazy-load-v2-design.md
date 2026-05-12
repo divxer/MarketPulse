@@ -103,6 +103,8 @@ async function loadMoreHistory() {
 
 **`prependChunk`** — body unchanged except remove the trailing comment block ("No setVisibleLogicalRange needed..."). The setVisibleLogicalRange call now lives in the caller.
 
+**Lightweight observability** — `loadMoreHistory` logs one `console.debug` line on entry (with `barsBefore`, `oldestLoaded`, chunk request URL) and one on success (with chunk size, `prevRange`, `newRange`). Useful for catching unexpected cascade behavior in production without a full monitoring stack. Browser DevTools filter `mp-chart` to see them. No production-only flag; debug-level is filtered out of default console view anyway.
+
 **Removed code** — none of these are needed and they're misleading-by-omission:
 - The "No fitContent(), no setVisibleLogicalRange" comment block
 - The "No rAF wait needed" comment block in `loadMoreHistory`
