@@ -106,7 +106,11 @@ def trades_add(
     if not _TICKER_RE.match(normalized):
         raise HTTPException(status_code=422, detail="invalid ticker")
 
-    executed_at_dt: datetime | None = None
+    # Blank form field → use the current UTC datetime. This preserves
+    # sub-second ordering for same-day trades and keeps newly recorded
+    # trades correctly ordered against future events in the timeline
+    # (a NULL executed_at sorts via datetime.max which is wrong for "now").
+    executed_at_dt: datetime
     if executed_at.strip():
         try:
             # Accept YYYY-MM-DD or full ISO 8601. Naive dates are treated as UTC.
@@ -119,6 +123,8 @@ def trades_add(
                     executed_at_dt = executed_at_dt.replace(tzinfo=UTC)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=f"invalid executed_at: {exc}") from exc
+    else:
+        executed_at_dt = datetime.now(UTC)
 
     try:
         record_trade(
