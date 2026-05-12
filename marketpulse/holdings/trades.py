@@ -4,11 +4,11 @@ Buy: increases quantity, recomputes weighted-average cost basis (including fees)
 Sell: decreases quantity, records realized P&L = (sell_price - avg_cost) * qty - fees.
       Holding row is deleted when quantity reaches zero.
 """
-from datetime import datetime
+from datetime import UTC, datetime, time
 
 from sqlalchemy.orm import Session
 
-from marketpulse.db.models import Holding, Trade
+from marketpulse.db.models import Holding, StockSplit, Trade
 
 
 class TradeError(ValueError):
@@ -17,6 +17,12 @@ class TradeError(ValueError):
 
 # Float comparison tolerance — quantities under this round to zero (holding deleted).
 _EPSILON = 1e-9
+
+# Sentinel for trades with executed_at=None — sorts them LAST, matching SQL NULLS LAST.
+_NULL_EXECUTED_AT_SENTINEL = datetime.max.replace(tzinfo=UTC)
+
+# End-of-day anchor used to sort splits after same-day trades.
+_EOD = time(23, 59, 59, tzinfo=UTC)
 
 
 def record_trade(
@@ -104,10 +110,6 @@ def recompute_ticker(session: Session, ticker: str) -> None:
 
     Trade rows are never mutated — only `realized_pl` on sells is recomputed.
     """
-    from datetime import UTC, datetime, time
-
-    from marketpulse.db.models import StockSplit
-
     ticker = ticker.strip().upper()
     trades = (
         session.query(Trade)
@@ -122,17 +124,11 @@ def recompute_ticker(session: Session, ticker: str) -> None:
         .all()
     )
 
-    # Normalize event times to datetime so heterogeneous tuple comparison
-    # never raises. Splits anchor at end-of-day (kind=1) so same-day trades
-    # (kind=0) sort first.
-    _EOD = time(23, 59, 59, tzinfo=UTC)
-
     def _trade_when(t: Trade) -> datetime:
-        if t.executed_at:
-            return t.executed_at
-        return t.created_at
+        """Trades without an executed_at sort last — matches the old SQL NULLS LAST."""
+        return t.executed_at if t.executed_at else _NULL_EXECUTED_AT_SENTINEL
 
-    events: list[tuple[datetime, int, str, object]] = []
+    events: list[tuple[datetime, int, str, Trade | StockSplit]] = []
     for t in trades:
         events.append((_trade_when(t), 0, "trade", t))
     for s in splits:
@@ -143,7 +139,7 @@ def recompute_ticker(session: Session, ticker: str) -> None:
     avg_cost = 0.0
     for _when, _order, kind, evt in events:
         if kind == "trade":
-            t = evt  # type: ignore[assignment]
+            t = evt
             if t.action == "buy":
                 new_qty = qty + t.quantity
                 total_cost = qty * avg_cost + t.quantity * t.price + t.fees
@@ -155,11 +151,9 @@ def recompute_ticker(session: Session, ticker: str) -> None:
                 qty -= t.quantity
                 # avg_cost unchanged on partial sell
         else:  # split
-            s = evt  # type: ignore[assignment]
+            s = evt
             qty = qty * s.ratio
-            # Inverse adjustment keeps total_cost invariant.
-            if s.ratio:
-                avg_cost = avg_cost / s.ratio
+            avg_cost = avg_cost / s.ratio
 
     holding = session.query(Holding).filter(Holding.ticker == ticker).one_or_none()
     if qty <= _EPSILON:

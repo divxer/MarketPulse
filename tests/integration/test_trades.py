@@ -208,6 +208,57 @@ def test_recompute_after_split_delete_restores(db_session) -> None:
     assert h.avg_cost == 30.0
 
 
+def test_recompute_orders_null_executed_at_last(db_session) -> None:
+    """Trade with executed_at=None must sort AFTER trades that have one,
+    even if its created_at is earlier. Preserves the old SQL NULLS LAST contract."""
+    from datetime import UTC, datetime
+
+    from marketpulse.db.models import Holding
+    from marketpulse.holdings.trades import recompute_ticker
+
+    # First, insert a trade with no executed_at — DB created_at = now.
+    record_trade(db_session, ticker="X", action="buy", quantity=10, price=100)
+    # Then a trade with explicit older executed_at.
+    record_trade(db_session, ticker="X", action="buy", quantity=10, price=50,
+                 executed_at=datetime(2020, 1, 1, tzinfo=UTC))
+    recompute_ticker(db_session, "X")
+
+    h = db_session.query(Holding).filter_by(ticker="X").one()
+    # Expected walk: first the 2020 buy @ $50 (qty=10, avg=50),
+    # then the no-executed_at buy @ $100 (qty=20, avg=75).
+    assert h.quantity == 20
+    assert h.avg_cost == 75.0
+
+
+def test_same_day_sell_executes_before_split(db_session) -> None:
+    """A sell on the same date as a split uses PRE-split avg_cost.
+    Sells at 09:30 UTC sort before the EOD split anchor.
+    """
+    from datetime import UTC, date, datetime
+
+    from marketpulse.db.models import Trade
+    from marketpulse.holdings.splits import record_split
+    from marketpulse.holdings.trades import recompute_ticker
+
+    # Buy 100 @ $10 on a prior date.
+    record_trade(db_session, ticker="X", action="buy", quantity=100, price=10,
+                 executed_at=datetime(2024, 1, 15, tzinfo=UTC))
+    # Sell 20 @ $6 at 09:30 UTC on split day.
+    record_trade(db_session, ticker="X", action="sell", quantity=20, price=6,
+                 executed_at=datetime(2025, 11, 20, 9, 30, tzinfo=UTC))
+    # 1:2 split same date.
+    record_split(db_session, ticker="X", ex_date=date(2025, 11, 20), ratio=2.0)
+    recompute_ticker(db_session, "X")
+
+    sell = (
+        db_session.query(Trade)
+        .filter(Trade.ticker == "X", Trade.action == "sell")
+        .one()
+    )
+    # Pre-split avg_cost = $10. Realized = (6 - 10) * 20 = -80.
+    assert sell.realized_pl == pytest.approx(-80.0)
+
+
 def test_fractional_shares_after_reverse_split_precise(db_session) -> None:
     """7 shares × 0.2 (5:1 reverse) = 1.4 shares; float64 should preserve this."""
     from datetime import UTC, date, datetime
