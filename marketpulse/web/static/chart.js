@@ -268,6 +268,8 @@
 
   function prependChunk(chunk) {
     const s = window.__mpChartState;
+    const prevRange = s.mainChart.timeScale().getVisibleLogicalRange();
+    const shift = chunk.bars.length;
     // Bars: prepend, then setData on candle + volume series.
     s.bars = chunk.bars.concat(s.bars);
     s.candleSeries.setData(s.bars);
@@ -319,6 +321,18 @@
         };
       });
       s.candleSeries.setMarkers(markers);
+    }
+
+    // Restore the user's visible window, shifted right by the number of new
+    // bars. Without this, lightweight-charts re-fits the time scale to
+    // include ALL data after setData (because the chart was in fitContent
+    // mode), which sets range.from back to 0 and re-triggers the lazy-load
+    // subscription. Forcing range.from > 60 breaks that feedback loop.
+    if (prevRange) {
+      s.mainChart.timeScale().setVisibleLogicalRange({
+        from: prevRange.from + shift,
+        to: prevRange.to + shift,
+      });
     }
   }
 
