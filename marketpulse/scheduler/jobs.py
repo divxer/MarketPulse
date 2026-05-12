@@ -11,7 +11,7 @@ from marketpulse.config import get_settings
 from marketpulse.data.cache import NewsCache
 from marketpulse.data.hybrid_client import HybridClient
 from marketpulse.data.service import DataService
-from marketpulse.data.tencent_client import TencentClient
+from marketpulse.data.tencent_client import CorporateActions, TencentClient
 from marketpulse.data.yfinance_client import YFinanceClient
 from marketpulse.db.base import session_scope
 from marketpulse.db.models import Holding, WatchlistItem
@@ -191,7 +191,6 @@ def _fetch_corp_actions(ticker, tencent, yf_client, since, today):
     Returns (CorporateActions, source_label) or (None, "none") on total failure.
     Never raises.
     """
-    from marketpulse.data.tencent_client import CorporateActions
     try:
         actions = tencent.fetch_corporate_actions(ticker, start=since, end=today)
         return actions, "tencent"
