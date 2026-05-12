@@ -42,6 +42,7 @@ def test_post_splits_rejects_bad_date(client: TestClient, monkeypatch):
         "ticker": "X", "ex_date": "not-a-date", "ratio": 2.0,
     })
     assert res.status_code == 422
+    assert "invalid ex_date" in res.json()["detail"]
 
 
 def test_post_splits_duplicate_rejected(client: TestClient, monkeypatch):
@@ -82,7 +83,7 @@ def test_delete_splits_recomputes_holding(client: TestClient, monkeypatch):
     # The POST /splits handler must trigger recompute. Verify via /holdings.
     res = client.get("/holdings")
     assert "X" in res.text
-    assert "40" in res.text
+    assert ">40<" in res.text or ">40.00<" in res.text or ">40 <" in res.text
 
     # 3) Delete split → recompute → 20 @ $30
     res = client.delete(f"/splits/{split_id}")
@@ -98,4 +99,9 @@ def test_post_splits_requires_auth(client: TestClient):
         follow_redirects=False,
     )
     # Unauthenticated requests redirect to /login (HTML) or 401 (JSON).
+    assert res.status_code in (303, 401)
+
+
+def test_get_splits_requires_auth(client: TestClient):
+    res = client.get("/splits", follow_redirects=False)
     assert res.status_code in (303, 401)
