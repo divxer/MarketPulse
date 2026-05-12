@@ -303,7 +303,7 @@ def test_trades_update_basic(client: TestClient, monkeypatch):
     assert r.status_code == 200
     # Look up the trade we just made
     from marketpulse.db import base as db_base
-    from marketpulse.db.models import Trade, Holding
+    from marketpulse.db.models import Holding, Trade
     s = next(db_base.session_scope())
     trade_id = s.query(Trade).filter(Trade.ticker == "AAPL").one().id
     # Edit it: change price from 100 to 120
@@ -355,7 +355,7 @@ def test_trades_update_ticker_change_recomputes_both(client: TestClient, monkeyp
         "quantity": 5, "price": 100.0,
     })
     from marketpulse.db import base as db_base
-    from marketpulse.db.models import Trade, Holding
+    from marketpulse.db.models import Holding, Trade
     s = next(db_base.session_scope())
     trade_id = s.query(Trade).filter(Trade.ticker == "AAPL").one().id
     # Edit: change ticker AAPL → MSFT
