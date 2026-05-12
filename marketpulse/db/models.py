@@ -4,6 +4,7 @@ from typing import Any
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     Float,
@@ -107,6 +108,32 @@ class Dividend(Base):
     created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow, nullable=False)
 
     __table_args__ = (Index("ix_dividends_ticker_ex_date", "ticker", "ex_date"),)
+
+
+class StockSplit(Base):
+    """Corporate-action split event. Preserves original Trade rows; the
+    splits-aware recompute applies these in chronological order to derive
+    current Holding state. See docs/superpowers/specs/2026-05-11-stock-splits-design.md.
+    """
+    __tablename__ = "stock_splits"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ticker: Mapped[str] = mapped_column(String(16), nullable=False)
+    ex_date: Mapped[date] = mapped_column(Date, nullable=False)
+    # new_shares / old_shares. Forward 1:2 = 2.0; reverse 5:1 = 0.2.
+    # CHECK constraint at the DB level guards against bad data even if a
+    # caller bypasses service-layer validation.
+    ratio: Mapped[float] = mapped_column(Float, nullable=False)
+    # "yfinance" | "manual" | "import" — lets reconciliation prefer one over another.
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="manual")
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", "ex_date", name="uq_stock_splits_ticker_date"),
+        CheckConstraint("ratio > 0 AND ratio != 1", name="ck_stock_splits_ratio_valid"),
+        Index("ix_stock_splits_ticker_ex_date", "ticker", "ex_date"),
+    )
 
 
 class AlertRule(Base):
