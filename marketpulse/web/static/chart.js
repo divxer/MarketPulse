@@ -185,18 +185,16 @@
     if (s.rsiChart)  { syncPair(s.mainChart, s.rsiChart);  syncPair(s.rsiChart, s.mainChart); }
     if (s.macdChart) { syncPair(s.mainChart, s.macdChart); syncPair(s.macdChart, s.mainChart); }
 
-    // No fitContent(), no setVisibleLogicalRange — let lightweight-charts
-    // pick the default initial view (shows all initial bars given the
-    // `rightOffset: 12` above). The crucial property we rely on: as long
-    // as fitContent() is NEVER called, every subsequent setData()
-    // preserves the visible TIME range. After a lazy-load prepend the
-    // user's view stays anchored on the same bars, and `range.from` in
-    // logical-index space grows by chunk.bars.length — naturally rising
-    // above the trigger threshold so no feedback loop is possible.
-    //
-    // `autoSize: true` (in commonOpts) handles window/container resizes
-    // by stretching the canvas while preserving the visible time range,
-    // so we don't need ResizeObserver or window.resize listeners.
+    // Anchor initial view to the most recent ~60 bars. The lazy-load
+    // subscription uses barsInLogicalRange(range).barsBefore < 50 — if
+    // we showed all initial bars at first paint, barsBefore would be 0
+    // and a fetch would fire immediately. Anchoring to 60 means the
+    // prefetch only happens if the initial dataset is shorter than 60
+    // bars (i.e., a very-newly-listed ticker).
+    s.mainChart.timeScale().setVisibleLogicalRange({
+      from: Math.max(0, s.bars.length - 60),
+      to: s.bars.length,
+    });
 
     // Lazy-load trigger: TradingView's official barsInLogicalRange pattern.
     // barsBefore = count of bars in the dataset earlier than the visible
@@ -333,11 +331,6 @@
       });
       s.candleSeries.setMarkers(markers);
     }
-    // No setVisibleLogicalRange needed: because the chart is NOT in
-    // sticky fitContent mode (see renderCharts), setData preserves the
-    // visible TIME range automatically. The user's view stays anchored
-    // on the same bars and range.from grows by chunk.bars.length in
-    // logical-index space.
   }
 
   function showLoadingDot(on) {
