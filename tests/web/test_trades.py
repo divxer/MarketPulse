@@ -239,3 +239,28 @@ def test_trade_post_blank_executed_at_defaults_to_now(client: TestClient, monkey
     t = s.query(Trade).filter(Trade.ticker == "ABC").one()
     assert t.executed_at is not None
     assert before <= t.executed_at <= after
+
+
+def test_trades_form_after_request_resyncs_action(client: TestClient, monkeypatch):
+    """Regression for the bug where form.reset() after submit left the hidden
+    `action` input at its previous value, causing the next submission to use
+    the stale action even though the visible select showed a different one.
+    The fix is in the template's `hx-on::after-request` attribute, which
+    must call onEventKindChange() after this.reset()."""
+    _login(client, monkeypatch)
+    r = client.get("/trades")
+    assert r.status_code == 200
+    body = r.text
+    # The attribute must include a call back into onEventKindChange after reset
+    assert "this.reset()" in body
+    assert "onEventKindChange" in body
+    # Specifically, the after-request hook must re-sync (the JS function call
+    # must appear inside the hx-on::after-request expression):
+    assert "hx-on::after-request" in body
+    # Crude but effective: the two pieces must be in the same attribute value.
+    import re
+    m = re.search(r'hx-on::after-request="([^"]+)"', body)
+    assert m is not None, "hx-on::after-request attribute missing"
+    expr = m.group(1)
+    assert "this.reset()" in expr
+    assert "onEventKindChange" in expr

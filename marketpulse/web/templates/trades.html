@@ -32,7 +32,7 @@
   <!-- Type-aware form. JS swaps which fields are visible based on the type select. -->
   <form id="event-form"
         hx-post="/trades" hx-target="#trades-container" hx-swap="innerHTML"
-        hx-on::after-request="if(event.detail.successful) this.reset()"
+        hx-on::after-request="if(event.detail.successful){this.reset();onEventKindChange(document.getElementById('event-kind').value);}"
         class="grid grid-cols-2 md:grid-cols-7 gap-2 mb-4 text-sm">
     <select name="event_kind" id="event-kind"
             onchange="onEventKindChange(this.value)"
