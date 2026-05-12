@@ -356,5 +356,52 @@ def test_detect_corporate_actions_idempotent(monkeypatch) -> None:
         from marketpulse.scheduler.jobs import run_detect_corporate_actions
         run_detect_corporate_actions()  # must not raise
 
-    # No new splits → recompute NOT called.
-    rc.assert_not_called()
+    # recompute_ticker is ALWAYS called per ticker (even when all
+    # corp-actions are duplicates) — catches the post-import case where
+    # Holdings would otherwise be stale relative to existing splits.
+    rc.assert_called_once_with(fake_session, "TQQQ")
+
+
+def test_detect_corporate_actions_recomputes_even_with_no_new_actions(monkeypatch) -> None:
+    """Regression: after a trade re-import where existing splits are already
+    in the DB, the scheduler must still recompute so Holding rows reflect
+    the split multiplication. Previously the recompute_needed flag gated
+    this and only fired on new splits."""
+    from unittest.mock import MagicMock, patch
+
+    monkeypatch.setenv("APP_PASSWORD_HASH", "x")
+    monkeypatch.setenv("SESSION_SECRET", "y" * 32)
+    from marketpulse.config import get_settings
+    get_settings.cache_clear()
+
+    fake_session = MagicMock()
+    fake_session.query.return_value.all.side_effect = [
+        [MagicMock(ticker="TQQQ"), MagicMock(ticker="AAPL")],  # 2 held
+        [],
+    ]
+
+    def fake_session_scope():
+        yield fake_session
+
+    from marketpulse.data.tencent_client import CorporateActions
+    fake_tencent = MagicMock()
+    # Tencent succeeds but returns no actions for either ticker
+    fake_tencent.fetch_corporate_actions.return_value = CorporateActions(
+        dividends=[], splits=[],
+    )
+
+    with patch("marketpulse.scheduler.jobs.session_scope", fake_session_scope), \
+         patch("marketpulse.scheduler.jobs.TencentClient", return_value=fake_tencent), \
+         patch("marketpulse.scheduler.jobs.YFinanceClient"), \
+         patch("marketpulse.scheduler.jobs.record_split"), \
+         patch("marketpulse.scheduler.jobs.record_dividend"), \
+         patch("marketpulse.scheduler.jobs.quantity_as_of"), \
+         patch("marketpulse.scheduler.jobs.recompute_ticker") as rc:
+        from marketpulse.scheduler.jobs import run_detect_corporate_actions
+        run_detect_corporate_actions()
+
+    # Even with zero new actions, both tickers got a recompute call.
+    assert rc.call_count == 2
+    called_tickers = [c.args[1] for c in rc.call_args_list]
+    assert "TQQQ" in called_tickers
+    assert "AAPL" in called_tickers
