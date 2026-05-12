@@ -85,20 +85,36 @@ def stock_page(
     )
 
 
+_LOOKBACK_DAYS = 250  # buffer for SMA200/EMA26/Bollinger to be valid at window start
+
+
 @router.get("/stock/{ticker}/chart-data")
 def stock_chart_data(
     ticker: str,
     period: str = Query("60d"),
+    before: str | None = Query(None),
+    count: int = Query(180, ge=1, le=400),
     data: DataService = Depends(get_data_service),
     _: None = Depends(require_auth),
 ):
+    """Two modes:
+    - ?period=...                  initial load (Tencent fast path, unchanged)
+    - ?before=YYYY-MM-DD&count=N   lazy-load chunk via yfinance, padded with
+                                   250-day indicator lookback then trimmed by
+                                   date before returning. `before` wins if both
+                                   are provided.
+    """
+    ticker = ticker.upper()
+
+    if before is not None:
+        return _chart_data_lazy(ticker, before, count)
+
     if period not in _VALID_PERIODS:
         raise HTTPException(
             status_code=422,
             detail=f"period must be one of {sorted(_VALID_PERIODS)}",
         )
-    ticker = ticker.upper()
-    # Always fetch 1y so we have SMA200 headroom regardless of visible period.
+    # ---- existing period code path ----
     try:
         all_bars = data.get_history(ticker, period="1y")
     except Exception as exc:
@@ -108,19 +124,73 @@ def stock_chart_data(
     cutoff = date.today() - timedelta(days=_PERIOD_DAYS[period])
 
     if not all_bars:
-        empty: list = []
-        payload = {
-            "bars": empty, "ema12": empty, "ema26": empty,
-            "sma50": empty, "sma200": empty,
-            "bb_upper": empty, "bb_middle": empty, "bb_lower": empty,
-            "rsi": empty,
-            "macd": {"line": empty, "signal": empty, "histogram": empty},
-            "signal_markers": empty,
-        }
-        return JSONResponse(payload, headers={"Cache-Control": "private, max-age=300"})
+        return JSONResponse(
+            _empty_payload(), headers={"Cache-Control": "private, max-age=300"},
+        )
 
+    return JSONResponse(
+        _build_payload(all_bars, cutoff=cutoff),
+        headers={"Cache-Control": "private, max-age=300"},
+    )
+
+
+def _chart_data_lazy(ticker: str, before_str: str, count: int) -> JSONResponse:
+    """Lazy-load path: fetch `count + 250` calendar days ending strictly before
+    `before_str` via yfinance, compute indicators over the padded range, then
+    trim by date so only the requested `count` window is returned.
+    """
+    try:
+        before_date = date.fromisoformat(before_str)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422, detail=f"invalid before: {exc}",
+        ) from exc
+
+    # Pull (count + lookback) calendar days. Trading days are ~70% of calendar
+    # days so this is a comfortable upper bound; the trim step below picks
+    # exactly `count` trading days (or fewer if ticker history is short).
+    fetch_start = before_date - timedelta(days=count + _LOOKBACK_DAYS)
+    fetch_end = before_date - timedelta(days=1)  # exclusive of `before`
+
+    from marketpulse.data.yfinance_client import YFinanceClient
+    try:
+        all_bars = YFinanceClient().fetch_history_range(
+            ticker, start=fetch_start, end=fetch_end,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "chart_data_lazy_failed", ticker=ticker,
+            before=before_str, error=str(exc),
+        )
+        all_bars = []
+
+    if not all_bars:
+        return JSONResponse(_empty_payload())
+
+    # The "window" is the last `count` of the padded bars.
+    window_bars = all_bars[-count:]
+    window_start = window_bars[0].date
+
+    return JSONResponse(_build_payload(all_bars, cutoff=window_start))
+
+
+def _empty_payload() -> dict:
+    empty: list = []
+    return {
+        "bars": empty, "ema12": empty, "ema26": empty,
+        "sma50": empty, "sma200": empty,
+        "bb_upper": empty, "bb_middle": empty, "bb_lower": empty,
+        "rsi": empty,
+        "macd": {"line": empty, "signal": empty, "histogram": empty},
+        "signal_markers": empty,
+    }
+
+
+def _build_payload(all_bars: list, cutoff: date) -> dict:
+    """Compute indicators over `all_bars`, then trim every series to points
+    whose date >= cutoff. Date-based trim (not array index) so leading-null
+    indicators (SMA200 has 199 leading nulls) don't misalign when sliced."""
     closes = [b.close for b in all_bars]
-
     ema12 = ema(closes, 12)
     ema26 = ema(closes, 26)
     sma50 = sma(closes, 50)
@@ -131,15 +201,14 @@ def stock_chart_data(
     markers = scan_signal_markers(all_bars)
 
     def series_after(bars, series):
-        out = []
-        for b, v in zip(bars, series, strict=True):
-            if b.date < cutoff:
-                continue
-            out.append({"time": b.date.isoformat(), "value": v})
-        return out
+        return [
+            {"time": b.date.isoformat(), "value": v}
+            for b, v in zip(bars, series, strict=True)
+            if b.date >= cutoff
+        ]
 
     visible_bars = [b for b in all_bars if b.date >= cutoff]
-    payload = {
+    return {
         "bars": [
             {"time": b.date.isoformat(), "open": b.open, "high": b.high,
              "low": b.low, "close": b.close, "volume": b.volume}
@@ -160,7 +229,6 @@ def stock_chart_data(
         },
         "signal_markers": [m for m in markers if m["time"] >= cutoff.isoformat()],
     }
-    return JSONResponse(payload, headers={"Cache-Control": "private, max-age=300"})
 
 
 @router.post("/stock/{ticker}/analyze", response_class=HTMLResponse)
