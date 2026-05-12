@@ -157,6 +157,24 @@
     if (macdChart) { syncPair(mainChart, macdChart); syncPair(macdChart, mainChart); }
 
     mainChart.timeScale().fitContent();
+
+    // Refit on container resize. autoSize:true resizes the canvas but keeps
+    // the visible time range fixed — so when the user widens the window,
+    // bars stay at their original pixel width and empty space appears on
+    // both sides. Re-fitting on resize stretches the bars to the new width.
+    if (window.ResizeObserver) {
+      // Disconnect any observer from a previous render so we don't accumulate.
+      if (window.__mpChartResizeObserver) {
+        window.__mpChartResizeObserver.disconnect();
+      }
+      const ro = new ResizeObserver(() => {
+        mainChart.timeScale().fitContent();
+        if (rsiChart)  rsiChart.timeScale().fitContent();
+        if (macdChart) macdChart.timeScale().fitContent();
+      });
+      ro.observe(mainEl);
+      window.__mpChartResizeObserver = ro;
+    }
   }
 
   function applyToggles() {
