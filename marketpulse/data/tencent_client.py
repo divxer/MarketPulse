@@ -248,7 +248,11 @@ class TencentClient:
                 if len(r) < 7:
                     continue  # plain OHLCV row, no action
                 action_dict = r[6]
-                if not isinstance(action_dict, dict):
+                if not isinstance(action_dict, dict) or not action_dict:
+                    # Empty dict = "no corporate action on this day". Tencent
+                    # emits {} as a placeholder for some tickers (e.g. QBTS,
+                    # TNA) where it doesn't aggregate FH/拆股 data. Skip
+                    # silently — these are not parse failures.
                     continue
                 cqr = action_dict.get("cqr", "")
                 try:
