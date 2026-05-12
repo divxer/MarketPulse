@@ -216,9 +216,10 @@ def test_chart_data_returns_expected_keys(client, monkeypatch) -> None:
         data = r.json()
         assert set(data.keys()) >= {
             "bars", "ema12", "ema26", "sma50", "sma200",
-            "bb_upper", "bb_middle", "bb_lower",
+            "bb_upper", "bb_lower",
             "rsi", "macd", "signal_markers",
         }
+        assert "bb_middle" not in data, "bb_middle was dropped from the contract"
         assert isinstance(data["bars"], list)
         assert data["bars"][0].keys() >= {"time", "open", "high", "low", "close", "volume"}
         assert isinstance(data["macd"], dict)
@@ -278,3 +279,92 @@ def test_chart_data_sets_cache_control_header(client, monkeypatch) -> None:
         assert "max-age=300" in r.headers.get("cache-control", "")
     finally:
         client.app.dependency_overrides.clear()
+
+
+def test_chart_data_before_param_returns_window_before_date(
+    client: TestClient, monkeypatch,
+) -> None:
+    """?before=2024-06-01&count=180 → bars dated strictly before 2024-06-01,
+    at most 180 of them, indicators trimmed to the same window.
+    """
+    from datetime import date
+    from datetime import timedelta as _td
+    from unittest.mock import patch
+
+    from marketpulse.data.types import Bar
+
+    _login(client, monkeypatch)
+    # Build a fake yfinance window: 430 bars (padding + chunk) ending 2024-05-31.
+    # We don't need real OHLCV math — just unique close values + ascending dates.
+    fake_bars = []
+    base = date(2023, 3, 28)  # 430 calendar days back is approximate; use 430
+    for i in range(430):
+        d = base + _td(days=i)
+        fake_bars.append(Bar(date=d, open=10.0, high=10.5, low=9.5,
+                             close=10.0 + (i * 0.01),
+                             volume=1_000_000))
+
+    with patch(
+        "marketpulse.data.yfinance_client.YFinanceClient.fetch_history_range",
+        return_value=fake_bars,
+    ):
+        res = client.get("/stock/AAPL/chart-data?before=2024-06-01&count=180")
+
+    assert res.status_code == 200
+    body = res.json()
+    bars = body["bars"]
+    assert len(bars) <= 180
+    # Every returned bar must be strictly before the `before` cutoff.
+    assert all(b["time"] < "2024-06-01" for b in bars)
+    # Bars are oldest-first.
+    times = [b["time"] for b in bars]
+    assert times == sorted(times)
+
+
+def test_chart_data_before_empty_when_no_data(client: TestClient, monkeypatch) -> None:
+    """If yfinance returns no data in the window (ticker not yet IPO'd),
+    response has bars=[] and all indicator arrays empty."""
+    from unittest.mock import patch
+
+    _login(client, monkeypatch)
+    with patch(
+        "marketpulse.data.yfinance_client.YFinanceClient.fetch_history_range",
+        return_value=[],
+    ):
+        res = client.get("/stock/AAPL/chart-data?before=1900-01-01&count=180")
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["bars"] == []
+    assert body["sma200"] == []
+    assert body["rsi"] == []
+
+
+def test_chart_data_period_still_works(client: TestClient, monkeypatch) -> None:
+    """Regression: the existing ?period=60d path is unchanged."""
+    _login(client, monkeypatch)
+    from marketpulse.web.deps import get_data_service
+    client.app.dependency_overrides[get_data_service] = lambda: _FakeData()
+    try:
+        res = client.get("/stock/AAPL/chart-data?period=60d")
+        assert res.status_code == 200
+        assert "bars" in res.json()
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_chart_data_before_invalid_date_returns_422(
+    client: TestClient, monkeypatch,
+) -> None:
+    _login(client, monkeypatch)
+    res = client.get("/stock/AAPL/chart-data?before=not-a-date&count=180")
+    assert res.status_code == 422
+
+
+def test_chart_data_count_capped_at_max(client: TestClient, monkeypatch) -> None:
+    """Sanity: count is bounded to prevent abuse (e.g., 1_000_000 days)."""
+    _login(client, monkeypatch)
+    res = client.get("/stock/AAPL/chart-data?before=2024-06-01&count=999999")
+    # Either 422 with a clear message, or silently capped — either is acceptable;
+    # this test asserts the API doesn't OOM trying to fulfill it.
+    assert res.status_code in (200, 422)

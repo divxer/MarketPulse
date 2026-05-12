@@ -80,6 +80,33 @@ class YFinanceClient:
         return bars
 
     @_retry
+    def fetch_history_range(
+        self, ticker: str, *, start: date, end: date,
+    ) -> list[Bar]:
+        """Daily OHLCV bars for an explicit [start, end] window via yfinance.
+
+        Used by the chart-data endpoint's lazy-load path which needs to fetch
+        an arbitrary historical slice (Tencent's Usfqkline only returns the
+        latest N rows). `start` is inclusive, `end` is exclusive (matches
+        yfinance's underlying convention). Returns Bars sorted oldest-first;
+        empty list if yfinance has no data in the window.
+        """
+        hist = yf.Ticker(ticker).history(start=start, end=end, interval="1d")
+        bars: list[Bar] = []
+        for idx, row in hist.iterrows():
+            bars.append(
+                Bar(
+                    date=idx.date() if hasattr(idx, "date") else idx,
+                    open=float(row["Open"]),
+                    high=float(row["High"]),
+                    low=float(row["Low"]),
+                    close=float(row["Close"]),
+                    volume=int(row["Volume"]),
+                )
+            )
+        return bars
+
+    @_retry
     def fetch_news(self, ticker: str, limit: int = 10) -> list[NewsItem]:
         items = yf.Ticker(ticker).news or []
         out: list[NewsItem] = []

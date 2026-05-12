@@ -76,6 +76,10 @@
 
   <div class="relative mt-2">
     <div id="chart-main" data-ticker="{{ ticker }}" class="chart-pane chart-main"></div>
+    <div id="chart-loading-dot"
+         class="absolute top-2 left-2 w-2 h-2 rounded-full bg-slate-400
+                opacity-0 transition-opacity duration-200 pointer-events-none
+                animate-pulse"></div>
   </div>
   <div class="relative mt-2">
     <span class="absolute top-1 left-2 text-xs font-medium text-slate-500 z-10 pointer-events-none">RSI(14)</span>
