@@ -199,6 +199,7 @@ def test_stock_split_check_constraint_rejects_bad_ratio(db_session) -> None:
 def test_dividend_source_field_default(db_session) -> None:
     """Dividend.source defaults to 'manual' when not specified."""
     from datetime import date
+
     from marketpulse.db.models import Dividend
 
     d = Dividend(ticker="TQQQ", ex_date=date(2025, 9, 24),
@@ -212,7 +213,9 @@ def test_dividend_source_field_default(db_session) -> None:
 def test_dividend_unique_constraint(db_session) -> None:
     """(ticker, ex_date) must be unique to support idempotent auto-record."""
     from datetime import date
+
     from sqlalchemy.exc import IntegrityError
+
     from marketpulse.db.models import Dividend
 
     db_session.add(Dividend(ticker="TQQQ", ex_date=date(2025, 9, 24),
@@ -228,7 +231,9 @@ def test_dividend_unique_constraint(db_session) -> None:
 def test_dividend_check_constraint_rejects_negative_amounts(db_session) -> None:
     """DB-level CHECK rejects negative amount_per_share or total_amount."""
     from datetime import date
+
     from sqlalchemy.exc import IntegrityError
+
     from marketpulse.db.models import Dividend
 
     # Negative per-share

@@ -130,16 +130,17 @@ def test_unparseable_strings_are_skipped() -> None:
 def test_empty_response_returns_empty_lists() -> None:
     """A bad-route envelope (code != 0) raises ValueError after trying suffixes."""
     import pytest as _pytest
+
     from marketpulse.data.tencent_client import TencentClient
 
     fake_resp = MagicMock(text='{"code": 11, "data": "", "msg": "no controller"}')
     fake_resp.raise_for_status.return_value = None
 
-    with patch("marketpulse.data.tencent_client.httpx.get", return_value=fake_resp):
-        with _pytest.raises(ValueError, match="no Tencent corporate actions"):
-            TencentClient().fetch_corporate_actions(
-                "UNKNOWN", start=date(2025, 1, 1), end=date(2025, 12, 31),
-            )
+    with patch("marketpulse.data.tencent_client.httpx.get", return_value=fake_resp), \
+         _pytest.raises(ValueError, match="no Tencent corporate actions"):
+        TencentClient().fetch_corporate_actions(
+            "UNKNOWN", start=date(2025, 1, 1), end=date(2025, 12, 31),
+        )
 
 
 def test_response_with_only_ohlcv_rows_returns_empty() -> None:

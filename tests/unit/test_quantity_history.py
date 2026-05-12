@@ -1,7 +1,5 @@
 from datetime import UTC, date, datetime
 
-import pytest
-
 from marketpulse.holdings.quantity_history import quantity_as_of
 from marketpulse.holdings.splits import record_split
 from marketpulse.holdings.trades import record_trade

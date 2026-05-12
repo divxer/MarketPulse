@@ -159,7 +159,7 @@ def test_detect_corporate_actions_records_tencent_splits_and_dividends(monkeypat
          patch("marketpulse.scheduler.jobs.record_split") as rs, \
          patch("marketpulse.scheduler.jobs.record_dividend") as rd, \
          patch("marketpulse.scheduler.jobs.quantity_as_of",
-               return_value=20.0) as qa, \
+               return_value=20.0), \
          patch("marketpulse.scheduler.jobs.recompute_ticker") as rc:
         from marketpulse.scheduler.jobs import run_detect_corporate_actions
         run_detect_corporate_actions()
