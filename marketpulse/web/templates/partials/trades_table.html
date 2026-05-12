@@ -36,6 +36,19 @@
           <td class="text-xs text-slate-500 max-w-xs truncate">{{ t.notes or "" }}</td>
           <td class="text-right">
             <button
+              type="button"
+              onclick='loadTradeIntoForm({{ {
+                "id": t.id,
+                "ticker": t.ticker,
+                "action": t.action,
+                "quantity": t.quantity,
+                "price": t.price,
+                "fees": t.fees,
+                "notes": t.notes or "",
+                "executed_at": (t.executed_at.strftime("%Y-%m-%d") if t.executed_at else "")
+              } | tojson }})'
+              class="text-blue-600 text-xs hover:underline mr-2">编辑</button>
+            <button
               hx-delete="/trades/{{ t.id }}"
               hx-target="#trade-row-{{ t.id }}"
               hx-swap="outerHTML"

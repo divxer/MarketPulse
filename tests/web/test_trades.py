@@ -252,7 +252,7 @@ def test_trades_form_after_request_resyncs_action(client: TestClient, monkeypatc
     assert r.status_code == 200
     body = r.text
     # The attribute must include a call back into onEventKindChange after reset
-    assert "this.reset()" in body
+    # (exitEditMode internally calls form.reset() and onEventKindChange)
     assert "onEventKindChange" in body
     # Specifically, the after-request hook must re-sync (the JS function call
     # must appear inside the hx-on::after-request expression):
@@ -262,8 +262,10 @@ def test_trades_form_after_request_resyncs_action(client: TestClient, monkeypatc
     m = re.search(r'hx-on::after-request="([^"]+)"', body)
     assert m is not None, "hx-on::after-request attribute missing"
     expr = m.group(1)
-    assert "this.reset()" in expr
-    assert "onEventKindChange" in expr
+    assert "exitEditMode" in expr, (
+        "after-request must call exitEditMode (which internally resets and "
+        "re-syncs the hidden action input via onEventKindChange)"
+    )
 
 
 def test_trade_form_executed_at_is_optional(client: TestClient, monkeypatch):
@@ -367,3 +369,23 @@ def test_trades_update_ticker_change_recomputes_both(client: TestClient, monkeyp
     assert s2.query(Holding).filter(Holding.ticker == "AAPL").one_or_none() is None
     msft = s2.query(Holding).filter(Holding.ticker == "MSFT").one()
     assert msft.quantity == 5
+
+
+def test_trades_table_has_edit_button(client: TestClient, monkeypatch):
+    """After creating a trade, the rendered timeline must include an Edit
+    button whose onclick payload carries the trade fields."""
+    _login(client, monkeypatch)
+    r = client.post("/trades", data={
+        "ticker": "AAPL", "action": "buy",
+        "quantity": 5, "price": 100.0,
+    })
+    assert r.status_code == 200
+    r = client.get("/trades")
+    assert r.status_code == 200
+    body = r.text
+    assert "loadTradeIntoForm" in body, "Edit button JS call missing"
+    assert "编辑" in body, "Edit button label missing"
+    assert "&quot;ticker&quot;: &quot;AAPL&quot;" in body or '"ticker": "AAPL"' in body
+    assert "exitEditMode" in body, "exitEditMode function missing"
+    assert 'id="trade-id-input"' in body, "trade_id input missing"
+    assert 'id="cancel-edit-btn"' in body, "cancel button missing"
