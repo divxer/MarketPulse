@@ -185,31 +185,25 @@
     if (s.rsiChart)  { syncPair(s.mainChart, s.rsiChart);  syncPair(s.rsiChart, s.mainChart); }
     if (s.macdChart) { syncPair(s.mainChart, s.macdChart); syncPair(s.macdChart, s.mainChart); }
 
-    s.mainChart.timeScale().fitContent();
+    // Set the initial visible window explicitly instead of fitContent().
+    // fitContent() puts the chart in sticky "auto-fit to all data" mode —
+    // EVERY subsequent setData() (including lazy-load prepends) re-fits
+    // to all data, which sets range.from=0 and re-triggers the lazy-load
+    // subscription. Using setVisibleLogicalRange avoids the sticky mode:
+    // setData on a non-sticky chart preserves the visible TIME range, so
+    // after a prepend the user's view stays anchored on the same bars and
+    // range.from grows naturally (older bars now sit further left in
+    // logical-index space). This is the pattern from TradingView's own
+    // lazy-load example for lightweight-charts.
+    s.mainChart.timeScale().setVisibleLogicalRange({
+      from: 0,
+      to: s.bars.length,
+    });
 
-    // Refit on browser window resize. autoSize:true resizes the canvas but
-    // keeps the visible time range fixed — so when the user widens the
-    // window, bars stay at their original pixel width and empty space
-    // appears on both sides. Re-fitting on resize stretches the bars to
-    // the new width.
-    //
-    // NOTE: we listen to `window.resize` instead of using ResizeObserver
-    // on the chart container because lightweight-charts triggers minor
-    // container-size changes internally (price-scale label width recalc
-    // after setData). ResizeObserver would treat those as resizes and
-    // call fitContent, which combined with the lazy-load trigger below
-    // would form a feedback loop (lazy-load → setData → "resize" →
-    // fitContent → range.from=0 → lazy-load again).
-    if (window.__mpChartResizeHandler) {
-      window.removeEventListener("resize", window.__mpChartResizeHandler);
-    }
-    const onWindowResize = () => {
-      s.mainChart.timeScale().fitContent();
-      if (s.rsiChart)  s.rsiChart.timeScale().fitContent();
-      if (s.macdChart) s.macdChart.timeScale().fitContent();
-    };
-    window.addEventListener("resize", onWindowResize);
-    window.__mpChartResizeHandler = onWindowResize;
+    // No window-resize listener: `autoSize: true` on the chart options
+    // makes lightweight-charts resize its canvas when the container
+    // resizes, while preserving the visible time range. Bars stretch to
+    // fill the new width automatically.
 
     // Lazy-load trigger: re-fetch older history when scroll nears left edge.
     s.mainChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
@@ -258,15 +252,11 @@
       }
       prependChunk(chunk);
       s.oldestLoaded = chunk.bars[0].time;
-      // Hold loadingMore=true across 2 animation frames. setData() inside
-      // prependChunk schedules a deferred range-change to refit to all data,
-      // which fires AFTER this function's finally block under the default
-      // microtask vs rAF ordering. If we cleared loadingMore immediately,
-      // that deferred range-change would re-trigger loadMoreHistory in an
-      // infinite loop. Two frames is enough for lightweight-charts to
-      // settle, plus our explicit setVisibleLogicalRange in prependChunk
-      // wins the final state.
-      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+      // No rAF wait needed: setData on a non-sticky chart (initial render
+      // used setVisibleLogicalRange instead of fitContent) preserves the
+      // visible TIME range, so range.from in logical-index space grows by
+      // the chunk size and naturally drops below the 60-bar trigger
+      // threshold. No feedback loop possible.
     } catch (exc) {
       console.warn("lazy-load failed:", exc);
     } finally {
@@ -277,8 +267,6 @@
 
   function prependChunk(chunk) {
     const s = window.__mpChartState;
-    const prevRange = s.mainChart.timeScale().getVisibleLogicalRange();
-    const shift = chunk.bars.length;
     // Bars: prepend, then setData on candle + volume series.
     s.bars = chunk.bars.concat(s.bars);
     s.candleSeries.setData(s.bars);
@@ -331,18 +319,11 @@
       });
       s.candleSeries.setMarkers(markers);
     }
-
-    // Restore the user's visible window, shifted right by the number of new
-    // bars. Without this, lightweight-charts re-fits the time scale to
-    // include ALL data after setData (because the chart was in fitContent
-    // mode), which sets range.from back to 0 and re-triggers the lazy-load
-    // subscription. Forcing range.from > 60 breaks that feedback loop.
-    if (prevRange) {
-      s.mainChart.timeScale().setVisibleLogicalRange({
-        from: prevRange.from + shift,
-        to: prevRange.to + shift,
-      });
-    }
+    // No setVisibleLogicalRange needed: because the chart is NOT in
+    // sticky fitContent mode (see renderCharts), setData preserves the
+    // visible TIME range automatically. The user's view stays anchored
+    // on the same bars and range.from grows by chunk.bars.length in
+    // logical-index space.
   }
 
   function showLoadingDot(on) {
