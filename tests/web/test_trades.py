@@ -490,3 +490,68 @@ def test_trades_update_respects_tz_offset(client: TestClient, monkeypatch):
     stored = t.executed_at if t.executed_at.tzinfo else t.executed_at.replace(tzinfo=UTC)
     local_dt = stored - timedelta(minutes=tz_offset)
     assert local_dt.date().isoformat() == "2026-05-10"
+
+
+def test_trades_update_preserves_original_when_date_unchanged(client: TestClient, monkeypatch):
+    """PUT /trades/{id} with original_executed_at_iso + date unchanged must
+    preserve the original timestamp byte-for-byte (sub-second precision)."""
+    from datetime import UTC, timedelta
+    _login(client, monkeypatch)
+    client.post("/trades", data={
+        "ticker": "TZPRE", "action": "buy", "quantity": 1, "price": 10,
+        "executed_at": "", "tz_offset_minutes": "-480",
+    })
+    from marketpulse.db import base as db_base
+    from marketpulse.db.models import Trade
+    s = next(db_base.session_scope())
+    t = s.query(Trade).filter(Trade.ticker == "TZPRE").one()
+    trade_id = t.id
+    original_iso = t.executed_at.isoformat()
+    original_ts = t.executed_at
+    # What does the user see in the date input? The local-date of original.
+    stored = t.executed_at if t.executed_at.tzinfo else t.executed_at.replace(tzinfo=UTC)
+    local_dt = stored - timedelta(minutes=-480)
+    same_local_date = local_dt.date().isoformat()
+    # PUT with same date, just changing notes
+    res = client.put(f"/trades/{trade_id}", data={
+        "ticker": "TZPRE", "action": "buy", "quantity": 1, "price": 10,
+        "executed_at": same_local_date, "tz_offset_minutes": "-480",
+        "original_executed_at_iso": original_iso, "notes": "edited",
+    })
+    assert res.status_code == 200
+    s2 = next(db_base.session_scope())
+    t2 = s2.query(Trade).filter(Trade.id == trade_id).one()
+    assert t2.notes == "edited"
+    # Timestamp must be EXACTLY the same.
+    def _to_aware(d):
+        return d if d.tzinfo else d.replace(tzinfo=UTC)
+    assert _to_aware(t2.executed_at) == _to_aware(original_ts)
+
+
+def test_trades_update_recomputes_when_date_changed(client: TestClient, monkeypatch):
+    """PUT with original_executed_at_iso + NEW date → helper sees date mismatch
+    → falls through to TZ-combine path. Stored date (in user-local) is the new date."""
+    from datetime import UTC, timedelta
+    _login(client, monkeypatch)
+    client.post("/trades", data={
+        "ticker": "TZNEW", "action": "buy", "quantity": 1, "price": 10,
+        "executed_at": "", "tz_offset_minutes": "-480",
+    })
+    from marketpulse.db import base as db_base
+    from marketpulse.db.models import Trade
+    s = next(db_base.session_scope())
+    t = s.query(Trade).filter(Trade.ticker == "TZNEW").one()
+    trade_id = t.id
+    original_iso = t.executed_at.isoformat()
+    new_date = "2026-04-01"
+    res = client.put(f"/trades/{trade_id}", data={
+        "ticker": "TZNEW", "action": "buy", "quantity": 1, "price": 10,
+        "executed_at": new_date, "tz_offset_minutes": "-480",
+        "original_executed_at_iso": original_iso, "notes": "moved",
+    })
+    assert res.status_code == 200
+    s2 = next(db_base.session_scope())
+    t2 = s2.query(Trade).filter(Trade.id == trade_id).one()
+    stored = t2.executed_at if t2.executed_at.tzinfo else t2.executed_at.replace(tzinfo=UTC)
+    local_dt = stored - timedelta(minutes=-480)
+    assert local_dt.date().isoformat() == new_date

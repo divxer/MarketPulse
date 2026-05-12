@@ -27,33 +27,55 @@ log = get_logger(__name__)
 _TICKER_RE = re.compile(r"^[A-Z\^][A-Z0-9.\-]{0,15}$")
 
 
-def _parse_executed_at(executed_at: str, tz_offset_minutes: int) -> datetime:
-    """Convert a form `executed_at` string to a UTC datetime.
+def _parse_executed_at(
+    executed_at: str,
+    tz_offset_minutes: int,
+    original_iso: str = "",
+) -> datetime:
+    """Resolve form `executed_at` to a UTC datetime.
 
-    - Blank → datetime.now(UTC) (a real moment).
-    - "YYYY-MM-DD" → user's chosen date combined with their current
-      local clock time (derived from tz_offset_minutes), converted to UTC.
-      Preserves chosen date and provides sub-day ordering.
-    - Full ISO 8601 → parsed as-is; naive datetimes treated as UTC.
-      `tz_offset_minutes` is IGNORED here — user supplied an explicit time.
+    Priority:
+    1. Preserve-original: if `original_iso` is provided AND its user-local
+       date (per tz_offset_minutes) equals the form's YYYY-MM-DD string,
+       the trade is being edited without a date change — return the
+       original full timestamp byte-for-byte. Sub-second precision intact.
+    2. Blank → datetime.now(UTC).
+    3. YYYY-MM-DD → combine with user's current local clock time → UTC.
+    4. Full ISO 8601 → parse as-is; naive treated as UTC.
 
     `tz_offset_minutes` follows JS Date.getTimezoneOffset() convention:
-    Beijing (UTC+8) is -480. Formula: utc_naive = local_naive + offset.
+    Beijing (UTC+8) → -480. Formula: utc_naive = local_naive + offset.
     """
     s = executed_at.strip()
+    orig = original_iso.strip()
+
+    # Priority 1: preserve-original
+    if orig:
+        try:
+            orig_dt = datetime.fromisoformat(orig.replace("Z", "+00:00"))
+            if orig_dt.tzinfo is None:
+                orig_dt = orig_dt.replace(tzinfo=UTC)
+            orig_local = orig_dt + timedelta(minutes=-tz_offset_minutes)
+            if s and len(s) == 10 and orig_local.date().isoformat() == s:
+                return orig_dt
+        except ValueError:
+            pass  # bad original_iso → fall through to normal parsing
+
+    # Priority 2: blank
     if not s:
         return datetime.now(UTC)
+
     try:
-        if len(s) == 10:  # YYYY-MM-DD
+        # Priority 3: YYYY-MM-DD
+        if len(s) == 10:
             local_date = date.fromisoformat(s)
             now_utc_naive = datetime.now(UTC).replace(tzinfo=None)
-            # Shift "now" into user's local TZ to extract their current clock time.
             now_local_naive = now_utc_naive + timedelta(minutes=-tz_offset_minutes)
             local_dt_naive = datetime.combine(local_date, now_local_naive.time())
             return (
                 local_dt_naive + timedelta(minutes=tz_offset_minutes)
             ).replace(tzinfo=UTC)
-        # Full ISO 8601 — user supplied an explicit time.
+        # Priority 4: full ISO 8601
         dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=UTC)
@@ -197,6 +219,7 @@ def trades_update(
     notes: str = Form(""),
     executed_at: str = Form(""),
     tz_offset_minutes: int = Form(0),
+    original_executed_at_iso: str = Form(""),
     db: Session = Depends(get_db),
     _: None = Depends(require_auth),
 ):
@@ -227,7 +250,9 @@ def trades_update(
     if fees < 0:
         raise HTTPException(status_code=422, detail="fees cannot be negative")
 
-    executed_at_dt = _parse_executed_at(executed_at, tz_offset_minutes)
+    executed_at_dt = _parse_executed_at(
+        executed_at, tz_offset_minutes, original_executed_at_iso,
+    )
 
     old_ticker = trade.ticker
 
