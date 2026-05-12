@@ -20,7 +20,7 @@
       bars: [],
       ema12: [], ema26: [],
       sma50: [], sma200: [],
-      bb_upper: [], bb_middle: [], bb_lower: [],
+      bb_upper: [], bb_lower: [],
       rsi: [],
       macd: { line: [], signal: [], histogram: [] },
       signal_markers: [],
@@ -65,7 +65,6 @@
     s.sma50 = (payload.sma50 || []).slice();
     s.sma200 = (payload.sma200 || []).slice();
     s.bb_upper = (payload.bb_upper || []).slice();
-    s.bb_middle = (payload.bb_middle || []).slice();
     s.bb_lower = (payload.bb_lower || []).slice();
     s.rsi = (payload.rsi || []).slice();
     s.macd.line = (payload.macd?.line || []).slice();
