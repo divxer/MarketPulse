@@ -185,29 +185,28 @@
     if (s.rsiChart)  { syncPair(s.mainChart, s.rsiChart);  syncPair(s.rsiChart, s.mainChart); }
     if (s.macdChart) { syncPair(s.mainChart, s.macdChart); syncPair(s.macdChart, s.mainChart); }
 
-    // No fitContent(), no setVisibleLogicalRange — let lightweight-charts
-    // pick the default initial view (shows all initial bars given the
-    // `rightOffset: 12` above). The crucial property we rely on: as long
-    // as fitContent() is NEVER called, every subsequent setData()
-    // preserves the visible TIME range. After a lazy-load prepend the
-    // user's view stays anchored on the same bars, and `range.from` in
-    // logical-index space grows by chunk.bars.length — naturally rising
-    // above the trigger threshold so no feedback loop is possible.
-    //
-    // `autoSize: true` (in commonOpts) handles window/container resizes
-    // by stretching the canvas while preserving the visible time range,
-    // so we don't need ResizeObserver or window.resize listeners.
+    // Anchor initial view to the most recent ~60 bars. The lazy-load
+    // subscription uses barsInLogicalRange(range).barsBefore < 50 — if
+    // we showed all initial bars at first paint, barsBefore would be 0
+    // and a fetch would fire immediately. Anchoring to 60 means the
+    // prefetch only happens if the initial dataset is shorter than 60
+    // bars (i.e., a very-newly-listed ticker).
+    s.mainChart.timeScale().setVisibleLogicalRange({
+      from: Math.max(0, s.bars.length - 60),
+      to: s.bars.length,
+    });
 
-    // Lazy-load trigger: re-fetch older history when scroll nears left edge.
+    // Lazy-load trigger: TradingView's official barsInLogicalRange pattern.
+    // barsBefore = count of bars in the dataset earlier than the visible
+    // range. Unlike range.from, this is invariant to prepend — after a
+    // chunk lands, barsBefore grows by chunk.bars.length, so the same
+    // trigger expression stays stable across cascading loads. Threshold
+    // 50 is TradingView's example value; gives the yfinance fetch (~1-3s
+    // through Mihomo) headroom before a fast-scrolling user hits the edge.
     s.mainChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
       if (!range) return;
-      // range.from is the LEFTMOST visible logical index relative to bars[0].
-      // Trigger fetch when leftmost visible bar is within 60 of bars[0] —
-      // gives the yfinance fetch (~1-3s through Mihomo) headroom to land
-      // before a fast-scrolling user hits the edge.
-      if (range.from < 60) {
-        loadMoreHistory();
-      }
+      const info = s.candleSeries.barsInLogicalRange(range);
+      if (info && info.barsBefore < 50) loadMoreHistory();
     });
   }
 
@@ -227,6 +226,14 @@
     if (!s || s.loadingMore || !s.hasMoreHistory || !s.ticker) return;
     s.loadingMore = true;
     const tickerAtRequest = s.ticker;
+    // Capture visible range BEFORE the fetch — after prependChunk the
+    // chart's logical indices shift and we need the pre-prepend values
+    // to compute the shifted target range.
+    const prevRange = s.mainChart.timeScale().getVisibleLogicalRange();
+    console.debug(
+      "mp-chart loadMore →",
+      { ticker: s.ticker, oldestLoaded: s.oldestLoaded, prevRange },
+    );
     showLoadingDot(true);
     try {
       const r = await fetch(
@@ -245,11 +252,23 @@
       }
       prependChunk(chunk);
       s.oldestLoaded = chunk.bars[0].time;
-      // No rAF wait needed: setData on a non-sticky chart (initial render
-      // used setVisibleLogicalRange instead of fitContent) preserves the
-      // visible TIME range, so range.from in logical-index space grows by
-      // the chunk size and naturally drops below the 60-bar trigger
-      // threshold. No feedback loop possible.
+      // Explicit view shift: prependChunk's setData calls cause
+      // lightweight-charts to refit (often jumping to the start of the
+      // expanded dataset). Shifting the visible logical range right by
+      // chunk.bars.length keeps the user anchored on the same time
+      // window. Without this, barsBefore drops below threshold again
+      // immediately after the load and we cascade.
+      if (prevRange) {
+        const newRange = {
+          from: prevRange.from + chunk.bars.length,
+          to: prevRange.to + chunk.bars.length,
+        };
+        s.mainChart.timeScale().setVisibleLogicalRange(newRange);
+        console.debug(
+          "mp-chart loadMore ✓",
+          { chunkLen: chunk.bars.length, prevRange, newRange, barsTotal: s.bars.length },
+        );
+      }
     } catch (exc) {
       console.warn("lazy-load failed:", exc);
     } finally {
@@ -312,11 +331,6 @@
       });
       s.candleSeries.setMarkers(markers);
     }
-    // No setVisibleLogicalRange needed: because the chart is NOT in
-    // sticky fitContent mode (see renderCharts), setData preserves the
-    // visible TIME range automatically. The user's view stays anchored
-    // on the same bars and range.from grows by chunk.bars.length in
-    // logical-index space.
   }
 
   function showLoadingDot(on) {
