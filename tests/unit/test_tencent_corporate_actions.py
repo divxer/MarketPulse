@@ -163,3 +163,32 @@ def test_response_with_only_ohlcv_rows_returns_empty() -> None:
 
     assert actions.dividends == []
     assert actions.splits == []
+
+
+def test_request_uses_n_rows_within_tencent_limit() -> None:
+    """Regression: Tencent rejects requests for >~1200 rows with 'limit error'.
+    Verify the URL we send stays within the limit.
+    """
+    import re
+
+    from marketpulse.data.tencent_client import TencentClient
+
+    captured: dict[str, str] = {}
+
+    def fake_get(url, timeout=None):
+        captured["url"] = url
+        resp = MagicMock()
+        resp.text = '{"code": 0, "msg": "", "data": {"usAAPL.OQ": {"qfqday": []}}}'
+        resp.raise_for_status.return_value = None
+        return resp
+
+    with patch("marketpulse.data.tencent_client.httpx.get", side_effect=fake_get):
+        TencentClient().fetch_corporate_actions(
+            "AAPL", start=date(2021, 1, 1), end=date(2026, 5, 12),
+        )
+
+    # URL format: ...day,START,END,N,qfq
+    m = re.search(r"day,[\d\-]+,[\d\-]+,(\d+),qfq", captured["url"])
+    assert m, f"URL did not match expected pattern: {captured['url']}"
+    n = int(m.group(1))
+    assert n <= 1200, f"n_rows={n} exceeds Tencent's documented limit of ~1200"
