@@ -192,3 +192,44 @@ def test_request_uses_n_rows_within_tencent_limit() -> None:
     assert m, f"URL did not match expected pattern: {captured['url']}"
     n = int(m.group(1))
     assert n <= 1200, f"n_rows={n} exceeds Tencent's documented limit of ~1200"
+
+
+def test_empty_action_dict_silently_skipped() -> None:
+    """Tencent emits {} as a placeholder for tickers it doesn't aggregate
+    corp-action data for (e.g. QBTS, TNA). Parser must skip silently —
+    not log 'bad_date' warnings.
+    """
+    import logging
+
+    from marketpulse.data.tencent_client import TencentClient
+
+    body = _make_envelope({
+        "usQBTS.OQ": [
+            ["2026-05-11", "22.20", "24.03", "24.78", "21.77", "36127090", {}],
+        ],
+    })
+    fake_resp = MagicMock(text=body)
+    fake_resp.raise_for_status.return_value = None
+
+    caplog_records: list[logging.LogRecord] = []
+
+    class _Handler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            caplog_records.append(record)
+
+    handler = _Handler(level=logging.WARNING)
+    root = logging.getLogger()
+    root.addHandler(handler)
+    try:
+        with patch("marketpulse.data.tencent_client.httpx.get", return_value=fake_resp):
+            actions = TencentClient().fetch_corporate_actions(
+                "QBTS", start=date(2026, 1, 1), end=date(2026, 5, 12),
+            )
+    finally:
+        root.removeHandler(handler)
+
+    assert actions.dividends == []
+    assert actions.splits == []
+    # No warnings about empty cqr — empty {} is silently skipped.
+    assert not any("bad_date" in str(r.msg) for r in caplog_records), \
+        f"unexpected bad_date warnings: {[r.msg for r in caplog_records]}"
