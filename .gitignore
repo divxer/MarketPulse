@@ -19,3 +19,4 @@ build/
 htmlcov/
 /data/
 package-lock.json
+.claude/
