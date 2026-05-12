@@ -228,6 +228,14 @@
     if (!s || s.loadingMore || !s.hasMoreHistory || !s.ticker) return;
     s.loadingMore = true;
     const tickerAtRequest = s.ticker;
+    // Capture visible range BEFORE the fetch — after prependChunk the
+    // chart's logical indices shift and we need the pre-prepend values
+    // to compute the shifted target range.
+    const prevRange = s.mainChart.timeScale().getVisibleLogicalRange();
+    console.debug(
+      "mp-chart loadMore →",
+      { ticker: s.ticker, oldestLoaded: s.oldestLoaded, prevRange },
+    );
     showLoadingDot(true);
     try {
       const r = await fetch(
@@ -246,11 +254,23 @@
       }
       prependChunk(chunk);
       s.oldestLoaded = chunk.bars[0].time;
-      // No rAF wait needed: setData on a non-sticky chart (initial render
-      // used setVisibleLogicalRange instead of fitContent) preserves the
-      // visible TIME range, so range.from in logical-index space grows by
-      // the chunk size and naturally drops below the 60-bar trigger
-      // threshold. No feedback loop possible.
+      // Explicit view shift: prependChunk's setData calls cause
+      // lightweight-charts to refit (often jumping to the start of the
+      // expanded dataset). Shifting the visible logical range right by
+      // chunk.bars.length keeps the user anchored on the same time
+      // window. Without this, barsBefore drops below threshold again
+      // immediately after the load and we cascade.
+      if (prevRange) {
+        const newRange = {
+          from: prevRange.from + chunk.bars.length,
+          to: prevRange.to + chunk.bars.length,
+        };
+        s.mainChart.timeScale().setVisibleLogicalRange(newRange);
+        console.debug(
+          "mp-chart loadMore ✓",
+          { chunkLen: chunk.bars.length, prevRange, newRange, barsTotal: s.bars.length },
+        );
+      }
     } catch (exc) {
       console.warn("lazy-load failed:", exc);
     } finally {
