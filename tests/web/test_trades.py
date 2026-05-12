@@ -202,3 +202,16 @@ def test_trades_timeline_filter_splits_only(client: TestClient, monkeypatch):
     assert "拆股" in res.text or "1 → 2" in res.text
     # The buy row should not appear in split-only view (filter by table rows, not form options)
     assert "trade-row-" not in res.text
+
+
+def test_trade_form_includes_executed_at_input(client: TestClient, monkeypatch):
+    """Regression: the unified /trades form must include an executed_at
+    date input for backfilling historical trades. Without it, manually-entered
+    trades can only be dated 'today'."""
+    _login(client, monkeypatch)
+    res = client.get("/trades")
+    assert res.status_code == 200
+    # The input must be in the trade-field group (visible when 买入/卖出
+    # is selected, hidden for splits/dividends).
+    assert 'name="executed_at"' in res.text
+    assert 'trade-field' in res.text
