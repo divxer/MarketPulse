@@ -2,6 +2,7 @@ from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from marketpulse.ai.service import AiService
@@ -60,10 +61,13 @@ def stock_page(
     in_watchlist = db.query(WatchlistItem).filter(
         WatchlistItem.ticker == ticker,
     ).one_or_none() is not None
+    # Sort by coalesce(executed_at, created_at) so trades with NULL
+    # executed_at (entered before PR #8's form fix) appear in their proper
+    # chronological position by insert time, not at the bottom of the list.
     recent_trades = (
         db.query(Trade)
         .filter(Trade.ticker == ticker)
-        .order_by(Trade.executed_at.desc().nulls_last(), Trade.created_at.desc())
+        .order_by(func.coalesce(Trade.executed_at, Trade.created_at).desc())
         .limit(5)
         .all()
     )

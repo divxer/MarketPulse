@@ -97,6 +97,54 @@ def test_stock_page_shows_recent_trades(client: TestClient, monkeypatch) -> None
         client.app.dependency_overrides.clear()
 
 
+def test_stock_page_recent_trades_orders_null_executed_at_by_created_at(
+    client: TestClient, monkeypatch,
+) -> None:
+    """Regression: trades with NULL executed_at (entered via the form before
+    PR #8's date-input fix) must appear in correct chronological position by
+    `created_at`, not pinned to the bottom of the list via NULLS LAST.
+    """
+    from datetime import UTC, datetime
+
+    from marketpulse.db import base as db_base
+    from marketpulse.db.models import Trade
+    _login(client, monkeypatch)
+    from marketpulse.web.deps import get_data_service
+    client.app.dependency_overrides[get_data_service] = lambda: _FakeData()
+    try:
+        # Insert two trades directly to control NULL state:
+        #   t1: explicit executed_at = 2024-01-01 (very old)
+        #   t2: executed_at = None, created_at = now (very new)
+        # Old code (NULLS LAST) would show t1 first → wrong.
+        # New code (coalesce) must show t2 first.
+        gen = db_base.session_scope()
+        s = next(gen)
+        # Use unusual prices that won't collide with chart axis labels or
+        # other rendered numbers — pinning the assertion to these specific
+        # values is brittle otherwise.
+        s.add(Trade(ticker="AAPL", action="buy", quantity=1, price=987.65,
+                    executed_at=datetime(2024, 1, 1, tzinfo=UTC),
+                    created_at=datetime(2024, 1, 1, tzinfo=UTC)))
+        s.add(Trade(ticker="AAPL", action="sell", quantity=1, price=876.54,
+                    executed_at=None,
+                    created_at=datetime.now(UTC)))
+        s.commit()
+
+        res = client.get("/stock/AAPL")
+        # The $876.54 sell (NULL executed_at, but newer created_at) must
+        # appear before the $987.65 buy in the recent-trades section.
+        text = res.text
+        idx_sell = text.find("876.54")
+        idx_buy = text.find("987.65")
+        assert idx_sell != -1 and idx_buy != -1, "both trades should render"
+        assert idx_sell < idx_buy, (
+            f"sell (NULL executed_at, newer created_at) should sort first; "
+            f"sell at {idx_sell}, buy at {idx_buy}"
+        )
+    finally:
+        client.app.dependency_overrides.clear()
+
+
 def test_stock_analyze(client: TestClient, monkeypatch) -> None:
     _login(client, monkeypatch)
     from marketpulse.web.deps import get_ai_service, get_data_service
