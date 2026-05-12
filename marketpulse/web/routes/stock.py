@@ -86,7 +86,10 @@ def stock_page(
     )
 
 
-_LOOKBACK_DAYS = 250  # buffer for SMA200/EMA26/Bollinger to be valid at window start
+# 320 calendar days ≈ 228 trading days (after weekends + holidays),
+# comfortably above SMA200's 199-bar lookback requirement so the
+# indicator is fully populated at every bar of every lazy chunk.
+_LOOKBACK_DAYS = 320
 
 
 @router.get("/stock/{ticker}/chart-data")
@@ -136,7 +139,7 @@ def stock_chart_data(
 
 
 def _chart_data_lazy(ticker: str, before_str: str, count: int) -> JSONResponse:
-    """Lazy-load path: fetch `count + 250` calendar days ending strictly before
+    """Lazy-load path: fetch `count + 320` calendar days ending strictly before
     `before_str` via yfinance, compute indicators over the padded range, then
     trim by date so only the requested `count` window is returned.
     """
@@ -179,7 +182,7 @@ def _empty_payload() -> dict:
     return {
         "bars": empty, "ema12": empty, "ema26": empty,
         "sma50": empty, "sma200": empty,
-        "bb_upper": empty, "bb_middle": empty, "bb_lower": empty,
+        "bb_upper": empty, "bb_lower": empty,
         "rsi": empty,
         "macd": {"line": empty, "signal": empty, "histogram": empty},
         "signal_markers": empty,
@@ -195,7 +198,7 @@ def _build_payload(all_bars: list, cutoff: date) -> dict:
     ema26 = ema(closes, 26)
     sma50 = sma(closes, 50)
     sma200 = sma(closes, 200)
-    bb_upper, bb_middle, bb_lower = bollinger_series(closes)
+    bb_upper, _bb_middle, bb_lower = bollinger_series(closes)
     rsi = rsi_series(closes)
     macd_line, macd_signal, macd_hist = macd(closes)
     markers = scan_signal_markers(all_bars)
@@ -219,7 +222,6 @@ def _build_payload(all_bars: list, cutoff: date) -> dict:
         "sma50": series_after(all_bars, sma50),
         "sma200": series_after(all_bars, sma200),
         "bb_upper": series_after(all_bars, bb_upper),
-        "bb_middle": series_after(all_bars, bb_middle),
         "bb_lower": series_after(all_bars, bb_lower),
         "rsi": series_after(all_bars, rsi),
         "macd": {

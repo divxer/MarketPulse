@@ -209,8 +209,10 @@
     s.mainChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
       if (!range) return;
       // range.from is the LEFTMOST visible logical index relative to bars[0].
-      // Trigger fetch when leftmost visible bar is within 30 of bars[0].
-      if (range.from < 30) {
+      // Trigger fetch when leftmost visible bar is within 60 of bars[0] —
+      // gives the yfinance fetch (~1-3s through Mihomo) headroom to land
+      // before a fast-scrolling user hits the edge.
+      if (range.from < 60) {
         loadMoreHistory();
       }
     });
@@ -239,7 +241,11 @@
       );
       if (!r.ok) return;  // log+retry on next scroll
       const chunk = await r.json();
-      if (s.ticker !== tickerAtRequest) return;  // user switched mid-fetch
+      // State-object identity check catches period switches too — period
+      // switch creates a new state object via freshState(), so an in-flight
+      // request's captured `s` no longer matches the live state.
+      if (window.__mpChartState !== s) return;
+      if (s.ticker !== tickerAtRequest) return;  // ticker switch (paranoid)
       if (!chunk.bars || chunk.bars.length === 0) {
         s.hasMoreHistory = false;
         return;

@@ -216,9 +216,10 @@ def test_chart_data_returns_expected_keys(client, monkeypatch) -> None:
         data = r.json()
         assert set(data.keys()) >= {
             "bars", "ema12", "ema26", "sma50", "sma200",
-            "bb_upper", "bb_middle", "bb_lower",
+            "bb_upper", "bb_lower",
             "rsi", "macd", "signal_markers",
         }
+        assert "bb_middle" not in data, "bb_middle was dropped from the contract"
         assert isinstance(data["bars"], list)
         assert data["bars"][0].keys() >= {"time", "open", "high", "low", "close", "volume"}
         assert isinstance(data["macd"], dict)

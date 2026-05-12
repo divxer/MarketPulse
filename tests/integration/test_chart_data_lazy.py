@@ -52,6 +52,34 @@ def test_lazy_load_chunk_strictly_precedes_initial(client: TestClient, monkeypat
     assert all(b["time"] < before_iso for b in chunk["bars"])
 
 
+def test_lazy_load_sma200_populated_at_window_start(client: TestClient, monkeypatch):
+    """Critical: SMA200 must be non-null at the FIRST bar of the lazy window.
+    Otherwise users see indicator gaps when scrolling into older chunks.
+    Requires _LOOKBACK_DAYS >= ~280 trading days (~400 calendar) — verified
+    here by ensuring sma200[0].time matches bars[0].time."""
+    _login(client, monkeypatch)
+    today = date.today()
+    # 500 bars of fake data is plenty for SMA200 to be valid in the window.
+    fake = _fake_bars(today - timedelta(days=500), 500)
+    with patch(
+        "marketpulse.data.yfinance_client.YFinanceClient.fetch_history_range",
+        return_value=fake,
+    ):
+        res = client.get(
+            f"/stock/AAPL/chart-data?before={today.isoformat()}&count=180",
+        )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["bars"], "expected non-empty bars"
+    assert body["sma200"], "SMA200 must be present"
+    # The earliest bar's time must match the earliest SMA200 point's time —
+    # i.e. SMA200 is populated from the very first bar of the lazy window.
+    assert body["sma200"][0]["time"] == body["bars"][0]["time"], (
+        f"SMA200 starts at {body['sma200'][0]['time']} but bars start at "
+        f"{body['bars'][0]['time']} — lookback insufficient"
+    )
+
+
 def test_lazy_load_indicators_align_with_bars(client: TestClient, monkeypatch):
     """Every indicator point's `time` must match one of the bar `time` values
     (no orphan indicator points outside the bar window).
