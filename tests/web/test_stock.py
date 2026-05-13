@@ -465,3 +465,18 @@ def test_chart_js_uses_localstorage_for_period(client: TestClient, monkeypatch):
     body = r.text
     assert "localStorage" in body, "chart.js must persist period across sessions"
     assert "mp.chartPeriod" in body, "chart.js must use the agreed storage key"
+
+
+def test_chart_js_subscribes_crosshair_for_ohlc(client: TestClient, monkeypatch):
+    """chart.js must subscribe to crosshair moves and update the OHLC bar."""
+    _login(client, monkeypatch)
+    r = client.get("/static/chart.js")
+    assert r.status_code == 200
+    body = r.text
+    assert "subscribeCrosshairMove" in body, (
+        "chart.js must subscribe to crosshair to keep OHLC bar in sync"
+    )
+    assert "updateOhlcBar" in body, "updateOhlcBar function missing"
+    assert "data-ohlc=" in body, (
+        "updateOhlcBar must select OHLC field elements via data-ohlc"
+    )
