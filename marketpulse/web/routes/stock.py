@@ -29,8 +29,8 @@ from marketpulse.web.main import templates
 router = APIRouter()
 log = get_logger(__name__)
 
-_VALID_PERIODS = {"30d", "60d", "6m", "1y"}
-_PERIOD_DAYS = {"30d": 30, "60d": 60, "6m": 180, "1y": 365}
+_VALID_PERIODS = {"60d", "6m", "ytd", "1y", "5y", "all"}
+_PERIOD_DAYS_FIXED = {"60d": 60, "6m": 180, "1y": 365, "5y": 1825}
 
 
 @router.get("/stock/{ticker}", response_class=HTMLResponse)
@@ -118,14 +118,47 @@ def stock_chart_data(
             status_code=422,
             detail=f"period must be one of {sorted(_VALID_PERIODS)}",
         )
-    # ---- existing period code path ----
+
+    # Short periods (≤ 1y) use the fast Tencent path with a 1y cache. Long
+    # periods (5y, All) fall through to yfinance which can return arbitrary
+    # date ranges — slower but the only way to cover multi-year history.
+    if period in {"5y", "all"}:
+        from marketpulse.data.yfinance_client import YFinanceClient
+        if period == "5y":
+            start = date.today() - timedelta(days=_PERIOD_DAYS_FIXED["5y"])
+        else:  # "all"
+            start = date(1900, 1, 1)
+        try:
+            all_bars = YFinanceClient().fetch_history_range(
+                ticker, start=start, end=date.today(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "chart_data_long_period_failed", ticker=ticker,
+                period=period, error=str(exc),
+            )
+            all_bars = []
+        if not all_bars:
+            return JSONResponse(
+                _empty_payload(),
+                headers={"Cache-Control": "private, max-age=300"},
+            )
+        return JSONResponse(
+            _build_payload(all_bars, cutoff=all_bars[0].date),
+            headers={"Cache-Control": "private, max-age=300"},
+        )
+
+    # Short periods: Tencent fast path.
     try:
         all_bars = data.get_history(ticker, period="1y")
     except Exception as exc:
         log.warning("chart_data_history_failed", ticker=ticker, error=str(exc))
         all_bars = []
 
-    cutoff = date.today() - timedelta(days=_PERIOD_DAYS[period])
+    if period == "ytd":
+        cutoff = date(date.today().year, 1, 1)
+    else:
+        cutoff = date.today() - timedelta(days=_PERIOD_DAYS_FIXED[period])
 
     if not all_bars:
         return JSONResponse(
