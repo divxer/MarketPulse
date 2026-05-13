@@ -234,8 +234,8 @@ def test_chart_data_fetches_with_200d_headroom_for_sma(client, monkeypatch) -> N
     from marketpulse.web.deps import get_data_service
     client.app.dependency_overrides[get_data_service] = lambda: fake
     try:
-        client.get("/stock/AAPL/chart-data?period=30d")
-        # Despite user requesting 30d, backend should fetch 1y so SMA200 has data.
+        client.get("/stock/AAPL/chart-data?period=60d")
+        # Despite user requesting 60d, backend should fetch 1y so SMA200 has data.
         assert fake.last_period == "1y"
     finally:
         client.app.dependency_overrides.clear()
@@ -368,3 +368,115 @@ def test_chart_data_count_capped_at_max(client: TestClient, monkeypatch) -> None
     # Either 422 with a clear message, or silently capped — either is acceptable;
     # this test asserts the API doesn't OOM trying to fulfill it.
     assert res.status_code in (200, 422)
+
+
+def test_chart_data_ytd_returns_year_to_date(client: TestClient, monkeypatch):
+    from datetime import date
+    _login(client, monkeypatch)
+    r = client.get("/stock/AAPL/chart-data?period=ytd")
+    assert r.status_code == 200
+    payload = r.json()
+    if not payload["bars"]:
+        return
+    first_bar_date = date.fromisoformat(payload["bars"][0]["time"])
+    today = date.today()
+    assert first_bar_date >= date(today.year, 1, 1)
+    assert first_bar_date <= today
+
+
+def test_chart_data_5y_uses_yfinance(client: TestClient, monkeypatch):
+    from datetime import date, timedelta
+
+    from marketpulse.data.yfinance_client import YFinanceClient
+    _login(client, monkeypatch)
+    called_with = {}
+    def fake_fetch_range(self, ticker, *, start, end):
+        called_with["ticker"] = ticker
+        called_with["start"] = start
+        called_with["end"] = end
+        return []
+    monkeypatch.setattr(YFinanceClient, "fetch_history_range", fake_fetch_range)
+    r = client.get("/stock/AAPL/chart-data?period=5y")
+    assert r.status_code == 200
+    assert called_with["ticker"] == "AAPL"
+    expected_start = date.today() - timedelta(days=1825)
+    assert abs((called_with["start"] - expected_start).days) <= 2
+    assert called_with["end"] == date.today()
+
+
+def test_chart_data_all_uses_yfinance_from_1900(client: TestClient, monkeypatch):
+    from datetime import date
+
+    from marketpulse.data.yfinance_client import YFinanceClient
+    _login(client, monkeypatch)
+    called_with = {}
+    def fake_fetch_range(self, ticker, *, start, end):
+        called_with["start"] = start
+        return []
+    monkeypatch.setattr(YFinanceClient, "fetch_history_range", fake_fetch_range)
+    r = client.get("/stock/AAPL/chart-data?period=all")
+    assert r.status_code == 200
+    assert called_with["start"] <= date(1900, 1, 1)
+
+
+def test_chart_data_rejects_30d(client: TestClient, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/stock/AAPL/chart-data?period=30d")
+    assert r.status_code == 422
+
+
+def test_chart_data_rejects_invalid_period(client: TestClient, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/stock/AAPL/chart-data?period=foo")
+    assert r.status_code == 422
+
+
+def test_stock_page_has_new_period_buttons(client: TestClient, monkeypatch):
+    """The /stock/{ticker} page must show YTD/5Y/All buttons and no 30D button."""
+    _login(client, monkeypatch)
+    r = client.get("/stock/AAPL")
+    assert r.status_code == 200
+    body = r.text
+    assert 'data-period="ytd"' in body, "YTD button missing"
+    assert 'data-period="5y"' in body, "5Y button missing"
+    assert 'data-period="all"' in body, "All button missing"
+    assert 'data-period="30d"' not in body, "30D button must be removed"
+
+
+def test_stock_page_has_ohlc_bar(client: TestClient, monkeypatch):
+    """Chart page must include an OHLC bar element above the chart."""
+    _login(client, monkeypatch)
+    r = client.get("/stock/AAPL")
+    assert r.status_code == 200
+    body = r.text
+    assert 'id="chart-ohlc-bar"' in body
+    assert 'data-ohlc="open"' in body
+    assert 'data-ohlc="high"' in body
+    assert 'data-ohlc="low"' in body
+    assert 'data-ohlc="close"' in body
+    assert 'data-ohlc="change"' in body
+
+
+def test_chart_js_uses_localstorage_for_period(client: TestClient, monkeypatch):
+    """chart.js must persist period via localStorage."""
+    _login(client, monkeypatch)
+    r = client.get("/static/chart.js")
+    assert r.status_code == 200
+    body = r.text
+    assert "localStorage" in body, "chart.js must persist period across sessions"
+    assert "mp.chartPeriod" in body, "chart.js must use the agreed storage key"
+
+
+def test_chart_js_subscribes_crosshair_for_ohlc(client: TestClient, monkeypatch):
+    """chart.js must subscribe to crosshair moves and update the OHLC bar."""
+    _login(client, monkeypatch)
+    r = client.get("/static/chart.js")
+    assert r.status_code == 200
+    body = r.text
+    assert "subscribeCrosshairMove" in body, (
+        "chart.js must subscribe to crosshair to keep OHLC bar in sync"
+    )
+    assert "updateOhlcBar" in body, "updateOhlcBar function missing"
+    assert "data-ohlc=" in body, (
+        "updateOhlcBar must select OHLC field elements via data-ohlc"
+    )

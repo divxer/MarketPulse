@@ -44,6 +44,26 @@
   // and what prevents the prepend-cascade loop diagnosed on 2026-05-12.
   // Whitespace items reserve the bar's time-axis slot without drawing,
   // so the visual result is identical to filtering them out.
+  function updateOhlcBar(bar) {
+    const el = document.getElementById("chart-ohlc-bar");
+    if (!el || !bar) return;
+    const open  = bar.open  ?? bar.value;
+    const high  = bar.high  ?? bar.value;
+    const low   = bar.low   ?? bar.value;
+    const close = bar.close ?? bar.value;
+    if (open == null || close == null) return;
+    el.querySelector('[data-ohlc="open"]').textContent  = open.toFixed(2);
+    el.querySelector('[data-ohlc="high"]').textContent  = high.toFixed(2);
+    el.querySelector('[data-ohlc="low"]').textContent   = low.toFixed(2);
+    el.querySelector('[data-ohlc="close"]').textContent = close.toFixed(2);
+    const change = close - open;
+    const pct = open !== 0 ? (change / open) * 100 : 0;
+    const changeEl = el.querySelector('[data-ohlc="change"]');
+    const sign = change >= 0 ? "+" : "";
+    changeEl.textContent = `${sign}${change.toFixed(2)} (${sign}${pct.toFixed(2)}%)`;
+    changeEl.className = "font-semibold " + (change >= 0 ? "text-green-600" : "text-red-600");
+  }
+
   function withWhitespace(series) {
     return series.map(p =>
       (p.value === null || p.value === undefined) ? { time: p.time } : p
@@ -101,6 +121,8 @@
       borderVisible: false, wickUpColor: "#16a34a", wickDownColor: "#dc2626",
     });
     s.candleSeries.setData(s.bars);
+    // Initial OHLC bar: show the latest bar.
+    if (s.bars.length > 0) updateOhlcBar(s.bars[s.bars.length - 1]);
 
     function addLineIfData(data, opts, handleKey) {
       const dense = withWhitespace(data);
@@ -212,6 +234,19 @@
       to: s.bars.length,
     });
 
+    // Keep top OHLC bar synced with the crosshair position.
+    // Off-chart → fall back to latest bar so the strip is never empty.
+    s.mainChart.subscribeCrosshairMove(param => {
+      const bar = param.seriesData && param.seriesData.get
+        ? param.seriesData.get(s.candleSeries)
+        : null;
+      if (bar) {
+        updateOhlcBar(bar);
+      } else if (s.bars.length > 0) {
+        updateOhlcBar(s.bars[s.bars.length - 1]);
+      }
+    });
+
     // Lazy-load trigger: TradingView's official barsInLogicalRange pattern.
     // barsBefore = count of bars in the dataset earlier than the visible
     // range. Unlike range.from, this is invariant to prepend — after a
@@ -268,6 +303,9 @@
       }
       prependChunk(chunk);
       s.oldestLoaded = chunk.bars[0].time;
+      // Refresh OHLC bar so it stays consistent with state.bars after the
+      // lazy-load (in case the user wasn't actively hovering during it).
+      if (s.bars.length > 0) updateOhlcBar(s.bars[s.bars.length - 1]);
       // Explicit view shift: prependChunk's setData calls cause
       // lightweight-charts to refit (often jumping to the start of the
       // expanded dataset). Shifting the visible logical range right by
@@ -366,21 +404,49 @@
     renderCharts(await r.json(), ticker);
   }
 
+  const PERIOD_STORAGE_KEY = "mp.chartPeriod";
+  const VALID_STORED_PERIODS = new Set(["60d", "6m", "ytd", "1y", "5y", "all"]);
+
+  function readStoredPeriod() {
+    try {
+      const v = localStorage.getItem(PERIOD_STORAGE_KEY);
+      return VALID_STORED_PERIODS.has(v) ? v : "1y";
+    } catch {
+      return "1y";
+    }
+  }
+
+  function writeStoredPeriod(p) {
+    try {
+      if (VALID_STORED_PERIODS.has(p)) {
+        localStorage.setItem(PERIOD_STORAGE_KEY, p);
+      }
+    } catch {
+      // ignore — disabled or quota
+    }
+  }
+
+  function applyActiveButton(period) {
+    document.querySelectorAll("[data-period]").forEach(b => {
+      const active = b.dataset.period === period;
+      b.classList.toggle("bg-slate-900", active);
+      b.classList.toggle("text-white", active);
+    });
+  }
+
   document.addEventListener("DOMContentLoaded", () => {
     const main = document.getElementById("chart-main");
     if (!main) return;
     const ticker = main.dataset.ticker;
-    let currentPeriod = "60d";
+    let currentPeriod = readStoredPeriod();
+    applyActiveButton(currentPeriod);
     load(ticker, currentPeriod);
 
     document.querySelectorAll("[data-period]").forEach(btn => {
       btn.addEventListener("click", () => {
         currentPeriod = btn.dataset.period;
-        document.querySelectorAll("[data-period]").forEach(b => {
-          const active = b === btn;
-          b.classList.toggle("bg-slate-900", active);
-          b.classList.toggle("text-white", active);
-        });
+        writeStoredPeriod(currentPeriod);
+        applyActiveButton(currentPeriod);
         load(ticker, currentPeriod);
       });
     });
