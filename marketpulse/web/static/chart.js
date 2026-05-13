@@ -366,21 +366,49 @@
     renderCharts(await r.json(), ticker);
   }
 
+  const PERIOD_STORAGE_KEY = "mp.chartPeriod";
+  const VALID_STORED_PERIODS = new Set(["60d", "6m", "ytd", "1y", "5y", "all"]);
+
+  function readStoredPeriod() {
+    try {
+      const v = localStorage.getItem(PERIOD_STORAGE_KEY);
+      return VALID_STORED_PERIODS.has(v) ? v : "1y";
+    } catch {
+      return "1y";
+    }
+  }
+
+  function writeStoredPeriod(p) {
+    try {
+      if (VALID_STORED_PERIODS.has(p)) {
+        localStorage.setItem(PERIOD_STORAGE_KEY, p);
+      }
+    } catch {
+      // ignore — disabled or quota
+    }
+  }
+
+  function applyActiveButton(period) {
+    document.querySelectorAll("[data-period]").forEach(b => {
+      const active = b.dataset.period === period;
+      b.classList.toggle("bg-slate-900", active);
+      b.classList.toggle("text-white", active);
+    });
+  }
+
   document.addEventListener("DOMContentLoaded", () => {
     const main = document.getElementById("chart-main");
     if (!main) return;
     const ticker = main.dataset.ticker;
-    let currentPeriod = "60d";
+    let currentPeriod = readStoredPeriod();
+    applyActiveButton(currentPeriod);
     load(ticker, currentPeriod);
 
     document.querySelectorAll("[data-period]").forEach(btn => {
       btn.addEventListener("click", () => {
         currentPeriod = btn.dataset.period;
-        document.querySelectorAll("[data-period]").forEach(b => {
-          const active = b === btn;
-          b.classList.toggle("bg-slate-900", active);
-          b.classList.toggle("text-white", active);
-        });
+        writeStoredPeriod(currentPeriod);
+        applyActiveButton(currentPeriod);
         load(ticker, currentPeriod);
       });
     });

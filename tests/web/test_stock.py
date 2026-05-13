@@ -429,3 +429,39 @@ def test_chart_data_rejects_invalid_period(client: TestClient, monkeypatch):
     _login(client, monkeypatch)
     r = client.get("/stock/AAPL/chart-data?period=foo")
     assert r.status_code == 422
+
+
+def test_stock_page_has_new_period_buttons(client: TestClient, monkeypatch):
+    """The /stock/{ticker} page must show YTD/5Y/All buttons and no 30D button."""
+    _login(client, monkeypatch)
+    r = client.get("/stock/AAPL")
+    assert r.status_code == 200
+    body = r.text
+    assert 'data-period="ytd"' in body, "YTD button missing"
+    assert 'data-period="5y"' in body, "5Y button missing"
+    assert 'data-period="all"' in body, "All button missing"
+    assert 'data-period="30d"' not in body, "30D button must be removed"
+
+
+def test_stock_page_has_ohlc_bar(client: TestClient, monkeypatch):
+    """Chart page must include an OHLC bar element above the chart."""
+    _login(client, monkeypatch)
+    r = client.get("/stock/AAPL")
+    assert r.status_code == 200
+    body = r.text
+    assert 'id="chart-ohlc-bar"' in body
+    assert 'data-ohlc="open"' in body
+    assert 'data-ohlc="high"' in body
+    assert 'data-ohlc="low"' in body
+    assert 'data-ohlc="close"' in body
+    assert 'data-ohlc="change"' in body
+
+
+def test_chart_js_uses_localstorage_for_period(client: TestClient, monkeypatch):
+    """chart.js must persist period via localStorage."""
+    _login(client, monkeypatch)
+    r = client.get("/static/chart.js")
+    assert r.status_code == 200
+    body = r.text
+    assert "localStorage" in body, "chart.js must persist period across sessions"
+    assert "mp.chartPeriod" in body, "chart.js must use the agreed storage key"

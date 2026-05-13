@@ -64,10 +64,12 @@
   </form>
 
   <div class="flex flex-wrap gap-1 mt-4 text-xs items-center">
-    <button data-period="30d" class="px-2 py-1 rounded border border-slate-200">30D</button>
-    <button data-period="60d" class="px-2 py-1 rounded border border-slate-200 bg-slate-900 text-white">60D</button>
+    <button data-period="60d" class="px-2 py-1 rounded border border-slate-200">60D</button>
     <button data-period="6m"  class="px-2 py-1 rounded border border-slate-200">6M</button>
+    <button data-period="ytd" class="px-2 py-1 rounded border border-slate-200">YTD</button>
     <button data-period="1y"  class="px-2 py-1 rounded border border-slate-200">1Y</button>
+    <button data-period="5y"  class="px-2 py-1 rounded border border-slate-200">5Y</button>
+    <button data-period="all" class="px-2 py-1 rounded border border-slate-200">All</button>
     <span class="ml-3 text-slate-500 flex items-center gap-2">
       <label class="cursor-pointer"><input type="checkbox" id="toggle-bb" checked /> 布林带</label>
       <label class="cursor-pointer"><input type="checkbox" id="toggle-sma" checked /> SMA50/200</label>
@@ -75,6 +77,13 @@
   </div>
 
   <div class="relative mt-2">
+  <div id="chart-ohlc-bar" class="text-xs flex gap-3 text-slate-600 mb-1 font-mono">
+    <span><span class="text-slate-400">O</span> <span data-ohlc="open">—</span></span>
+    <span><span class="text-slate-400">H</span> <span data-ohlc="high">—</span></span>
+    <span><span class="text-slate-400">L</span> <span data-ohlc="low">—</span></span>
+    <span><span class="text-slate-400">C</span> <span data-ohlc="close">—</span></span>
+    <span data-ohlc="change" class="font-semibold"></span>
+  </div>
     <div id="chart-main" data-ticker="{{ ticker }}" class="chart-pane chart-main"></div>
     <div id="chart-loading-dot"
          class="absolute top-2 left-2 w-2 h-2 rounded-full bg-slate-400
