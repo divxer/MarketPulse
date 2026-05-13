@@ -223,14 +223,19 @@
     if (s.rsiChart)  { syncPair(s.mainChart, s.rsiChart);  syncPair(s.rsiChart, s.mainChart); }
     if (s.macdChart) { syncPair(s.mainChart, s.macdChart); syncPair(s.macdChart, s.mainChart); }
 
-    // Anchor initial view to the most recent ~60 bars. The lazy-load
-    // subscription uses barsInLogicalRange(range).barsBefore < 50 — if
-    // we showed all initial bars at first paint, barsBefore would be 0
-    // and a fetch would fire immediately. Anchoring to 60 means the
-    // prefetch only happens if the initial dataset is shorter than 60
-    // bars (i.e., a very-newly-listed ticker).
+    // Show ALL initial bars — the user picked this period explicitly, so
+    // give them what they picked. barsBefore=0 at first paint will fire
+    // exactly one lazy-load prefetch (~180 more bars as a left-side
+    // buffer); the cascade-prevention machinery (logical-range syncPair
+    // + explicit setVisibleLogicalRange shift after prepend, both from
+    // PR #20) guarantees this can't loop.
+    //
+    // The previous behavior anchored to "last 60 bars" — a leftover from
+    // when 60D was the default period. With 1Y/5Y/All defaults, that
+    // anchor showed only ~7 months of a 5-year selection, contradicting
+    // the user's choice.
     s.mainChart.timeScale().setVisibleLogicalRange({
-      from: Math.max(0, s.bars.length - 60),
+      from: 0,
       to: s.bars.length,
     });
 
