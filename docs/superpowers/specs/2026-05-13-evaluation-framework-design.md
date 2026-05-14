@@ -1,6 +1,6 @@
 # Evaluation Framework — Phase 1 of PRINCIPLES Trilogy
 
-**Status:** Approved
+**Status:** Approved (revised after user review 2026-05-13)
 **Author:** harvey
 **Date:** 2026-05-13
 
@@ -29,10 +29,23 @@ class EvaluationEvent(Base):
     """A point-in-time event we want to evaluate later.
 
     event_type partitions the table:
-      - "ai_analysis": payload has Claude's verdict (bullish/neutral/bearish)
-                       and the input snapshot (quote, indicators, news heads)
-      - "signal_marker": payload has the signal type (ema_golden_cross, etc.)
-                         and the bar at trigger time
+      - "ai_analysis": payload has Claude's verdict + input snapshot
+                       (quote, indicators, news heads, holdings ctx)
+      - "signal_marker": payload has the signal type and the bar at trigger
+
+    subtype is the FINE-GRAINED type within event_type:
+      - For ai_analysis: "bullish" | "neutral" | "bearish"
+      - For signal_marker: must match SignalType enum below
+                           (e.g. "ema_golden_cross")
+
+    All subtype values come from `marketpulse.evaluation.constants` —
+    NOT free-form strings. This avoids typo-driven inconsistencies and
+    makes future migrations to enums clean. (Phase 1 keeps them as
+    String for SQLite compatibility, but constants gate writes.)
+
+    `event_price` is the close price at event_time, denormalized from
+    payload into an indexed column for fast "events where price was X"
+    queries without JSON parsing. Hot path: Phase 2/3 dashboards.
 
     Outcomes are computed lazily by the nightly job and stored in
     EvaluationOutcome (one row per (event, horizon_days) pair).
@@ -44,6 +57,7 @@ class EvaluationEvent(Base):
     subtype: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     ticker: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
     event_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    event_price: Mapped[float] = mapped_column(Float, nullable=False)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC),
@@ -51,6 +65,10 @@ class EvaluationEvent(Base):
 
     outcomes: Mapped[list["EvaluationOutcome"]] = relationship(
         back_populates="event", cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        Index("ix_event_lookup", "event_type", "subtype", "ticker", "event_time"),
     )
 
 
@@ -86,15 +104,27 @@ class EvaluationOutcome(Base):
     )
 ```
 
-**Horizons:** 5, 20, 60 trading days (per-outcome row). Stored as count of trading days; converted via bar-index lookup in the data source, not calendar days (avoids weekend/holiday confusion).
+**Horizons:** 1, 5, 20, 60 trading days (per-outcome row). Stored as count of trading days; converted via bar-index lookup in the data source, not calendar days (avoids weekend/holiday confusion).
 
-**Why three horizons:** different signals have different optimal evaluation windows. EMA cross may take 20 days to play out; RSI extremes resolve in 5 days; AI long-thesis takes 60 days. Storing all three lets later analysis pick the right one per signal type.
+**Why these four horizons:**
+
+| Horizon | Use case |
+|---|---|
+| 1 day | Very short signals — RSI intraday peaks, "Claude bullish tomorrow" verdicts |
+| 5 days | Short-term — RSI extreme reversals, breakout follow-through |
+| 20 days | Medium-term — EMA cross plays out, BB-squeeze breakouts mature |
+| 60 days | Long-term — AI long-thesis verdicts, trend continuation |
+
+**Why not 120 days:** beyond 60 days, single-event signal attribution gets washed out by macro events. If you need long-horizon analysis, the right tool is portfolio attribution, not single-event evaluation. Can be added later if a specific use case emerges (no schema change needed — just add `120` to the horizons list).
+
+**Why not 0.5 day (intraday):** we don't store intraday bars; entire framework is daily-close. Adding intraday is a separate, much larger project (data layer change).
 
 ### Modules
 
 ```
 marketpulse/evaluation/
 ├── __init__.py         # public re-exports
+├── constants.py        # AI_VERDICT_* and SIGNAL_TYPE_* — subtype taxonomy
 ├── events.py           # record_event() — single insertion API
 ├── outcomes.py         # compute_outcomes_for_pending_events()
 ├── forward_return.py   # forward_return_at_horizon(ticker, event_date, N)
@@ -102,28 +132,82 @@ marketpulse/evaluation/
 
 # Tests
 tests/evaluation/
+├── test_constants.py
 ├── test_events.py
 ├── test_forward_return.py
 └── test_outcomes.py
 ```
+
+#### `constants.py`
+
+```python
+# Standardized subtype taxonomy. record_event() validates against this.
+
+class AIVerdict:
+    BULLISH = "bullish"
+    NEUTRAL = "neutral"
+    BEARISH = "bearish"
+
+    @classmethod
+    def all(cls) -> set[str]:
+        return {cls.BULLISH, cls.NEUTRAL, cls.BEARISH}
+
+
+# Mirror of marketpulse.recap.signals' marker types.
+class SignalType:
+    EMA_GOLDEN_CROSS = "ema_golden_cross"
+    EMA_DEATH_CROSS = "ema_death_cross"
+    RSI_OVERBOUGHT = "rsi_overbought"
+    RSI_OVERSOLD = "rsi_oversold"
+    BOLLINGER_UPPER = "bollinger_upper"
+    BOLLINGER_LOWER = "bollinger_lower"
+
+    @classmethod
+    def all(cls) -> set[str]:
+        return {cls.EMA_GOLDEN_CROSS, cls.EMA_DEATH_CROSS,
+                cls.RSI_OVERBOUGHT, cls.RSI_OVERSOLD,
+                cls.BOLLINGER_UPPER, cls.BOLLINGER_LOWER}
+
+
+class EventType:
+    AI_ANALYSIS = "ai_analysis"
+    SIGNAL_MARKER = "signal_marker"
+
+    SUBTYPES = {
+        AI_ANALYSIS: AIVerdict.all,
+        SIGNAL_MARKER: SignalType.all,
+    }
+```
+
+`record_event()` validates `subtype in EventType.SUBTYPES[event_type]()`. Wrong subtype → ValueError. Catches typos at write time.
 
 #### `events.py`
 
 ```python
 def record_event(
     *,
-    event_type: str,           # "ai_analysis" | "signal_marker"
-    subtype: str,              # e.g. "bullish" | "ema_golden_cross"
+    event_type: str,           # EventType.AI_ANALYSIS | EventType.SIGNAL_MARKER
+    subtype: str,              # AIVerdict.* | SignalType.*
     ticker: str,
     event_time: datetime,      # tz-aware UTC
+    event_price: float,        # close at event_time (or current quote)
     payload: dict,
     db: Session,
 ) -> EvaluationEvent:
     """Record a point-in-time event. No outcome computed here.
 
+    Validates:
+      - event_type ∈ EventType.{AI_ANALYSIS, SIGNAL_MARKER}
+      - subtype ∈ EventType.SUBTYPES[event_type]()
+      - event_time is tz-aware
+      - ticker normalized to UPPER
+      - event_price > 0
+
     Returns the inserted EvaluationEvent (with id assigned by DB).
     Caller is responsible for the session commit/rollback boundary —
     we just session.add and session.flush (so id is available).
+
+    Raises ValueError on validation failure.
     """
 ```
 
@@ -171,7 +255,7 @@ Implementation note: use `DataService.get_history(ticker, period='5y')` to get a
 def compute_outcomes_for_pending_events(
     db: Session,
     data: DataService,
-    horizons: list[int] = [5, 20, 60],
+    horizons: list[int] = [1, 5, 20, 60],
     max_events: int = 500,
 ) -> ComputeOutcomeReport:
     """For each EvaluationEvent without a matching EvaluationOutcome row at
@@ -220,7 +304,13 @@ Add a new job to `marketpulse/scheduler/jobs.py`:
 def run_outcome_computation() -> None:
     """Daily job: compute outcomes for pending events.
 
-    Runs at 02:00 UTC (after market close, before user's morning).
+    Runs at 02:00 UTC (after US market close 21:00 UTC, before Beijing
+    user's morning 10:00 China time). US market close → 5 hour buffer
+    for yfinance to settle before we query.
+
+    Trade-off accepted: a Beijing user looking before 10:00 China time
+    won't see yesterday's outcomes yet. For "fresh now" outcomes we
+    expose `/admin/compute-outcomes` (Phase 2 follow-up).
     """
     from marketpulse.evaluation.outcomes import compute_outcomes_for_pending_events
 
@@ -234,8 +324,12 @@ def run_outcome_computation() -> None:
             skipped_horizon_in_future=report.skipped_horizon_in_future,
             skipped_data_unavailable=report.skipped_data_unavailable,
             failed=report.failed,
+            per_failure_details=report.failure_log,  # detailed list,
+                                                      # see logging note below
         )
 ```
+
+**Granular logging:** every skipped/failed event includes ticker, horizon, and reason. The `ComputeOutcomeReport` carries a `failure_log: list[dict]` with `{event_id, ticker, horizon, reason}` for the operator to triage delisted tickers etc.
 
 Register the job in `build_scheduler()`:
 
@@ -300,17 +394,31 @@ Phase 2/3 not yet wired in this phase — but the contract is:
 
 ## Tests
 
+`tests/evaluation/test_constants.py`:
+- `EventType.SUBTYPES[AI_ANALYSIS]()` returns exactly the 3 AIVerdict values
+- `EventType.SUBTYPES[SIGNAL_MARKER]()` returns exactly the 6 SignalType values
+- Each constant string matches what `signals.py` actually emits (regression: keeps Phase 3 hook in sync with this taxonomy)
+
 `tests/evaluation/test_forward_return.py`:
 - Returns correct value for a known historical date pair
 - Returns None when horizon is in the future
 - Returns None when ticker has no bars
 - Handles event on a weekend (skips to next Monday)
+- Handles event on a Friday with horizon=1 (next bar is Monday)
 - Adjusts for splits (via yfinance adjusted close)
+- **Cross-year boundary**: event in late Dec, horizon spanning new year holidays
+- **Cross-Thanksgiving / Christmas**: horizon spans market closures, bar index still works
 
 `tests/evaluation/test_events.py`:
 - record_event inserts a row with all fields
 - payload roundtrips through JSON cleanly
+- **Validation**: invalid event_type → ValueError
+- **Validation**: subtype not in taxonomy → ValueError
+- **Validation**: ticker normalized to upper
+- **Validation**: event_price ≤ 0 → ValueError
+- **Validation**: naive datetime → ValueError
 - Can insert two events with same (ticker, event_time) — deduplication is caller's responsibility
+- **Multiple events same ticker same day**: 5 events with same ticker/date but different subtypes all insert (no UNIQUE conflict on event table)
 
 `tests/evaluation/test_outcomes.py`:
 - compute_outcomes_for_pending_events inserts when horizon end is past
@@ -318,6 +426,9 @@ Phase 2/3 not yet wired in this phase — but the contract is:
 - Skips already-computed outcomes (idempotency)
 - Returns accurate report counts
 - Excess return is computed correctly vs benchmark
+- **Failure log details**: ticker + horizon + reason recorded per failure
+- **Mixed horizons**: same event gets outcomes for horizons 1 and 5 first run, 20 and 60 later run (partial completion)
+- **Benchmark cache**: SPY fetched once per run regardless of how many events touch it
 
 `tests/scheduler/test_outcome_job.py`:
 - Job registered in build_scheduler()
@@ -353,11 +464,22 @@ Phase 2/3 not yet wired in this phase — but the contract is:
 
 - UI surfacing (Phases 2 and 3)
 - Hooks into ai/service.py and signals.py (Phases 2 and 3)
-- Multi-benchmark (only SPY for now; A-share would need Hang Seng or similar later)
+- **Multi-benchmark** — SPY only for now. When/if A-share or HK stocks
+  enter the picture, add `benchmark_ticker` as an optional override per
+  event_type or per ticker (e.g. mapping table `ticker_market → benchmark`).
+  Schema migration is non-breaking: `evaluation_outcome.benchmark_ticker`
+  is already a column.
+- **PostgreSQL/JSONB** — SQLite + JSON is fine for single-user current
+  scale. When/if we migrate to PostgreSQL, payload becomes JSONB with
+  GIN index for arbitrary key lookups. The denormalized `event_price`
+  + 4-column index in this phase keeps SQLite query path fast for the
+  hot Phase 2/3 queries.
 - Tax/fee-adjusted returns (use raw adjusted close)
 - Drawdown / max-loss metrics (only point-in-time forward return)
 - Confidence intervals on win rate (frequentist proportion is enough at this stage)
 - Per-user evaluation (this is a single-user app)
+- **Intraday horizons** — entire framework is daily-close. Adding intraday
+  requires data layer changes (separate larger project).
 
 ## Principles Compliance
 
