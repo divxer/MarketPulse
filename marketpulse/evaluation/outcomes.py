@@ -17,6 +17,42 @@ from marketpulse.logging import get_logger
 
 log = get_logger(__name__)
 
+
+class _BarsCache:
+    """Per-run cache wrapper around DataService.get_history.
+
+    forward_return_at_horizon() and benchmark_forward_return() each fetch
+    bars for a ticker (1y period). When compute_outcomes_for_pending_events
+    iterates over many events for the same ticker × multiple horizons, the
+    underlying yfinance fetch is duplicated up to (events × horizons × 2)
+    times — once per call, once for SPY benchmark.
+
+    This wrapper caches each (ticker, period) tuple's result for the
+    lifetime of one compute_outcomes_for_pending_events call. Per-run
+    only — the cache discards when the function returns (object scope).
+
+    Fetch failures are also cached (as empty list) so we don't hammer a
+    delisted-or-broken ticker repeatedly within one run.
+    """
+
+    def __init__(self, data: DataService) -> None:
+        self._data = data
+        self._cache: dict[tuple[str, str], list] = {}
+
+    def get_history(self, ticker: str, period: str) -> list:
+        key = (ticker, period)
+        if key not in self._cache:
+            try:
+                self._cache[key] = self._data.get_history(ticker, period)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "bars_cache_fetch_failed",
+                    ticker=ticker, period=period, error=str(exc),
+                )
+                self._cache[key] = []
+        return self._cache[key]
+
+
 DEFAULT_HORIZONS = [1, 5, 20, 60]
 
 
@@ -51,6 +87,11 @@ def compute_outcomes_for_pending_events(
         horizons = DEFAULT_HORIZONS
 
     report = ComputeOutcomeReport()
+    # Cache bar fetches per ticker within this run to avoid O(N × H) repeat
+    # yfinance calls. SPY in particular would otherwise be fetched once per
+    # (event, horizon) pair. cached_data is API-compatible with DataService
+    # for the get_history method that forward_return / benchmark use.
+    cached_data = _BarsCache(data)
 
     # Find events that might need outcomes computed.
     # Strategy: pull recent events; for each (event, horizon) check if outcome
@@ -82,7 +123,7 @@ def compute_outcomes_for_pending_events(
 
             # Compute forward return for the event
             event_result = forward_return_at_horizon(
-                event.ticker, event_date, horizon, data,
+                event.ticker, event_date, horizon, cached_data,
             )
             if event_result is None:
                 # Distinguish "horizon in future" from "data unavailable"
@@ -103,7 +144,7 @@ def compute_outcomes_for_pending_events(
                 continue
 
             # Compute benchmark forward return
-            bench_return = benchmark_forward_return(event_date, horizon, data)
+            bench_return = benchmark_forward_return(event_date, horizon, cached_data)
             if bench_return is None:
                 report.skipped_benchmark_unavailable += 1
                 report.failure_log.append({
@@ -114,25 +155,27 @@ def compute_outcomes_for_pending_events(
                 })
                 continue
 
-            # Insert outcome row
+            # Insert outcome row. Wrap in a SAVEPOINT (db.begin_nested) so
+            # a per-row IntegrityError doesn't rollback previously-inserted
+            # outcomes in this run — only this row's flush is undone.
             try:
-                outcome = EvaluationOutcome(
-                    event_id=event.id,
-                    horizon_trading_days=horizon,
-                    event_price=event_result.event_price,
-                    horizon_price=event_result.horizon_price,
-                    horizon_date=event_result.horizon_date,
-                    forward_return=event_result.forward_return,
-                    benchmark_ticker=BENCHMARK_TICKER,
-                    benchmark_forward_return=bench_return,
-                    excess_return=event_result.forward_return - bench_return,
-                )
-                db.add(outcome)
-                db.flush()
+                with db.begin_nested():
+                    outcome = EvaluationOutcome(
+                        event_id=event.id,
+                        horizon_trading_days=horizon,
+                        event_price=event_result.event_price,
+                        horizon_price=event_result.horizon_price,
+                        horizon_date=event_result.horizon_date,
+                        forward_return=event_result.forward_return,
+                        benchmark_ticker=BENCHMARK_TICKER,
+                        benchmark_forward_return=bench_return,
+                        excess_return=event_result.forward_return - bench_return,
+                    )
+                    db.add(outcome)
+                    db.flush()
                 report.outcomes_inserted += 1
             except Exception as exc:  # noqa: BLE001
-                # IntegrityError from race condition or unexpected — log + continue
-                db.rollback()
+                # The SAVEPOINT was already rolled back on context exit.
                 report.failed += 1
                 report.failure_log.append({
                     "event_id": event.id,
