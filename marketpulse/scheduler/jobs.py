@@ -252,6 +252,44 @@ def _fetch_corp_actions(ticker, tencent, yf_client, since, today):
         return None, "none"
 
 
+def run_outcome_computation() -> None:
+    """Daily job: compute outcomes for pending evaluation events.
+
+    Runs at 02:00 UTC. US market close ~21:00 UTC → 5h buffer for yfinance.
+    """
+    from marketpulse.evaluation import compute_outcomes_for_pending_events
+
+    settings = get_settings()
+    gen = session_scope()
+    db = next(gen)
+    try:
+        data = DataService(db, _build_quote_client(), news_ttl_days=settings.news_cache_ttl_days)
+        report = compute_outcomes_for_pending_events(db, data)
+        log.info(
+            "outcome_computation_done",
+            events_examined=report.events_examined,
+            outcomes_inserted=report.outcomes_inserted,
+            skipped_horizon_in_future=report.skipped_horizon_in_future,
+            skipped_data_unavailable=report.skipped_data_unavailable,
+            skipped_benchmark_unavailable=report.skipped_benchmark_unavailable,
+            skipped_already_computed=report.skipped_already_computed,
+            failed=report.failed,
+            failure_log_count=len(report.failure_log),
+        )
+        record_run_summary(db, {
+            "ran_at": datetime.now(UTC).isoformat(),
+            "inserted": report.outcomes_inserted,
+            "skipped": (
+                report.skipped_horizon_in_future
+                + report.skipped_already_computed
+                + report.skipped_data_unavailable
+            ),
+            "failed": report.failed,
+        })
+    finally:
+        db.close()
+
+
 def build_scheduler() -> BackgroundScheduler:
     settings = get_settings()
     sched = BackgroundScheduler(timezone="America/New_York")
@@ -289,5 +327,12 @@ def build_scheduler() -> BackgroundScheduler:
             day_of_week="mon-fri", hour="9-16", minute="*/5",
         ),
         id="alert_check", replace_existing=True, misfire_grace_time=60,
+    )
+    # Outcome computation: daily 02:00 UTC (US close ~21:00 UTC → 5h buffer)
+    sched.add_job(
+        run_outcome_computation,
+        trigger=CronTrigger(hour=2, minute=0, timezone="UTC"),
+        id="outcome_computation",
+        replace_existing=True,
     )
     return sched
