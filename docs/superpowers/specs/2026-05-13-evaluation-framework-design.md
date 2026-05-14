@@ -481,6 +481,45 @@ Phase 2/3 not yet wired in this phase — but the contract is:
 - **Intraday horizons** — entire framework is daily-close. Adding intraday
   requires data layer changes (separate larger project).
 
+## Future Extensions Notes
+
+These are explicitly **not done in Phase 1** but the design accommodates them without schema breakage:
+
+### Promoting payload fields to indexed columns
+
+Pattern when a payload field becomes a hot query path (e.g., `payload["rsi_value"]` queried often in Phase 3 analytics):
+
+1. Add typed column via Alembic migration (`rsi_value: Mapped[float | None]`)
+2. One-time data migration: extract from existing payload rows
+3. Update `record_event()` to populate the new column from payload
+4. Add index if needed
+
+Same pattern already used for `event_price`. Documents this as the **canonical migration recipe** rather than redesigning every time.
+
+### Multi-benchmark mapping table
+
+When/if A-share or HK stocks enter scope, instead of hardcoding `BENCHMARK_TICKER = "SPY"`:
+
+```python
+# Future: marketpulse/evaluation/benchmark_map.py
+class BenchmarkMap(Base):
+    __tablename__ = "benchmark_map"
+    ticker: Mapped[str] = mapped_column(primary_key=True)  # or pattern
+    benchmark_ticker: Mapped[str]
+    rule_priority: Mapped[int]  # specific ticker > pattern > default
+
+# Example rows:
+#   ticker='AAPL',  benchmark='SPY',  priority=10
+#   ticker='600*',  benchmark='000300.SH', priority=5  (CSI 300 for A-share)
+#   ticker='*',     benchmark='SPY',  priority=0       (default)
+```
+
+`benchmark_forward_return()` consults the map (with `lru_cache` for hot lookups). Outcome row's `benchmark_ticker` column already accommodates this — no schema change to `evaluation_outcome` needed.
+
+### Manual refresh endpoint (Phase 2/3 hook)
+
+Phase 2 should add `POST /admin/compute-outcomes` (auth required, single-user) so Beijing-timezone user wanting "fresh now" outcomes can trigger compute mid-day without waiting for 02:00 UTC cron. UI nicety: small refresh button next to the AI-hit-rate badge that calls this endpoint. Documented here so Phase 2 spec doesn't re-derive the need.
+
 ## Principles Compliance
 
 Per `docs/PRINCIPLES.md`:
