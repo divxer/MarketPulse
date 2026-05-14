@@ -2,12 +2,14 @@ from datetime import UTC, date, datetime
 from typing import Any
 
 from sqlalchemy import (
+    JSON,
     BigInteger,
     Boolean,
     CheckConstraint,
     Date,
     DateTime,
     Float,
+    ForeignKey,
     Index,
     Integer,
     String,
@@ -16,7 +18,7 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy.engine import Dialect
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from marketpulse.db.base import Base
 
@@ -230,3 +232,61 @@ class AppSetting(Base):
 
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class EvaluationEvent(Base):
+    """A point-in-time event we want to evaluate later.
+
+    event_type partitions: "ai_analysis" | "signal_marker"
+    subtype values come from marketpulse.evaluation.constants
+    """
+    __tablename__ = "evaluation_event"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    subtype: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    ticker: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    event_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+    )
+    event_price: Mapped[float] = mapped_column(Float, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC),
+    )
+
+    outcomes: Mapped[list["EvaluationOutcome"]] = relationship(
+        back_populates="event", cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        Index("ix_event_lookup", "event_type", "subtype", "ticker", "event_time"),
+    )
+
+
+class EvaluationOutcome(Base):
+    """Forward-return measurement at a given horizon for an event."""
+    __tablename__ = "evaluation_outcome"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    event_id: Mapped[int] = mapped_column(
+        ForeignKey("evaluation_event.id"), nullable=False, index=True,
+    )
+    horizon_trading_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_price: Mapped[float] = mapped_column(Float, nullable=False)
+    horizon_price: Mapped[float] = mapped_column(Float, nullable=False)
+    horizon_date: Mapped[date] = mapped_column(Date, nullable=False)
+    forward_return: Mapped[float] = mapped_column(Float, nullable=False)
+    benchmark_ticker: Mapped[str] = mapped_column(String(16), default="SPY")
+    benchmark_forward_return: Mapped[float] = mapped_column(Float, nullable=False)
+    excess_return: Mapped[float] = mapped_column(Float, nullable=False)
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC),
+    )
+
+    event: Mapped["EvaluationEvent"] = relationship(back_populates="outcomes")
+
+    __table_args__ = (
+        UniqueConstraint("event_id", "horizon_trading_days",
+                         name="uq_event_horizon"),
+    )
