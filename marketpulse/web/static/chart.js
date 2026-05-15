@@ -3,13 +3,14 @@
 // Reads ticker from <div id="chart-main" data-ticker="AAPL">.
 
 (function () {
+  const T = window.MP_CHART_THEME || {};
   const SIGNAL_STYLES = {
-    ema_golden_cross:  { shape: "arrowUp",   color: "#16a34a", text: "金叉" },
-    ema_death_cross:   { shape: "arrowDown", color: "#dc2626", text: "死叉" },
-    rsi_overbought:    { shape: "circle",    color: "#f59e0b", text: "超买" },
-    rsi_oversold:      { shape: "circle",    color: "#3b82f6", text: "超卖" },
-    bollinger_upper:   { shape: "square",    color: "#a855f7", text: "上轨" },
-    bollinger_lower:   { shape: "square",    color: "#6366f1", text: "下轨" },
+    ema_golden_cross:  { shape: "arrowUp",   color: T.signalGoldenCross    || "#16a34a", text: "金叉" },
+    ema_death_cross:   { shape: "arrowDown", color: T.signalDeathCross     || "#dc2626", text: "死叉" },
+    rsi_overbought:    { shape: "circle",    color: T.signalOverbought     || "#f59e0b", text: "超买" },
+    rsi_oversold:      { shape: "circle",    color: T.signalOversold       || "#3b82f6", text: "超卖" },
+    bollinger_upper:   { shape: "square",    color: T.signalBollingerUpper || "#a855f7", text: "上轨" },
+    bollinger_lower:   { shape: "square",    color: T.signalBollingerLower || "#6366f1", text: "下轨" },
   };
 
   // Module-level state shared across initial render and lazy-load chunks.
@@ -104,9 +105,9 @@
 
     const commonOpts = {
       autoSize: true,
-      layout: { background: { color: "#ffffff" }, textColor: "#334155" },
-      grid: { vertLines: { color: "#e2e8f0" }, horzLines: { color: "#e2e8f0" } },
-      timeScale: { borderColor: "#cbd5e1", rightOffset: 12 },
+      layout: { background: { color: T.background || "#ffffff" }, textColor: T.textColor || "#334155" },
+      grid: { vertLines: { color: T.gridLines || "#e2e8f0" }, horzLines: { color: T.gridLines || "#e2e8f0" } },
+      timeScale: { borderColor: T.borderColor || "#cbd5e1", rightOffset: 12 },
       crosshair: { mode: 0 },
     };
 
@@ -117,8 +118,9 @@
     // === Main chart ===
     s.mainChart = LightweightCharts.createChart(mainEl, commonOpts);
     s.candleSeries = s.mainChart.addCandlestickSeries({
-      upColor: "#16a34a", downColor: "#dc2626",
-      borderVisible: false, wickUpColor: "#16a34a", wickDownColor: "#dc2626",
+      upColor: T.upColor || "#16a34a", downColor: T.downColor || "#dc2626",
+      borderVisible: false,
+      wickUpColor: T.wickUpColor || "#16a34a", wickDownColor: T.wickDownColor || "#dc2626",
     });
     s.candleSeries.setData(s.bars);
     // Initial OHLC bar: show the latest bar.
@@ -132,12 +134,12 @@
       if (handleKey) s[handleKey] = line;
       return line;
     }
-    s.ema12Series   = addLineIfData(s.ema12,   lineOpts({ color: "#0ea5e9", title: "EMA12" }),    "ema12Series");
-    s.ema26Series   = addLineIfData(s.ema26,   lineOpts({ color: "#f59e0b", title: "EMA26" }),    "ema26Series");
-    s.sma50Series   = addLineIfData(s.sma50,   lineOpts({ color: "#8b5cf6", title: "SMA50" }),    "sma50Series");
-    s.sma200Series  = addLineIfData(s.sma200,  lineOpts({ color: "#64748b", title: "SMA200" }),   "sma200Series");
-    s.bbUpperSeries = addLineIfData(s.bb_upper, lineOpts({ color: "#a855f7", lineStyle: 2, title: "BB上轨" }), "bbUpperSeries");
-    s.bbLowerSeries = addLineIfData(s.bb_lower, lineOpts({ color: "#a855f7", lineStyle: 2, title: "BB下轨" }), "bbLowerSeries");
+    s.ema12Series   = addLineIfData(s.ema12,   lineOpts({ color: T.ema12 || "#0ea5e9", title: "EMA12" }),    "ema12Series");
+    s.ema26Series   = addLineIfData(s.ema26,   lineOpts({ color: T.ema26 || "#f59e0b", title: "EMA26" }),    "ema26Series");
+    s.sma50Series   = addLineIfData(s.sma50,   lineOpts({ color: T.sma50 || "#8b5cf6", title: "SMA50" }),    "sma50Series");
+    s.sma200Series  = addLineIfData(s.sma200,  lineOpts({ color: T.sma200 || "#64748b", title: "SMA200" }),  "sma200Series");
+    s.bbUpperSeries = addLineIfData(s.bb_upper, lineOpts({ color: T.bbUpper || "#a855f7", lineStyle: 2, title: "BB上轨" }), "bbUpperSeries");
+    s.bbLowerSeries = addLineIfData(s.bb_lower, lineOpts({ color: T.bbLower || "#a855f7", lineStyle: 2, title: "BB下轨" }), "bbLowerSeries");
     applyToggles();
 
     s.volSeries = s.mainChart.addHistogramSeries({
@@ -149,7 +151,7 @@
     });
     s.volSeries.setData(s.bars.map(b => ({
       time: b.time, value: b.volume,
-      color: b.close >= b.open ? "rgba(22,163,74,0.4)" : "rgba(220,38,38,0.4)",
+      color: b.close >= b.open ? "rgba(14,138,95,0.35)" : "rgba(192,57,43,0.35)",
     })));
 
     if (s.signal_markers.length > 0) {
@@ -172,14 +174,14 @@
           rightPriceScale: { scaleMargins: { top: 0.15, bottom: 0.15 } },
         }),
       );
-      s.rsiSeries = s.rsiChart.addLineSeries(lineOpts({ color: "#9333ea" }));
+      s.rsiSeries = s.rsiChart.addLineSeries(lineOpts({ color: T.rsiLine || "#9333ea" }));
       s.rsiSeries.setData(rsiData);
       const ob = s.rsiChart.addLineSeries(lineOpts({
-        color: "#fca5a5", lineStyle: 2, lastValueVisible: false,
+        color: T.rsiOverbought || "#fca5a5", lineStyle: 2, lastValueVisible: false,
       }));
       ob.setData(rsiData.map(p => ({ time: p.time, value: 70 })));
       const os = s.rsiChart.addLineSeries(lineOpts({
-        color: "#93c5fd", lineStyle: 2, lastValueVisible: false,
+        color: T.rsiOversold || "#93c5fd", lineStyle: 2, lastValueVisible: false,
       }));
       os.setData(rsiData.map(p => ({ time: p.time, value: 30 })));
     }
@@ -193,16 +195,16 @@
           rightPriceScale: { scaleMargins: { top: 0.15, bottom: 0.15 } },
         }),
       );
-      s.macdLineSeries = s.macdChart.addLineSeries(lineOpts({ color: "#0ea5e9" }));
+      s.macdLineSeries = s.macdChart.addLineSeries(lineOpts({ color: T.macdLine || "#0ea5e9" }));
       s.macdLineSeries.setData(macdLine);
-      s.macdSignalSeries = s.macdChart.addLineSeries(lineOpts({ color: "#f59e0b" }));
+      s.macdSignalSeries = s.macdChart.addLineSeries(lineOpts({ color: T.macdSignal || "#f59e0b" }));
       s.macdSignalSeries.setData(withWhitespace(s.macd.signal));
       s.macdHistSeries = s.macdChart.addHistogramSeries({
         priceLineVisible: false, lastValueVisible: false,
       });
       s.macdHistSeries.setData(withWhitespace(s.macd.histogram).map(p => ({
         time: p.time, value: p.value,
-        color: p.value >= 0 ? "rgba(22,163,74,0.6)" : "rgba(220,38,38,0.6)",
+        color: p.value >= 0 ? (T.macdHistPositive || "rgba(22,163,74,0.6)") : (T.macdHistNegative || "rgba(220,38,38,0.6)"),
       })));
     }
 
@@ -343,7 +345,7 @@
     s.candleSeries.setData(s.bars);
     s.volSeries.setData(s.bars.map(b => ({
       time: b.time, value: b.volume,
-      color: b.close >= b.open ? "rgba(22,163,74,0.4)" : "rgba(220,38,38,0.4)",
+      color: b.close >= b.open ? "rgba(14,138,95,0.35)" : "rgba(192,57,43,0.35)",
     })));
 
     // Each line/indicator: extend the in-state array, then setData on its handle.
@@ -374,7 +376,7 @@
       s.macd.histogram = (chunk.macd?.histogram || []).concat(s.macd.histogram);
       s.macdHistSeries.setData(withWhitespace(s.macd.histogram).map(p => ({
         time: p.time, value: p.value,
-        color: p.value >= 0 ? "rgba(22,163,74,0.6)" : "rgba(220,38,38,0.6)",
+        color: p.value >= 0 ? (T.macdHistPositive || "rgba(22,163,74,0.6)") : (T.macdHistNegative || "rgba(220,38,38,0.6)"),
       })));
     }
 
