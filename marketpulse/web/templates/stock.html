@@ -7,48 +7,101 @@
 
 <section class="bg-white rounded-md shadow-sm p-4">
   <!-- ============ SYMBOL STRIP (full width) ============ -->
-  <header class="flex flex-wrap items-baseline justify-between gap-3">
+  <header class="flex flex-wrap items-baseline justify-between gap-3 mp-symbol-strip">
     <div class="flex items-baseline gap-3 flex-wrap">
-      <h1 class="text-xl font-semibold">{{ ticker }}</h1>
-      <span class="text-2xl font-semibold">${{ "%.2f"|format(quote.price) }}</span>
-      <span class="text-sm {{ change_color }}">
+      <h1 class="grotesk" style="font-size: 32px; font-weight: 700; letter-spacing: -0.03em; color: var(--ns-navy); margin: 0;">{{ ticker }}</h1>
+      <span class="mono tnum" style="font-size: 32px; font-weight: 600; letter-spacing: -0.02em; color: var(--ns-navy);">${{ "%.2f"|format(quote.price) }}</span>
+      <span class="mono tnum grotesk" style="font-size: 16px; font-weight: 700; color: {% if quote.change_pct >= 0 %}var(--mp-up){% else %}var(--mp-down){% endif %};">
+        <span class="material-symbols-outlined" style="font-size: 16px; vertical-align: middle;">{% if quote.change_pct >= 0 %}trending_up{% else %}trending_down{% endif %}</span>
         {{ "%+.2f"|format(change_amount) }} ({{ "%+.2f"|format(quote.change_pct) }}%)
       </span>
-      {% if quote.stale %}<span class="text-amber-600 text-xs">⚠ 缓存</span>{% endif %}
+      {% if quote.stale %}
+      <span class="mp-chip" style="background: #fef3c7; color: #92400e; padding: 2px 8px; font-size: 11px;">
+        <span class="material-symbols-outlined" style="font-size: 12px;">warning</span> 缓存
+      </span>
+      {% endif %}
     </div>
     <div class="flex items-center gap-2 text-xs">
       <form hx-post="/watchlist" hx-target="this" hx-swap="outerHTML" class="inline">
         <input type="hidden" name="ticker" value="{{ ticker }}" />
-        <button class="px-2 py-1 rounded border border-slate-200 hover:bg-slate-50"
+        <button class="mp-btn mp-btn--ghost"
                 {% if in_watchlist %}disabled title="已在自选股"{% endif %}>
-          {% if in_watchlist %}★ 已自选{% else %}☆ 加自选{% endif %}
+          <span class="material-symbols-outlined">{% if in_watchlist %}star{% else %}star_border{% endif %}</span>
+          {% if in_watchlist %}已自选{% else %}加自选{% endif %}
         </button>
       </form>
       <button hx-post="/stock/{{ ticker }}/analyze" hx-target="#analysis" hx-swap="innerHTML"
-              class="bg-slate-900 text-white px-3 py-1 rounded">🤖 AI 分析</button>
+              class="mp-btn mp-btn--navy">
+        <span class="material-symbols-outlined">auto_awesome</span>
+        AI 分析
+      </button>
     </div>
   </header>
+  <div class="mp-rule"></div>
 
   <!-- ============ 3-COLUMN GRID ============ -->
   <div class="grid grid-cols-[280px_1fr_440px] gap-4 mt-4">
 
-    <!-- ============ LEFT: watchlist placeholder ============ -->
-    <aside class="bg-slate-50 rounded p-4 text-sm text-slate-500">
-      <div class="font-semibold text-slate-700 mb-2">自选股</div>
-      <div class="text-xs">侧栏数据 — Phase 5b-2</div>
+    <!-- ============ LEFT: watchlist sidebar ============ -->
+    <aside class="mp-card" style="height: fit-content;">
+      <div class="mp-card__head" style="padding: 12px 14px;">
+        <span class="mp-card__title">
+          <span class="material-symbols-outlined">visibility</span>
+          自选股
+        </span>
+        <span class="text-xs text-slate-500">{{ watchlist_items | length }}</span>
+      </div>
+      <ul class="mp-watchlist">
+        {% for item in watchlist_items %}
+        <li class="mp-watchlist__item {% if item.is_active %}is-active{% endif %}">
+          <a href="/stock/{{ item.ticker }}" class="mp-watchlist__link">
+            <div class="mp-watchlist__row">
+              <div class="mp-watchlist__id">
+                <div class="grotesk mp-watchlist__ticker">{{ item.ticker }}</div>
+                <div class="mp-watchlist__name">{{ item.name }}</div>
+              </div>
+              {% if item.sparkline %}
+              <svg class="mp-watchlist__spark" width="56" height="20" viewBox="0 0 56 20" preserveAspectRatio="none">
+                <polyline points="{{ item.sparkline | sparkpoints(56, 20) }}"
+                          fill="none"
+                          stroke="{% if item.change_pct is not none and item.change_pct >= 0 %}var(--mp-up){% else %}var(--mp-down){% endif %}"
+                          stroke-width="1.5" />
+              </svg>
+              {% endif %}
+            </div>
+            <div class="mp-watchlist__row mp-watchlist__row--values">
+              {% if item.price is not none %}
+              <span class="mono tnum mp-watchlist__price">{{ "%.2f" | format(item.price) }}</span>
+              <span class="mono tnum {% if item.change_pct >= 0 %}mp-watchlist__chg--up{% else %}mp-watchlist__chg--down{% endif %}">
+                {% if item.change_pct >= 0 %}+{% endif %}{{ "%.2f" | format(item.change_pct) }}%
+              </span>
+              {% else %}
+              <span class="text-xs text-slate-400">数据不可用</span>
+              {% endif %}
+            </div>
+          </a>
+        </li>
+        {% else %}
+        <li style="padding: 16px 14px; font-size: 12px; color: var(--ns-on-surface-variant); text-align: center;">
+          还没添加自选股 — 在任意股票页面点 ☆
+        </li>
+        {% endfor %}
+      </ul>
     </aside>
 
     <!-- ============ CENTER: chart stack + recent trades ============ -->
     <div>
       <!-- Period buttons + indicator toggles -->
-      <div class="flex flex-wrap gap-1 text-xs items-center">
-        <button data-period="60d" class="px-2 py-1 rounded border border-slate-200">60D</button>
-        <button data-period="6m"  class="px-2 py-1 rounded border border-slate-200">6M</button>
-        <button data-period="ytd" class="px-2 py-1 rounded border border-slate-200">YTD</button>
-        <button data-period="1y"  class="px-2 py-1 rounded border border-slate-200">1Y</button>
-        <button data-period="5y"  class="px-2 py-1 rounded border border-slate-200">5Y</button>
-        <button data-period="all" class="px-2 py-1 rounded border border-slate-200">All</button>
-        <span class="ml-3 text-slate-500 flex items-center gap-2">
+      <div class="flex flex-wrap gap-2 text-xs items-center">
+        <div class="mp-seg">
+          <button data-period="60d">60D</button>
+          <button data-period="6m">6M</button>
+          <button data-period="ytd">YTD</button>
+          <button data-period="1y">1Y</button>
+          <button data-period="5y">5Y</button>
+          <button data-period="all">All</button>
+        </div>
+        <span class="ml-3 flex items-center gap-2" style="color: var(--ns-on-surface-variant);">
           <label class="cursor-pointer"><input type="checkbox" id="toggle-bb" checked /> 布林带</label>
           <label class="cursor-pointer"><input type="checkbox" id="toggle-sma" checked /> SMA50/200</label>
         </span>
@@ -86,29 +139,35 @@
 
       <!-- Recent trades -->
       {% if recent_trades %}
-      <h2 class="mt-6 font-semibold flex items-center gap-2 text-sm">
-        最近交易 <a href="/trades?ticker={{ ticker }}" class="text-slate-500 text-xs hover:underline">全部 →</a>
-      </h2>
-      <table class="mt-2 text-sm w-full">
-        <tbody>
-        {% for t in recent_trades %}
-          <tr class="border-t">
-            <td class="py-1 text-slate-500 text-xs w-28">
-              {{ (t.executed_at or t.created_at).strftime("%Y-%m-%d") }}
-            </td>
-            <td class="py-1 w-16">
-              {% if t.action == "buy" %}<span class="text-blue-600 text-xs">买入</span>
-              {% else %}<span class="text-orange-600 text-xs">卖出</span>{% endif %}
-            </td>
-            <td class="py-1 text-right w-20">{{ "%g"|format(t.quantity) }}</td>
-            <td class="py-1 text-right w-24">${{ "%.2f"|format(t.price) }}</td>
-            <td class="py-1 text-right text-xs {% if t.realized_pl is not none and t.realized_pl >= 0 %}text-green-600{% elif t.realized_pl is not none %}text-red-600{% endif %}">
-              {% if t.realized_pl is not none %}{{ "%+.2f"|format(t.realized_pl) }}{% endif %}
-            </td>
-          </tr>
-        {% endfor %}
-        </tbody>
-      </table>
+      <section class="mp-card mt-6">
+        <div class="mp-card__head">
+          <span class="mp-card__title">
+            <span class="material-symbols-outlined">history</span>
+            最近交易
+          </span>
+          <a href="/trades?ticker={{ ticker }}" class="text-xs" style="color: var(--ns-primary);">全部 →</a>
+        </div>
+        <table class="mp-table" style="width: 100%;">
+          <tbody>
+          {% for t in recent_trades %}
+            <tr>
+              <td class="mono" style="color: var(--ns-on-surface-variant); font-size: 11px; width: 7rem;">
+                {{ (t.executed_at or t.created_at).strftime("%Y-%m-%d") }}
+              </td>
+              <td style="width: 4rem;">
+                {% if t.action == "buy" %}<span class="mp-chip mp-chip--periwinkle">买入</span>
+                {% else %}<span class="mp-chip mp-chip--down">卖出</span>{% endif %}
+              </td>
+              <td class="mono tnum" style="text-align: right; width: 5rem;">{{ "%g"|format(t.quantity) }}</td>
+              <td class="mono tnum" style="text-align: right; width: 6rem;">${{ "%.2f"|format(t.price) }}</td>
+              <td class="mono tnum text-xs" style="text-align: right; color: {% if t.realized_pl is not none and t.realized_pl >= 0 %}var(--mp-up){% elif t.realized_pl is not none %}var(--mp-down){% endif %};">
+                {% if t.realized_pl is not none %}{{ "%+.2f"|format(t.realized_pl) }}{% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </section>
       {% endif %}
     </div>
 
@@ -121,57 +180,82 @@
       {% set cost = holding.quantity * holding.avg_cost %}
       {% set pl_dollars = market_value - cost %}
       {% set pl_pct = (pl_dollars / cost * 100) if cost else 0 %}
-      <div class="px-3 py-2 bg-slate-50 rounded text-sm">
-        <div class="font-semibold text-slate-700 mb-2">当前持仓</div>
-        <div class="flex flex-wrap gap-x-4 gap-y-1 items-baseline">
-          <span><span class="font-semibold">{{ "%g"|format(holding.quantity) }}</span> 股</span>
-          <span class="text-slate-500">@ 均价</span>
-          <span>${{ "%.2f"|format(holding.avg_cost) }}</span>
-          <span class="text-slate-500">市值</span>
-          <span>${{ "%.2f"|format(market_value) }}</span>
+      <section class="mp-card">
+        <div class="mp-card__head">
+          <span class="mp-card__title">
+            <span class="material-symbols-outlined">account_balance_wallet</span>
+            当前持仓
+          </span>
         </div>
-        <div class="mt-1 {% if pl_dollars >= 0 %}text-green-600{% else %}text-red-600{% endif %} font-semibold">
-          {{ "%+.2f"|format(pl_dollars) }} ({{ "%+.2f"|format(pl_pct) }}%)
+        <div class="mp-card__body">
+          <div class="flex flex-wrap gap-x-4 gap-y-1 items-baseline text-sm">
+            <span><span class="mono tnum" style="font-weight: 600;">{{ "%g"|format(holding.quantity) }}</span> 股</span>
+            <span style="color: var(--ns-on-surface-variant);">@ 均价</span>
+            <span class="mono tnum">${{ "%.2f"|format(holding.avg_cost) }}</span>
+            <span style="color: var(--ns-on-surface-variant);">市值</span>
+            <span class="mono tnum">${{ "%.2f"|format(market_value) }}</span>
+          </div>
+          <div class="mt-2 mono tnum" style="font-weight: 600; color: {% if pl_dollars >= 0 %}var(--mp-up){% else %}var(--mp-down){% endif %};">
+            {{ "%+.2f"|format(pl_dollars) }} ({{ "%+.2f"|format(pl_pct) }}%)
+          </div>
         </div>
-      </div>
+      </section>
       {% endif %}
 
-      <!-- Record-trade form (always visible now) -->
-      <form id="record-trade-form" class="px-3 py-2 bg-amber-50 rounded text-sm"
-            hx-post="/trades" hx-target="#record-trade-msg" hx-swap="innerHTML"
-            hx-on::after-request="if(event.detail.successful) { this.querySelector('[name=quantity]').value=''; }">
-        <div class="font-semibold text-slate-700 mb-2">📝 记一笔</div>
-        <input type="hidden" name="ticker" value="{{ ticker }}" />
-        <div class="flex flex-wrap gap-2 items-center">
-          <select name="action" class="border rounded px-2 py-1">
-            <option value="buy">买入</option>
-            <option value="sell">卖出</option>
-          </select>
-          <input name="quantity" type="number" step="any" min="0" placeholder="数量" required
-                 class="border rounded px-2 py-1 w-24" />
-          <input name="price" type="number" step="any" min="0" placeholder="价格 $" required
-                 value="{{ "%.2f"|format(quote.price) }}" class="border rounded px-2 py-1 w-24" />
-          <input name="executed_at" type="date" class="border rounded px-2 py-1" />
-          <button class="bg-slate-900 text-white px-3 py-1 rounded">提交</button>
+      <!-- Record-trade form -->
+      <section class="mp-card">
+        <div class="mp-card__head">
+          <span class="mp-card__title">
+            <span class="material-symbols-outlined">edit_note</span>
+            记一笔
+          </span>
         </div>
-        <span id="record-trade-msg" class="text-xs text-slate-500 block mt-2"></span>
-      </form>
+        <div class="mp-card__body">
+          <form id="record-trade-form"
+                hx-post="/trades" hx-target="#record-trade-msg" hx-swap="innerHTML"
+                hx-on::after-request="if(event.detail.successful) { this.querySelector('[name=quantity]').value=''; }">
+            <input type="hidden" name="ticker" value="{{ ticker }}" />
+            <div class="flex flex-wrap gap-2 items-center">
+              <select name="action" class="border rounded px-2 py-1 text-sm">
+                <option value="buy">买入</option>
+                <option value="sell">卖出</option>
+              </select>
+              <input name="quantity" type="number" step="any" min="0" placeholder="数量" required
+                     class="border rounded px-2 py-1 w-24 text-sm" />
+              <input name="price" type="number" step="any" min="0" placeholder="价格 $" required
+                     value="{{ "%.2f"|format(quote.price) }}" class="border rounded px-2 py-1 w-24 text-sm" />
+              <input name="executed_at" type="date" class="border rounded px-2 py-1 text-sm" />
+              <button class="mp-btn mp-btn--navy">提交</button>
+            </div>
+            <span id="record-trade-msg" class="text-xs block mt-2" style="color: var(--ns-on-surface-variant);"></span>
+          </form>
+        </div>
+      </section>
 
       <!-- AI analysis -->
       <div id="analysis"></div>
 
       <!-- News list -->
-      <div class="px-3 py-2 bg-slate-50 rounded text-sm">
-        <h2 class="font-semibold text-slate-700 mb-2">最新新闻</h2>
-        <ul class="space-y-1">
-          {% for n in news %}
-          <li><a href="{{ n.url }}" class="text-blue-600">{{ n.headline }}</a>
-              <span class="text-slate-500 text-xs">— {{ n.source }}</span></li>
-          {% else %}
-          <li class="text-slate-500 text-xs">暂无新闻(yfinance 限流时常见,几小时后会恢复)</li>
-          {% endfor %}
-        </ul>
-      </div>
+      <section class="mp-card">
+        <div class="mp-card__head">
+          <span class="mp-card__title">
+            <span class="material-symbols-outlined">article</span>
+            最新新闻
+          </span>
+        </div>
+        <div class="mp-card__body">
+          <ul class="space-y-1 text-sm">
+            {% for n in news %}
+            <li>
+              <a href="{{ n.url }}" style="color: var(--ns-primary);">{{ n.headline }}</a>
+              <span class="text-xs" style="color: var(--ns-on-surface-variant);">— {{ n.source }}</span>
+            </li>
+            {% else %}
+            <li class="text-xs" style="color: var(--ns-on-surface-variant);">暂无新闻(yfinance 限流时常见,几小时后会恢复)</li>
+            {% endfor %}
+          </ul>
+        </div>
+      </section>
     </aside>
 
   </div>
@@ -190,5 +274,6 @@
 </style>
 
 <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"></script>
-<script src="/static/chart.js"></script>
+<script src="/static/chart-theme.js?v={{ static_version('chart-theme.js') }}"></script>
+<script src="/static/chart.js?v={{ static_version('chart.js') }}"></script>
 {% endblock %}
