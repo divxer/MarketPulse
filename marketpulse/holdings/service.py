@@ -19,6 +19,20 @@ log = get_logger(__name__)
 
 class _DataLike(Protocol):
     def get_quote(self, ticker: str) -> Quote: ...
+    def get_history(self, ticker: str, period: str = "30d") -> list[Any]: ...
+
+
+def _fetch_sparkline(data: "_DataLike", ticker: str) -> list[float]:
+    """Return last 30 daily closes; [] on fetch failure.
+
+    Used by /holdings table 30-day sparkline column. Failures are
+    silenced so a single bad ticker doesn't break the entire table.
+    """
+    try:
+        bars = data.get_history(ticker, period="30d")
+        return [b.close for b in bars[-30:]]
+    except Exception:
+        return []
 
 
 def enrich_holdings(
@@ -42,8 +56,10 @@ def enrich_holdings(
             "pl_pct": None,
             "stale": False,
         }
+        quote = None
         try:
             q = data.get_quote(h.ticker)
+            quote = q
             row["current_price"] = q.price
             row["market_value"] = h.quantity * q.price
             row["pl_dollars"] = row["market_value"] - cost_basis
@@ -51,6 +67,9 @@ def enrich_holdings(
             row["stale"] = q.stale
         except Exception as exc:
             log.warning("holding_quote_failed", ticker=h.ticker, error=str(exc))
+        row["sector"] = h.sector or "未分类"
+        row["today_change_pct"] = quote.change_pct if quote is not None else None
+        row["sparkline"] = _fetch_sparkline(data, h.ticker)
         rows.append(row)
     return rows
 

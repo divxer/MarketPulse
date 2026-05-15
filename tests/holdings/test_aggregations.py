@@ -268,3 +268,86 @@ def test_avg_hold_days_window_filters_by_sell_date(db_session):
         from_date=date(2026, 1, 1), to_date=date(2026, 3, 31),
     )
     assert val == pytest.approx(59.0)
+
+
+def test_enrich_holdings_adds_sector_today_change_sparkline(db_session):
+    """enrich_holdings preserves existing fields and adds 3 new ones."""
+    from datetime import date
+    from unittest.mock import MagicMock
+
+    from marketpulse.data.types import Bar, Quote
+    from marketpulse.db.models import Holding
+    from marketpulse.holdings.service import enrich_holdings
+
+    h = Holding(ticker="AAPL", quantity=10.0, avg_cost=100.0, sort_order=0,
+                sector="Technology")
+    db_session.add(h)
+    db_session.commit()
+
+    fake_data = MagicMock()
+    fake_data.get_quote.return_value = Quote(
+        ticker="AAPL", price=150.0, change_pct=1.5, volume=1000,
+        avg_volume_20d=2000, fetched_at=_dt(2026, 5, 15), stale=False,
+    )
+    fake_data.get_history.return_value = [
+        Bar(date=date(2026, 5, d), open=140.0, high=151.0, low=139.0,
+            close=140.0 + d, volume=1000)
+        for d in range(1, 16)
+    ]
+
+    rows = enrich_holdings([h], fake_data)
+    assert len(rows) == 1
+    r = rows[0]
+    # Existing fields still present
+    assert r["ticker"] == "AAPL"
+    assert r["market_value"] == pytest.approx(1500.0)
+    # New Phase 5d fields
+    assert r["sector"] == "Technology"
+    assert r["today_change_pct"] == pytest.approx(1.5)
+    assert r["sparkline"] == [141.0, 142.0, 143.0, 144.0, 145.0,
+                              146.0, 147.0, 148.0, 149.0, 150.0,
+                              151.0, 152.0, 153.0, 154.0, 155.0]
+
+
+def test_enrich_holdings_null_sector_falls_back_unclassified(db_session):
+    from unittest.mock import MagicMock
+
+    from marketpulse.data.types import Quote
+    from marketpulse.db.models import Holding
+    from marketpulse.holdings.service import enrich_holdings
+
+    h = Holding(ticker="AAPL", quantity=10.0, avg_cost=100.0, sort_order=0,
+                sector=None)
+    db_session.add(h)
+    db_session.commit()
+
+    fake_data = MagicMock()
+    fake_data.get_quote.return_value = Quote(
+        ticker="AAPL", price=150.0, change_pct=0.5, volume=1000,
+        avg_volume_20d=2000, fetched_at=_dt(2026, 5, 15), stale=False,
+    )
+    fake_data.get_history.return_value = []
+
+    rows = enrich_holdings([h], fake_data)
+    assert rows[0]["sector"] == "未分类"
+    assert rows[0]["sparkline"] == []
+
+
+def test_enrich_holdings_quote_failure_today_change_none(db_session):
+    """Pre-existing tolerance: quote fetch fails → today_change_pct=None."""
+    from unittest.mock import MagicMock
+
+    from marketpulse.db.models import Holding
+    from marketpulse.holdings.service import enrich_holdings
+
+    h = Holding(ticker="ZZZ", quantity=10.0, avg_cost=100.0, sort_order=0)
+    db_session.add(h)
+    db_session.commit()
+
+    fake_data = MagicMock()
+    fake_data.get_quote.side_effect = RuntimeError("yfinance down")
+    fake_data.get_history.side_effect = RuntimeError("yfinance down")
+
+    rows = enrich_holdings([h], fake_data)
+    assert rows[0]["today_change_pct"] is None
+    assert rows[0]["sparkline"] == []
