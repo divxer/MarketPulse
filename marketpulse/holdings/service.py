@@ -139,9 +139,47 @@ def monthly_realized_pl(session: Session) -> list[dict[str, Any]]:
     ]
 
 
-def trading_stats(session: Session) -> dict[str, Any]:
-    """High-level stats across all trades: count, win rate, total realized P&L."""
-    trades = session.query(Trade).all()
+def trading_stats(
+    session: Session,
+    *,
+    ticker: str | None = None,
+    from_date: "date | None" = None,
+    to_date: "date | None" = None,
+) -> dict[str, Any]:
+    """High-level stats across trades: count, win rate, total realized P&L.
+
+    `ticker` filters to a single symbol (case-insensitive).
+    `from_date`/`to_date` is an inclusive window on the SELL row's
+    executed_at.date() (fallback to created_at).
+
+    Returns:
+      total_trades: BUY+SELL count within filter (NOT just sells)
+      closed_positions: wins+losses
+      wins / losses: per realized_pl sign
+      win_rate_pct: float OR None when wins+losses == 0
+      realized_pl: sum of realized_pl in window
+    """
+    q = session.query(Trade)
+    if ticker:
+        q = q.filter(Trade.ticker == ticker.upper())
+    trades = q.all()
+
+    # Single-pass filter (compute _row_date once per row)
+    if from_date is not None or to_date is not None:
+        def _row_date(t: Trade):
+            d = t.executed_at or t.created_at
+            return d.date() if d is not None else None
+
+        def _keep(t: Trade) -> bool:
+            d = _row_date(t)
+            if d is None:
+                return False
+            if from_date is not None and d < from_date:
+                return False
+            return not (to_date is not None and d > to_date)
+
+        trades = [t for t in trades if _keep(t)]
+
     total = len(trades)
     sells = [t for t in trades if t.realized_pl is not None]
     wins = sum(1 for t in sells if t.realized_pl > 0)
@@ -153,6 +191,6 @@ def trading_stats(session: Session) -> dict[str, Any]:
         "closed_positions": closed,
         "wins": wins,
         "losses": losses,
-        "win_rate_pct": (wins / closed * 100) if closed else 0.0,
+        "win_rate_pct": (wins / closed * 100) if closed else None,
         "realized_pl": realized,
     }
