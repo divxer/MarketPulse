@@ -716,3 +716,15 @@ def test_trades_page_ytd_label_default(client, monkeypatch):
     _login(client, monkeypatch)
     r = client.get("/trades")
     assert r.status_code == 200
+
+
+def test_trades_page_visual_anchors_present(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/trades")
+    for cls in ("mp-hero", "mp-trades-kpi", "mp-trades-filter",
+                "mp-trades-main", "mp-trades-rail"):
+        assert cls in r.text, f"missing {cls}"
+    # h1 with grotesk class + 'Trade Ledger'
+    assert "Trade Ledger" in r.text
+    # Old Tailwind classes should be gone.
+    assert 'class="bg-white rounded-md shadow-sm p-4"' not in r.text

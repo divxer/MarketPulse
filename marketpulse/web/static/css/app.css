@@ -591,3 +591,29 @@ hr.mp-hr {
 
 .mp-watchlist__chg--up   { color: var(--mp-up);   font-size: 11.5px; font-weight: 600; }
 .mp-watchlist__chg--down { color: var(--mp-down); font-size: 11.5px; font-weight: 600; }
+
+/* ════════ Phase 5c: Hero ════════ */
+.mp-hero            { display:flex; align-items:flex-end; justify-content:space-between;
+                      padding:32px 48px 24px; max-width:2400px; margin:0 auto; }
+.mp-hero__title     { font:700 48px/1 var(--ns-font-headline); letter-spacing:-0.04em;
+                      color:var(--ns-navy); margin:6px 0 0; }
+.mp-hero__desc      { font-size:14px; color:var(--ns-on-surface-variant);
+                      margin:12px 0 0; max-width:640px; }
+.mp-hero__actions   { display:flex; gap:8px; }
+
+/* ════════ Phase 5c: /trades layout ════════ */
+.mp-trades-kpi      { padding:0 48px 16px; max-width:2400px; margin:0 auto;
+                      display:grid; grid-template-columns:repeat(5,1fr); gap:16px; }
+.mp-trades-filter   { padding:8px 48px 16px; max-width:2400px; margin:0 auto; }
+.mp-trades-main     { padding:0 48px 32px; max-width:2400px; margin:0 auto;
+                      display:grid;
+                      grid-template-columns: minmax(0,1fr) 440px; gap:16px; }
+.mp-trades-rail     { display:flex; flex-direction:column; gap:16px; }
+
+@media (max-width: 1440px) {
+  .mp-trades-main   { grid-template-columns: 1fr; }
+}
+@media (max-width: 900px) {
+  .mp-trades-kpi    { grid-template-columns: repeat(2, 1fr); }
+  .mp-hero          { flex-direction:column; align-items:flex-start; gap:16px; }
+}
