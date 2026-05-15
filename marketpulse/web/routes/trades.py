@@ -312,6 +312,110 @@ def trades_page(  # noqa: PLR0912, PLR0913, PLR0915
     return templates.TemplateResponse(request, "trades.html", ctx)
 
 
+@router.get("/trades/export.csv")
+def trades_export_csv(
+    request: Request,
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = None,
+    q: str | None = None,
+    ticker: str | None = None,
+    event_type: str | None = None,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_auth),
+):
+    """Streaming Robinhood-format CSV; inherits /trades filters except page/limit."""
+    from datetime import date as _date
+
+    from fastapi.responses import StreamingResponse
+
+    def _parse_d(s, name):
+        if not s:
+            return None
+        try:
+            return _date.fromisoformat(s)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=f"invalid {name}: {s}") from e
+
+    from_date = _parse_d(from_, "from")
+    to_date = _parse_d(to, "to")
+    if from_date and to_date and from_date > to_date:
+        raise HTTPException(status_code=422, detail="from must be <= to")
+    q = (q or "").strip() or None
+    q_upper = q.upper() if q else None
+    ticker_upper = ticker.upper() if ticker else None
+
+    HEADER = [
+        "Activity Date", "Process Date", "Settle Date",
+        "Instrument", "Description", "Trans Code",
+        "Quantity", "Price", "Amount",
+    ]
+
+    def _gen():
+        # Header row.
+        yield ",".join(HEADER) + "\n"
+
+        # Trades.
+        if event_type in (None, "trade"):
+            tq = db.query(Trade)
+            if q_upper:
+                tq = tq.filter(Trade.ticker.ilike(f"{q_upper}%"))
+            if ticker_upper:
+                tq = tq.filter(Trade.ticker == ticker_upper)
+            for t in tq.order_by(Trade.executed_at.desc().nullslast(), Trade.id.desc()).all():
+                when = t.executed_at or t.created_at
+                d = when.date() if when else None
+                if not _date_in_window_or_all(d, from_date, to_date):
+                    continue
+                date_s = _format_date_us(d) if d else ""
+                amt = t.quantity * t.price
+                amt_s = f"(${amt:.2f})" if t.action == "buy" else f"${amt:.2f}"
+                yield (
+                    f"{date_s},{date_s},{date_s},{t.ticker},,"
+                    f"{'Buy' if t.action == 'buy' else 'Sell'},"
+                    f"{t.quantity:g},${t.price:.2f},{amt_s}\n"
+                )
+
+        # Dividends (Trans Code = CDIV).
+        if event_type in (None, "dividend"):
+            dq = db.query(Dividend)
+            if q_upper:
+                dq = dq.filter(Dividend.ticker.ilike(f"{q_upper}%"))
+            if ticker_upper:
+                dq = dq.filter(Dividend.ticker == ticker_upper)
+            for dv in dq.order_by(Dividend.ex_date.desc()).all():
+                if not _date_in_window_or_all(dv.ex_date, from_date, to_date):
+                    continue
+                date_s = _format_date_us(dv.ex_date)
+                yield (
+                    f"{date_s},{date_s},{date_s},{dv.ticker},Dividend,"
+                    f"CDIV,,,${dv.total_amount:.2f}\n"
+                )
+
+        # Splits intentionally skipped — Robinhood CSV has no split code.
+
+    filename = f"trades-{datetime.now(UTC).date().isoformat()}.csv"
+    return StreamingResponse(
+        _gen(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _date_in_window_or_all(d, from_date, to_date):
+    """Return True if d is within the optional [from_date, to_date] window.
+    None d → False (excluded). No window args → True (included)."""
+    if d is None:
+        return False
+    if from_date and d < from_date:
+        return False
+    return not (to_date and d > to_date)
+
+
+def _format_date_us(d):
+    """Format a date as M/D/YYYY (Robinhood CSV format, no zero-padding)."""
+    return f"{d.month}/{d.day}/{d.year}"
+
+
 @router.post("/trades", response_class=HTMLResponse)
 def trades_add(
     request: Request,
