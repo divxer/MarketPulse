@@ -1,0 +1,27 @@
+<section class="mp-card">
+  <div class="mp-card__head">
+    <span class="mp-card__title">
+      <span class="material-symbols-outlined">leaderboard</span>盈亏贡献度排行
+    </span>
+    <span class="mp-card__sub">按 |P&amp;L| 降序</span>
+  </div>
+  <ul class="mp-allocation-list">
+    {% set max_abs = contributors | map(attribute='pl_dollars') | map('abs') | max if contributors else 0 %}
+    {% for c in contributors %}
+      <li class="mp-allocation-row">
+        <span class="grotesk" style="font-weight:700; font-size:13px; color:var(--ns-navy); width:60px;">{{ c.ticker }}</span>
+        <div class="mp-allocation-bar">
+          <div style="width: {{ (c.pl_dollars|abs / max_abs * 100) if max_abs else 0 }}%;
+                      background: {% if c.pl_dollars >= 0 %}var(--mp-up){% else %}var(--mp-down){% endif %};"></div>
+        </div>
+        <span class="mono tnum {% if c.pl_dollars >= 0 %}up{% else %}down{% endif %}"
+              style="font-size:12px; font-weight:600; margin-left:auto; flex:0 0 90px; text-align:right;">
+          {{ "{:+,.0f}".format(c.pl_dollars) }}
+        </span>
+      </li>
+    {% endfor %}
+    {% if not contributors %}
+      <li class="muted" style="padding: 16px;">暂无盈亏数据</li>
+    {% endif %}
+  </ul>
+</section>

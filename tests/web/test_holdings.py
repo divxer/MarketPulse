@@ -412,3 +412,28 @@ def test_holdings_sector_card_shows_unclassified(client, monkeypatch, db_session
         r = client.get("/holdings")
     assert "未分类" in r.text
     client.app.dependency_overrides.clear()
+
+
+def test_holdings_contributors_card_renders(client, monkeypatch, db_session):
+    from datetime import UTC, datetime
+    from unittest.mock import MagicMock
+
+    from marketpulse.data.types import Quote
+    from marketpulse.db.models import Holding
+    from marketpulse.web.deps import get_data_service
+
+    _login(client, monkeypatch)
+    fake = MagicMock()
+    fake.get_quote.return_value = Quote(
+        ticker="AAPL", price=150.0, change_pct=1.0, volume=1000,
+        avg_volume_20d=2000, fetched_at=datetime.now(UTC), stale=False,
+    )
+    fake.get_history.return_value = []
+    client.app.dependency_overrides[get_data_service] = lambda: fake
+
+    db_session.add(Holding(ticker="AAPL", quantity=10.0, avg_cost=100.0,
+                           sort_order=0))
+    db_session.commit()
+    r = client.get("/holdings")
+    assert "盈亏贡献" in r.text or "贡献排行" in r.text
+    client.app.dependency_overrides.clear()
