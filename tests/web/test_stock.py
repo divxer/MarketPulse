@@ -593,3 +593,112 @@ def test_stock_page_uses_three_column_grid(client: TestClient, monkeypatch):
     assert 'id="chart-rsi"' in body
     assert 'id="chart-macd"' in body
     assert 'id="chart-ohlc-bar"' in body
+
+
+def test_stock_page_renders_watchlist_sidebar(client: TestClient, monkeypatch):
+    """When user has watchlist items, /stock/{ticker} shows them in left rail."""
+    _login(client, monkeypatch)
+    client.post("/watchlist", data={"ticker": "AAPL"})
+    client.post("/watchlist", data={"ticker": "MSFT"})
+
+    from marketpulse.web.deps import get_data_service
+    client.app.dependency_overrides[get_data_service] = lambda: _FakeData()
+    try:
+        r = client.get("/stock/AAPL")
+        assert r.status_code == 200
+        body = r.text
+        assert "mp-watchlist" in body
+        assert "MSFT" in body
+        assert "is-active" in body
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_stock_page_watchlist_empty_state(client: TestClient, monkeypatch):
+    """No watchlist items → empty state copy renders."""
+    _login(client, monkeypatch)
+    from marketpulse.web.deps import get_data_service
+    client.app.dependency_overrides[get_data_service] = lambda: _FakeData()
+    try:
+        r = client.get("/stock/AAPL")
+        assert r.status_code == 200
+        assert "还没添加自选股" in r.text
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_stock_page_watchlist_caps_at_max_render(client: TestClient, monkeypatch):
+    """Adding > MAX_WATCHLIST_RENDER (20) items renders only first 20 in sidebar."""
+    _login(client, monkeypatch)
+    for i in range(25):
+        client.post("/watchlist", data={"ticker": f"TST{i:02d}"})
+
+    from marketpulse.web.deps import get_data_service
+    client.app.dependency_overrides[get_data_service] = lambda: _FakeData()
+    try:
+        r = client.get("/stock/TST00")
+        body = r.text
+        for i in range(20):
+            assert f"TST{i:02d}" in body, f"TST{i:02d} should appear (within cap)"
+        for i in range(20, 25):
+            assert f"TST{i:02d}" not in body, (
+                f"TST{i:02d} should be beyond MAX_WATCHLIST_RENDER cap"
+            )
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_stock_page_uses_mp_card_classes(client: TestClient, monkeypatch):
+    """Body contains NineScrolls component classes."""
+    _login(client, monkeypatch)
+    from marketpulse.web.deps import get_data_service
+    client.app.dependency_overrides[get_data_service] = lambda: _FakeData()
+    try:
+        r = client.get("/stock/AAPL")
+        body = r.text
+        assert "mp-card" in body
+        assert "mp-card__head" in body
+        assert "mp-seg" in body
+        assert "mp-rule" in body
+        assert "mp-btn" in body
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_stock_page_uses_material_symbols(client: TestClient, monkeypatch):
+    """Emoji replaced with Material Symbols Outlined."""
+    _login(client, monkeypatch)
+    from marketpulse.web.deps import get_data_service
+    client.app.dependency_overrides[get_data_service] = lambda: _FakeData()
+    try:
+        r = client.get("/stock/AAPL")
+        body = r.text
+        assert "material-symbols-outlined" in body
+        # Specific icons we expect
+        assert "auto_awesome" in body  # AI 分析
+        assert "edit_note" in body     # 记一笔
+        assert "visibility" in body    # 自选股 (eye)
+        # Emoji should be GONE from action area
+        assert "🤖" not in body, "🤖 emoji should be replaced with Material Symbol"
+        assert "📝" not in body, "📝 emoji should be replaced with Material Symbol"
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_stock_page_loads_chart_theme_js_before_chart_js(client: TestClient, monkeypatch):
+    """chart-theme.js must be loaded BEFORE chart.js for window.MP_CHART_THEME."""
+    _login(client, monkeypatch)
+    from marketpulse.web.deps import get_data_service
+    client.app.dependency_overrides[get_data_service] = lambda: _FakeData()
+    try:
+        r = client.get("/stock/AAPL")
+        body = r.text
+        idx_theme = body.find("/static/chart-theme.js")
+        idx_chart = body.find("/static/chart.js")
+        assert idx_theme != -1, "chart-theme.js not loaded"
+        assert idx_chart != -1, "chart.js not loaded"
+        assert idx_theme < idx_chart, (
+            "chart-theme.js must be loaded BEFORE chart.js"
+        )
+    finally:
+        client.app.dependency_overrides.clear()
