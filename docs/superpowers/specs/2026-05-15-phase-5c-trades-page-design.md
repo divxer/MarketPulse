@@ -85,7 +85,7 @@
 | `limit` | int | 50 | clamp 到 [10, 200] |
 | `from` | YYYY-MM-DD | None | 包含。匹配 `Trade.executed_at`、`StockSplit.ex_date`、`Dividend.ex_date` |
 | `to` | YYYY-MM-DD | None | 包含。同上 |
-| `q` | str | None | 代码搜索，case-insensitive；保留 `ticker` 作为别名 (旧链接兼容) |
+| `q` | str | None | 代码搜索，**prefix-match** + case-insensitive：`Trade.ticker ILIKE upper(q) || '%'`。空串等同 None。保留 `ticker` 作为别名 (但 `ticker` 是**精确**匹配 `Trade.ticker == upper(ticker)`，兼容旧链接) |
 | `event_type` | trade\|split\|dividend\|None | None | 现有 |
 
 参数校验：
@@ -149,7 +149,8 @@ Activity Date,Process Date,Settle Date,Instrument,Description,Trans Code,Quantit
                                    # 有 from/to 时窗口 = [from, to]
     "ytd_label": str,              # 无 from/to: "YTD"
                                    # 有 from/to: "{from} → {to}"
-    "win_rate_pct": float,         # 当前过滤范围
+    "win_rate_pct": float | None,  # 当前过滤范围;
+                                   # wins+losses == 0 时返回 None,模板显示 "—"
     "wins": int,                   # 同上 (realized_pl > 0 的 sell 数)
     "losses": int,                 # 同上 (realized_pl < 0 的 sell 数)
     "avg_hold_days": float | None, # 同上；无数据时 None
@@ -218,9 +219,13 @@ def total_realized_pl(
     session: Session,
     *,
     ticker: str | None = None,
-    from_date: date | None = None,   # 包含
-    to_date:   date | None = None,   # 包含
-) -> float: ...
+    from_date: date | None = None,   # 包含 (inclusive)
+    to_date:   date | None = None,   # 包含 (inclusive)
+) -> float:
+    """from_date/to_date 过滤的是 SELL 行 (Trade.realized_pl IS NOT NULL)
+    的 executed_at.date() 是否落在窗口内 (注: BUY 行 realized_pl 为 None,
+    本来就不参与求和)。"""
+    ...
 
 def trading_stats(
     session: Session,
@@ -228,14 +233,21 @@ def trading_stats(
     ticker: str | None = None,
     from_date: date | None = None,
     to_date:   date | None = None,
-) -> dict[str, Any]: ...
+) -> dict[str, Any]:
+    """同上, 日期窗口过滤 SELL 行的 executed_at.date()。
+    total_trades 也只数窗口内的 (BUY+SELL 都数, 因为 hint 显示
+    "本月有多少笔活动")。"""
+    ...
 
 def monthly_realized_pl(
     session: Session,
     *,
-    months: int = 15,                # 现有签名加默认参数
+    months: int | None = None,       # 加默认参数, None 保持现有行为
 ) -> list[dict[str, Any]]:
-    """末尾 months 个月，缺月补 {pl: 0, trade_count: 0}。"""
+    """months=None (default) → 返回所有有交易的月份,无 gap-filling
+    (与 /holdings 现有调用兼容,不破坏)。
+    months=N → 返回末尾 N 个自然月 (含当前月),缺月补 {pl: 0, trade_count: 0}。
+    /trades route 显式传 months=15。"""
     ...
 
 # 新增
@@ -352,8 +364,8 @@ marketpulse/web/templates/
 |---|---|---|---|---|
 | `总笔数` | `kpi.total_trades` | `kpi.ytd_label`(显示日期范围标签) | `receipt_long` | navy |
 | `已实现盈亏 · {{ kpi.ytd_label }}` | `"%+,.2f"\|format(kpi.ytd_realized)` | `"%d 笔已平仓"\|format(kpi.wins + kpi.losses)` | `payments` | up/down |
-| `胜率` | `"%.1f%%"\|format(kpi.win_rate_pct)` | `"%d 胜 / %d 负"\|format(kpi.wins, kpi.losses)` | `trending_up` | navy |
-| `平均持仓天数` | `kpi.avg_hold_days(int) + "d"` or `—` | `"基于 FIFO 配对"` | `schedule` | navy |
+| `胜率` | `{{ "%.1f%%"\|format(kpi.win_rate_pct) if kpi.win_rate_pct is not none else "—" }}` | `"%d 胜 / %d 负"\|format(kpi.wins, kpi.losses)` | `trending_up` | navy |
+| `平均持仓天数` | `{{ "%d d"\|format(kpi.avg_hold_days\|round\|int) if kpi.avg_hold_days is not none else "—" }}` | `"基于 FIFO 配对"` | `schedule` | navy |
 | `本月新笔数` | `kpi.this_month.total` | `"%d 买 · %d 卖 · %d 分红"\|format(...)` | `event_available` | navy |
 
 ### `partials/trades_filter_card.html`
@@ -721,14 +733,31 @@ JS：drag-over 加 `.is-dragover`；drop 时把 file 塞进 hidden input，自�
 - 有 → 只返回 `partials/trades_table.html`（含分页 footer）
 - 无 → 返回完整 `trades.html`
 
-`POST /trades`、`PUT /trades/{id}`、`DELETE /trades/{id}` 在 partial 返回时也需要分页 context：handler 从 form 拿 `page`/`limit` hidden field（或 `Referer` URL 解析），重新跑当前页查询并返回 `trades_table.html`。新增交易后默认回到 page 1（因为新交易在最顶）。删除/编辑保持当前 page。
+`POST /trades`、`PUT /trades/{id}`、`DELETE /trades/{id}` 在 partial 返回时也需要分页 context。**统一走 URL query string**，handler 接收同名 query 参数：
 
-模板里在 `<form id="event-form">` 加 hidden field：
+- **POST /trades** (新增) → 默认返回 page=1 (新交易在最顶)，**忽略**传入的 page (即使有也无所谓)。query: `?from=...&to=...&q=...&event_type=...`（filter 透传，page/limit 不需要）
+- **PUT /trades/{id}** (编辑) → 返回当前 page。query: `?page={{ page }}&limit={{ limit }}&from=...&to=...&q=...&event_type=...`
+- **DELETE /trades/{id}** → 同 PUT。如果删除导致当前 page 越界(例如该 page 只剩 1 条被删了)，handler 内部 clamp 到 max_page
+
+模板里编辑/删除按钮使用动态 URL，**不**使用 hidden field：
 
 ```html
-<input type="hidden" name="page" value="{{ page }}" />
-<input type="hidden" name="limit" value="{{ limit }}" />
+<!-- trades_table.html 中,每行 -->
+<button class="mp-icon-btn"
+        hx-delete="/trades/{{ e.obj.id }}?{{ filters_qs }}&page={{ page }}&limit={{ limit }}"
+        hx-target="#trades-container" hx-swap="innerHTML"
+        hx-confirm="...">
+  <span class="material-symbols-outlined">delete_outline</span>
+</button>
 ```
+
+`onclick='loadTradeIntoForm(...)'` 仍是 client-side 行为，把 trade 数据塞进添加表单；表单提交时 `hx-put` 已知 trade id，再带上 query string：
+
+```javascript
+form.setAttribute('hx-put', '/trades/' + data.id + '?{{ filters_qs }}&page={{ page }}&limit={{ limit }}');
+```
+
+`{{ filters_qs }}` 在模板渲染时已 URL-encoded (见 §路由 context)。新增表单 `hx-post="/trades?{{ filters_qs }}"` 不传 page。
 
 ## 错误处理
 
@@ -740,7 +769,7 @@ JS：drag-over 加 `.is-dragover`；drop 时把 file 塞进 hidden input，自�
 | `?limit=0` 或 `?limit=10000` | clamp 到 [10, 200] |
 | dropzone 上传非 CSV | 现有 wizard 已处理，本阶段不重做 |
 | FIFO matcher 数据不一致 (sell 超过 open qty) | 丢弃溢出部分，不报错 (与 trades_service 现有行为一致) |
-| 无交易 | KPI 全部 0、avg_hold_days = "—"、右栏 monthly_pl 全 0、by_ticker 空数组 → 显示空 state |
+| 无交易 | KPI: total_trades=0, ytd_realized=0.0, **win_rate_pct=None ("—")**, **avg_hold_days=None ("—")**, this_month 全 0; 右栏 monthly_pl 全 0; by_ticker 空数组 → 显示空 state |
 
 ## 测试
 
@@ -793,7 +822,10 @@ tests/web/test_trades_export.py                 新
   - test_export_csv_robinhood_header_row        包含 "Activity Date" 等列
   - test_export_csv_filters_apply               ?event_type=trade 只导买卖
   - test_export_csv_skips_splits                splits 不在输出里
-  - test_export_csv_round_trip                  导出 → 重 import → 行数一致
+  - test_export_csv_round_trip                  fixture 仅含 buy/sell/dividend
+                                                导出 → 重 import → 买卖+分红
+                                                行数一致 (splits 显式排除在
+                                                fixture 之外)
 
 tests/holdings/test_export_csv.py               新
   - test_export_format_matches_import_parser    输出能被 marketpulse.holdings.import_robinhood 解析
