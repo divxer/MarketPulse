@@ -625,3 +625,19 @@ hr.mp-hr {
 .mp-kpi__value      { font:700 30px/1.1 var(--ns-font-headline); letter-spacing:-0.02em;
                       color:var(--ns-navy); margin-top:6px; }
 .mp-kpi__hint       { font-size:11.5px; color:var(--ns-on-surface-variant); margin-top:4px; }
+
+/* ════════ Phase 5c: Filter card ════════ */
+.mp-trades-filter__row { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.mp-filter-chips       { display:flex; gap:4px; }
+.mp-chip__count        { margin-left:4px; opacity:0.7; }
+.mp-divider-v          { width:1px; height:24px; background:var(--ns-outline-variant); }
+.mp-divider-arrow      { color:var(--ns-slate-400); }
+.mp-input              { height:30px; padding:0 12px;
+                         border:1px solid var(--ns-outline-variant);
+                         border-radius:2px; font-size:12px;
+                         font-family:var(--ns-font-body); }
+.mp-input--mono        { font-family:var(--ns-font-mono); }
+.mp-trades-add         { display:flex; align-items:flex-end; gap:12px; flex-wrap:wrap; }
+.mp-trades-add__kind   { display:flex; flex-direction:column; gap:4px; }
+.mp-hr                 { border:0; border-top:1px solid var(--ns-outline-variant); }
+.hidden                { display:none !important; }

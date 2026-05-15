@@ -25,73 +25,9 @@
   {% include "partials/trades_kpi_strip.html" ignore missing %}
 </section>
 
-<!-- Filter + Add card (populated by Task 12) -->
+<!-- Filter + Add card -->
 <section class="mp-trades-filter">
-  {% include "partials/trades_filter_card.html" ignore missing %}
-
-  <!-- Filter strip: links re-fetch with ?event_type=... -->
-  <div class="flex gap-2 mb-3 text-sm">
-    {% set base = "/trades" + ("?ticker=" + filter_ticker if filter_ticker else "") %}
-    {% set sep = "&" if filter_ticker else "?" %}
-    <a href="{{ base }}"
-       class="px-2 py-0.5 rounded {% if not filter_event_type %}bg-slate-900 text-white{% else %}bg-slate-100 text-slate-700{% endif %}">全部</a>
-    <a href="{{ base }}{{ sep }}event_type=trade"
-       class="px-2 py-0.5 rounded {% if filter_event_type == 'trade' %}bg-slate-900 text-white{% else %}bg-slate-100 text-slate-700{% endif %}">仅买卖</a>
-    <a href="{{ base }}{{ sep }}event_type=split"
-       class="px-2 py-0.5 rounded {% if filter_event_type == 'split' %}bg-slate-900 text-white{% else %}bg-slate-100 text-slate-700{% endif %}">仅拆股</a>
-    <a href="{{ base }}{{ sep }}event_type=dividend"
-       class="px-2 py-0.5 rounded {% if filter_event_type == 'dividend' %}bg-slate-900 text-white{% else %}bg-slate-100 text-slate-700{% endif %}">仅分红</a>
-  </div>
-
-  <!-- Type-aware form. JS swaps which fields are visible based on the type select. -->
-  <form id="event-form"
-        hx-post="/trades" hx-target="#trades-container" hx-swap="innerHTML"
-        hx-on::after-request="if(event.detail.successful) exitEditMode();"
-        class="grid grid-cols-2 md:grid-cols-7 gap-2 mb-4 text-sm">
-    <select name="event_kind" id="event-kind"
-            onchange="onEventKindChange(this.value)"
-            class="border rounded px-3 py-1">
-      <option value="buy">买入</option>
-      <option value="sell">卖出</option>
-      <option value="split">拆股</option>
-      <option value="dividend">分红</option>
-    </select>
-    <input name="ticker" placeholder="代码" required
-           class="border rounded px-3 py-1 uppercase" />
-
-    <!-- Trade-only fields -->
-    <input name="quantity" type="number" step="any" min="0" placeholder="数量" required
-           class="border rounded px-3 py-1 trade-field" />
-    <input name="price" type="number" step="any" min="0" placeholder="价格 $" required
-           class="border rounded px-3 py-1 trade-field" />
-    <input name="fees" type="number" step="any" min="0" placeholder="手续费 $" value="0"
-           class="border rounded px-3 py-1 trade-field" />
-    <input name="executed_at" type="date" title="交易日期 (留空=今天)"
-           data-optional="true"
-           class="border rounded px-3 py-1 trade-field" />
-
-    <!-- Split-only fields -->
-    <input name="ratio" type="number" step="any" min="0.0001" placeholder="比例 (1:2 填 2)"
-           class="border rounded px-3 py-1 split-field hidden" />
-    <input name="ex_date" type="date" placeholder="生效日期"
-           class="border rounded px-3 py-1 split-field hidden" />
-
-    <!-- Dividend-only fields -->
-    <input name="amount_per_share" type="number" step="any" min="0" placeholder="每股金额 $"
-           class="border rounded px-3 py-1 dividend-field hidden" />
-    <input name="total_amount" type="number" step="any" min="0" placeholder="总金额 $"
-           class="border rounded px-3 py-1 dividend-field hidden" />
-
-    <input name="notes" placeholder="备注(可选)"
-           class="border rounded px-3 py-1 col-span-2 md:col-span-1 min-w-0" />
-    <input type="hidden" name="trade_id" id="trade-id-input" value="" />
-    <input type="hidden" name="tz_offset_minutes" id="tz-offset-input" value="0" />
-    <input type="hidden" name="original_executed_at_iso" id="original-executed-at-iso" value="" />
-    <button id="submit-btn" type="submit"
-            class="bg-slate-900 text-white px-3 py-1 rounded">记录</button>
-    <button id="cancel-edit-btn" type="button" onclick="exitEditMode()"
-            class="bg-slate-200 text-slate-700 px-3 py-1 rounded hidden">取消编辑</button>
-  </form>
+  {% include "partials/trades_filter_card.html" %}
 </section>
 
 <!-- Main grid: ledger + right rail -->

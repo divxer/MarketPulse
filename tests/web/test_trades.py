@@ -761,3 +761,22 @@ def test_kpi_ytd_label_reflects_explicit_range(client, monkeypatch):
     r = client.get("/trades?from=2026-01-01&to=2026-03-31")
     assert "2026-01-01" in r.text
     assert "2026-03-31" in r.text
+
+
+def test_filter_card_renders(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/trades")
+    assert "mp-filter-chips" in r.text or 'class="mp-trades-filter"' in r.text
+    # All 4 chips
+    assert "全部" in r.text and "买卖" in r.text and "拆股" in r.text and "分红" in r.text
+    # Range inputs present
+    assert 'type="date"' in r.text
+    # Add form mp-seg
+    assert "mp-seg" in r.text
+
+
+def test_filter_card_active_chip_reflects_event_type(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/trades?event_type=trade")
+    # The "买卖" chip should have mp-chip--active when event_type=trade
+    assert "mp-chip--active" in r.text
