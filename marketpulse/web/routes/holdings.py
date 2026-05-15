@@ -156,7 +156,7 @@ def dividends_delete(
     return templates.TemplateResponse(request, "partials/trades_table.html", ctx)
 
 
-@router.post("/holdings/risk-analysis", response_class=HTMLResponse)
+@router.get("/holdings/risk-analysis", response_class=HTMLResponse)
 def holdings_risk_analysis(
     request: Request,
     db: Session = Depends(get_db),
@@ -164,13 +164,19 @@ def holdings_risk_analysis(
     ai: AiService = Depends(get_ai_service),
     _: None = Depends(require_auth),
 ):
-    """On-demand AI portfolio risk analysis. Returns rendered Markdown HTML."""
+    """HTMX endpoint: AI risk analysis card.
+
+    Called by hx-trigger='load' on the placeholder in /holdings.
+    Always returns 200 — even on Anthropic failure, renders a fallback
+    card so HTMX swaps cleanly.
+    """
     holdings = db.query(Holding).order_by(Holding.sort_order, Holding.id).all()
     if not holdings:
         return templates.TemplateResponse(
-            request, "partials/risk_analysis.html",
-            {"markdown": "暂无持仓,无需风险分析。", "error": None},
+            request, "partials/holdings_risk_card.html",
+            {"analysis_markdown": "暂无持仓,无需风险分析。", "generated_at": None},
         )
+
     rows = enrich_holdings(holdings, data)
     totals = compute_totals(rows)
     allocation = allocation_breakdown(rows)
@@ -184,7 +190,7 @@ def holdings_risk_analysis(
         for r in rows
     ]
     try:
-        result = ai.portfolio_risk(
+        analysis_markdown = ai.portfolio_risk(
             holdings=holdings_payload,
             totals=totals,
             allocation=allocation,
@@ -193,13 +199,11 @@ def holdings_risk_analysis(
         )
     except Exception as exc:  # noqa: BLE001 — surface any failure as recoverable UI error
         log.warning("portfolio_risk_failed", error=str(exc))
-        return templates.TemplateResponse(
-            request, "partials/risk_analysis.html",
-            {"markdown": None, "error": str(exc)},
-        )
+        analysis_markdown = "**AI 服务暂时不可用,请稍后重试。**"
+
     return templates.TemplateResponse(
-        request, "partials/risk_analysis.html",
-        {"markdown": result, "error": None},
+        request, "partials/holdings_risk_card.html",
+        {"analysis_markdown": analysis_markdown, "generated_at": None},
     )
 
 

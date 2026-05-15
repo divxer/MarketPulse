@@ -154,7 +154,7 @@ def test_holdings_dashboard_shows_kpis_and_allocation(client: TestClient, monkey
 
 
 def test_holdings_risk_analysis_endpoint(client: TestClient, monkeypatch):
-    """POST /holdings/risk-analysis calls AI and renders markdown response."""
+    """GET /holdings/risk-analysis calls AI and renders markdown response."""
     _login(client, monkeypatch)
     fake = _FakeData()
     class _FakeAi:
@@ -167,7 +167,7 @@ def test_holdings_risk_analysis_endpoint(client: TestClient, monkeypatch):
         client.post("/trades", data={
             "ticker": "BBB", "action": "buy", "quantity": 5, "price": 100,
         })
-        res = client.post("/holdings/risk-analysis")
+        res = client.get("/holdings/risk-analysis")
         assert res.status_code == 200
         assert "集中度风险" in res.text
     finally:
@@ -185,7 +185,7 @@ def test_holdings_risk_analysis_empty_portfolio(client: TestClient, monkeypatch)
     client.app.dependency_overrides[get_data_service] = lambda: fake
     client.app.dependency_overrides[get_ai_service] = lambda: _FakeAi()
     try:
-        res = client.post("/holdings/risk-analysis")
+        res = client.get("/holdings/risk-analysis")
         assert res.status_code == 200
         assert "暂无持仓" in res.text
     finally:
@@ -206,7 +206,7 @@ def test_risk_analysis_renders_markdown_to_html(client: TestClient, monkeypatch)
         client.post("/trades", data={
             "ticker": "MDX", "action": "buy", "quantity": 1, "price": 10,
         })
-        res = client.post("/holdings/risk-analysis")
+        res = client.get("/holdings/risk-analysis")
         assert res.status_code == 200
         # Heading rendered to <h2>, bold to <strong>, list to <li>
         assert "<h2>" in res.text and "风险" in res.text
