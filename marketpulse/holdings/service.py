@@ -315,6 +315,36 @@ def realized_pl_by_ticker(
     return rows[:top_n]
 
 
+def today_portfolio_change(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate today's portfolio change.
+
+    Rows without today_change_pct (e.g., quote fetch failed) are excluded
+    from up/down counts and the dollars sum. Percentage is weighted by
+    market value across eligible rows only.
+
+    Returns:
+      dollars: sum of (market_value * today_change_pct/100) for eligible rows
+      pct: weighted by market_value of eligible rows
+      up_count: rows with today_change_pct > 0
+      down_count: rows with today_change_pct < 0
+    """
+    eligible = [r for r in rows if r.get("today_change_pct") is not None]
+    if not eligible:
+        return {"dollars": 0.0, "pct": 0.0, "up_count": 0, "down_count": 0}
+
+    dollars = sum(r["market_value"] * r["today_change_pct"] / 100 for r in eligible)
+    total_mv = sum(r["market_value"] for r in eligible)
+    pct = (dollars / total_mv * 100) if total_mv else 0.0
+    up_count = sum(1 for r in eligible if r["today_change_pct"] > 0)
+    down_count = sum(1 for r in eligible if r["today_change_pct"] < 0)
+    return {
+        "dollars": dollars,
+        "pct": pct,
+        "up_count": up_count,
+        "down_count": down_count,
+    }
+
+
 def avg_hold_days(
     session: Session,
     *,

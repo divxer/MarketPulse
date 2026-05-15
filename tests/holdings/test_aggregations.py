@@ -351,3 +351,62 @@ def test_enrich_holdings_quote_failure_today_change_none(db_session):
     rows = enrich_holdings([h], fake_data)
     assert rows[0]["today_change_pct"] is None
     assert rows[0]["sparkline"] == []
+
+
+def test_today_portfolio_change_up_down_counts():
+    from marketpulse.holdings.service import today_portfolio_change
+    rows = [
+        {"market_value": 1000.0, "today_change_pct": 2.0},
+        {"market_value": 500.0, "today_change_pct": -1.0},
+        {"market_value": 200.0, "today_change_pct": 0.5},
+    ]
+    result = today_portfolio_change(rows)
+    assert result["up_count"] == 2
+    assert result["down_count"] == 1
+
+
+def test_today_portfolio_change_dollars_sum():
+    from marketpulse.holdings.service import today_portfolio_change
+    rows = [
+        {"market_value": 1000.0, "today_change_pct": 2.0},
+        {"market_value": 500.0, "today_change_pct": -1.0},
+    ]
+    result = today_portfolio_change(rows)
+    assert result["dollars"] == pytest.approx(15.0)
+
+
+def test_today_portfolio_change_pct_weighted_by_mv():
+    from marketpulse.holdings.service import today_portfolio_change
+    rows = [
+        {"market_value": 1000.0, "today_change_pct": 1.0},
+        {"market_value": 100.0, "today_change_pct": 10.0},
+    ]
+    result = today_portfolio_change(rows)
+    assert result["pct"] == pytest.approx(1.818, rel=1e-2)
+
+
+def test_today_portfolio_change_excludes_none_pct():
+    from marketpulse.holdings.service import today_portfolio_change
+    rows = [
+        {"market_value": 1000.0, "today_change_pct": None},
+        {"market_value": 500.0, "today_change_pct": 2.0},
+    ]
+    result = today_portfolio_change(rows)
+    assert result["up_count"] == 1
+    assert result["down_count"] == 0
+    assert result["dollars"] == pytest.approx(10.0)
+
+
+def test_today_portfolio_change_empty_returns_zero():
+    from marketpulse.holdings.service import today_portfolio_change
+    assert today_portfolio_change([]) == {
+        "dollars": 0.0, "pct": 0.0, "up_count": 0, "down_count": 0,
+    }
+
+
+def test_today_portfolio_change_all_none_returns_zero():
+    from marketpulse.holdings.service import today_portfolio_change
+    rows = [{"market_value": 1000.0, "today_change_pct": None}]
+    assert today_portfolio_change(rows) == {
+        "dollars": 0.0, "pct": 0.0, "up_count": 0, "down_count": 0,
+    }
