@@ -207,6 +207,65 @@ def holdings_risk_analysis(
     )
 
 
+@router.get("/holdings/export.csv")
+def holdings_export_csv(
+    db: Session = Depends(get_db),
+    data: DataService = Depends(get_data_service),
+    _: None = Depends(require_auth),
+):
+    """Streaming CSV export of current holdings.
+
+    Format columns: ticker, name, sector, quantity, avg_cost,
+    current_price, market_value, cost_basis, unrealized_pl,
+    unrealized_pl_pct, dividends_received
+
+    Uses StreamingResponse to avoid buffering large portfolios in memory.
+    """
+    from datetime import UTC, datetime
+
+    from fastapi.responses import StreamingResponse
+
+    HEADER = [
+        "ticker", "name", "sector", "quantity", "avg_cost",
+        "current_price", "market_value", "cost_basis",
+        "unrealized_pl", "unrealized_pl_pct", "dividends_received",
+    ]
+
+    def _gen():
+        yield ",".join(HEADER) + "\n"
+        holdings = db.query(Holding).order_by(Holding.sort_order, Holding.id).all()
+        if not holdings:
+            return
+        rows = enrich_holdings(holdings, data)
+        divs_by_ticker = per_ticker_dividends(db)
+        for r in rows:
+            divs = divs_by_ticker.get(r["ticker"], 0.0)
+            current_price = r.get("current_price")
+            market_value = r.get("market_value")
+            pl_dollars = r.get("pl_dollars") or 0
+            pl_pct = r.get("pl_pct") or 0
+            yield (
+                f'{r["ticker"]},'
+                f'{r["ticker"]},'  # name = ticker placeholder (Quote has no name field)
+                f'{r["sector"]},'
+                f'{r["quantity"]:g},'
+                f'{r["avg_cost"]:.4f},'
+                f'{current_price if current_price is not None else ""},'
+                f'{market_value if market_value is not None else ""},'
+                f'{r["cost_basis"]:.2f},'
+                f'{pl_dollars:.2f},'
+                f'{pl_pct:.4f},'
+                f'{divs:.2f}\n'
+            )
+
+    filename = f"holdings-{datetime.now(UTC).date().isoformat()}.csv"
+    return StreamingResponse(
+        _gen(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.delete("/holdings/{item_id}", response_class=HTMLResponse)
 def holdings_delete(
     item_id: int,
