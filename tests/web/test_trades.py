@@ -857,3 +857,42 @@ def test_by_ticker_card_renders_data(client, monkeypatch, db_session):
     r = client.get("/trades")
     assert r.text.count("AAPL") >= 1
     assert "mp-ticker-row" in r.text
+
+
+def test_post_trade_returns_partial_with_page_1(client, monkeypatch, db_session):
+    """After adding, returned partial defaults to page 1."""
+    _login(client, monkeypatch)
+    r = client.post("/trades", data={
+        "event_kind": "buy", "action": "buy",
+        "ticker": "AAPL", "quantity": "1", "price": "100",
+        "fees": "0", "tz_offset_minutes": "0",
+    })
+    assert r.status_code == 200
+    assert "AAPL" in r.text
+
+
+def test_delete_preserves_pagination(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    _seed_trades(db_session, 60)
+    # Get id of a trade on page 2 (10th from oldest = 50th from newest at limit=50,
+    # so anything past index 50 in desc order is on page 2)
+    from marketpulse.db.models import Trade
+    trades = db_session.query(Trade).order_by(Trade.executed_at.desc()).all()
+    target = trades[55]  # on page 2 of 50/page
+    r = client.delete(f"/trades/{target.id}?page=2&limit=50")
+    assert r.status_code == 200
+    # Trade row gone from response
+    assert f"trade-row-{target.id}" not in r.text
+
+
+def test_delete_last_item_on_page_clamps(client, monkeypatch, db_session):
+    """If deleting drops total below current page's start, clamp to last non-empty."""
+    _login(client, monkeypatch)
+    _seed_trades(db_session, 51)
+    from marketpulse.db.models import Trade
+    trades = db_session.query(Trade).order_by(Trade.executed_at.desc()).all()
+    target = trades[50]  # only item on page 2
+    r = client.delete(f"/trades/{target.id}?page=2&limit=50")
+    assert r.status_code == 200
+    # After delete, page=2 would have been empty; response should contain page 1 rows.
+    assert "trade-row-" in r.text

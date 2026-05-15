@@ -86,27 +86,23 @@ def _parse_executed_at(
         ) from exc
 
 
-@router.get("/trades", response_class=HTMLResponse)
-def trades_page(  # noqa: PLR0912, PLR0913, PLR0915
-    request: Request,
-    page: int = 1,
-    limit: int = 50,
-    from_: str | None = Query(None, alias="from"),
-    to: str | None = None,
-    q: str | None = None,
-    ticker: str | None = None,
-    event_type: str | None = None,
-    db: Session = Depends(get_db),
-    _: None = Depends(require_auth),
-):
-    """Phase 5c: paginated + filtered + KPI-decorated trade ledger.
+def _build_trades_ctx(
+    db: Session,
+    *,
+    page: int,
+    limit: int,
+    from_date: "date | None",
+    to_date: "date | None",
+    q: "str | None",
+    ticker_alias: "str | None",
+    event_type: "str | None",
+) -> dict:
+    """Assemble the full template context for /trades page or partial.
 
-    Query params:
-      page, limit  — 1-based pagination (limit clamped to [10,200])
-      from, to     — inclusive YYYY-MM-DD window on event date
-      q            — ticker prefix search (case-insensitive)
-      ticker       — exact ticker match (legacy alias, kept for old links)
-      event_type   — trade | split | dividend | None
+    Used by GET trades_page and by all mutation handlers (POST/PUT/DELETE
+    for trades, splits, dividends) when they need to re-render the table.
+    Caller is responsible for validating page/limit/dates/etc.
+    Page clamping (if page > total_pages) is handled internally.
     """
     from datetime import date as _date
     from urllib.parse import urlencode
@@ -119,29 +115,9 @@ def trades_page(  # noqa: PLR0912, PLR0913, PLR0915
         trading_stats,
     )
 
-    # -- parse & validate --
-    def _parse_d(s: str | None, name: str):
-        if not s:
-            return None
-        try:
-            return _date.fromisoformat(s)
-        except ValueError as e:
-            raise HTTPException(status_code=422, detail=f"invalid {name}: {s}") from e
-
-    from_date = _parse_d(from_, "from")
-    to_date = _parse_d(to, "to")
-    if from_date and to_date and from_date > to_date:
-        raise HTTPException(status_code=422, detail="from must be <= to")
-    if page <= 0 or limit <= 0:
-        raise HTTPException(status_code=422, detail="page and limit must be positive")
     limit = max(10, min(200, limit))
-
-    # Treat q="" as None.
-    q = q.strip() if q else None
-    if q == "":
-        q = None
     q_upper = q.upper() if q else None
-    ticker_upper = ticker.upper() if ticker else None
+    ticker_upper = ticker_alias.upper() if ticker_alias else None
 
     # -- fetch events with filters --
     events: list[dict] = []
@@ -198,10 +174,10 @@ def trades_page(  # noqa: PLR0912, PLR0913, PLR0915
 
     events.sort(key=lambda e: e["when"], reverse=True)
 
-    # -- pagination --
+    # -- pagination (clamp page if overflow) --
     total_count = len(events)
     total_pages = max(1, (total_count + limit - 1) // limit)
-    page = min(max(1, page), total_pages)  # clamp
+    page = min(max(1, page), total_pages)
     start = (page - 1) * limit
     page_events = events[start:start + limit]
     pager_window = list(range(max(1, page - 2), min(total_pages, page + 2) + 1))
@@ -276,20 +252,24 @@ def trades_page(  # noqa: PLR0912, PLR0913, PLR0915
 
     # -- filters query string --
     filters_dict = {
-        "from": from_, "to": to, "q": q, "event_type": event_type,
+        "from": from_date.isoformat() if from_date else None,
+        "to": to_date.isoformat() if to_date else None,
+        "q": q,
+        "event_type": event_type,
     }
     filters_qs = urlencode({k: v for k, v in filters_dict.items() if v})
     filters_qs_no_event_type = urlencode(
         {k: v for k, v in filters_dict.items() if v and k != "event_type"},
     )
 
-    ctx = {
+    return {
         "events": page_events,
         "page": page, "limit": limit,
         "total_pages": total_pages, "total_count": total_count,
         "pager_window": pager_window,
         "filters": {
-            "from": from_ or None, "to": to or None,
+            "from": from_date.isoformat() if from_date else None,
+            "to": to_date.isoformat() if to_date else None,
             "q": q, "event_type": event_type,
         },
         "filters_qs": filters_qs,
@@ -298,11 +278,59 @@ def trades_page(  # noqa: PLR0912, PLR0913, PLR0915
         "kpi": kpi,
         "monthly_pl": monthly,
         "by_ticker": by_ticker_rows,
-        # legacy keys (some callers may still expect)
+        # Legacy keys preserved for any old callers
         "filter_ticker": ticker_upper,
         "filter_event_type": event_type,
         "realized_pl_total": ytd_realized,
     }
+
+
+@router.get("/trades", response_class=HTMLResponse)
+def trades_page(
+    request: Request,
+    page: int = 1,
+    limit: int = 50,
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = None,
+    q: str | None = None,
+    ticker: str | None = None,
+    event_type: str | None = None,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_auth),
+):
+    """Phase 5c: paginated + filtered + KPI-decorated trade ledger.
+
+    Query params:
+      page, limit  — 1-based pagination (limit clamped to [10,200])
+      from, to     — inclusive YYYY-MM-DD window on event date
+      q            — ticker prefix search (case-insensitive)
+      ticker       — exact ticker match (legacy alias, kept for old links)
+      event_type   — trade | split | dividend | None
+    """
+    from datetime import date as _date
+
+    def _parse_d(s: str | None, name: str):
+        if not s:
+            return None
+        try:
+            return _date.fromisoformat(s)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=f"invalid {name}: {s}") from e
+
+    from_date = _parse_d(from_, "from")
+    to_date = _parse_d(to, "to")
+    if from_date and to_date and from_date > to_date:
+        raise HTTPException(status_code=422, detail="from must be <= to")
+    if page <= 0 or limit <= 0:
+        raise HTTPException(status_code=422, detail="page and limit must be positive")
+
+    q_clean = (q.strip() if q else None) or None
+
+    ctx = _build_trades_ctx(
+        db, page=page, limit=limit,
+        from_date=from_date, to_date=to_date,
+        q=q_clean, ticker_alias=ticker, event_type=event_type,
+    )
 
     # HX-Request → return only the table partial
     if request.headers.get("HX-Request") == "true":
@@ -427,6 +455,14 @@ def trades_add(
     notes: str = Form(""),
     executed_at: str = Form(""),
     tz_offset_minutes: int = Form(0),
+    # Filter context query params (preserved through HTMX form action).
+    # page is always 1 after a new trade (new row appears at top).
+    limit: int = 50,
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = None,
+    q: str | None = None,
+    ticker_filter: str | None = Query(None, alias="ticker_filter"),
+    event_type: str | None = None,
     db: Session = Depends(get_db),
     _: None = Depends(require_auth),
 ):
@@ -450,39 +486,17 @@ def trades_add(
     except TradeError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    # Re-render the full timeline so the new row + totals refresh.
-    events: list[dict] = []
-    for t in db.query(Trade).all():
-        when = t.executed_at or t.created_at
-        events.append({"kind": "trade", "when": when, "obj": t})
-    _EOD = time(23, 59, 59, tzinfo=UTC)
-    for s in db.query(StockSplit).all():
-        events.append({"kind": "split", "when": datetime.combine(s.ex_date, _EOD), "obj": s})
-    for d in db.query(Dividend).all():
-        events.append({"kind": "dividend", "when": datetime.combine(d.ex_date, _EOD), "obj": d})
-    events.sort(key=lambda e: e["when"], reverse=True)
-    _add_total = len(events)
-    _add_limit = 50
-    _add_page = 1
-    _add_total_pages = max(1, (_add_total + _add_limit - 1) // _add_limit)
-    events = events[:_add_limit]
-
-    return templates.TemplateResponse(
-        request,
-        "partials/trades_table.html",
-        {
-            "events": events,
-            "page": _add_page,
-            "limit": _add_limit,
-            "total_count": _add_total,
-            "total_pages": _add_total_pages,
-            "pager_window": list(range(1, min(_add_total_pages, 5) + 1)),
-            "filters_qs": "",
-            "filter_ticker": None,
-            "filter_event_type": None,
-            "realized_pl_total": total_realized_pl(db),
-        },
+    # After creating, render partial with page=1 (new row at top).
+    from datetime import date as _date
+    fd = _date.fromisoformat(from_) if from_ else None
+    td = _date.fromisoformat(to) if to else None
+    q_clean = (q.strip() if q else None) or None
+    ctx = _build_trades_ctx(
+        db, page=1, limit=limit,
+        from_date=fd, to_date=td,
+        q=q_clean, ticker_alias=ticker_filter, event_type=event_type,
     )
+    return templates.TemplateResponse(request, "partials/trades_table.html", ctx)
 
 
 @router.put("/trades/{trade_id}", response_class=HTMLResponse)
@@ -498,6 +512,14 @@ def trades_update(
     executed_at: str = Form(""),
     tz_offset_minutes: int = Form(0),
     original_executed_at_iso: str = Form(""),
+    # Filter context query params — preserved so the view doesn't jump pages.
+    page: int = 1,
+    limit: int = 50,
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = None,
+    q: str | None = None,
+    ticker_filter: str | None = Query(None, alias="ticker_filter"),
+    event_type: str | None = None,
     db: Session = Depends(get_db),
     _: None = Depends(require_auth),
 ):
@@ -550,56 +572,54 @@ def trades_update(
     if normalized != old_ticker:
         recompute_ticker(db, normalized)
 
-    # Re-render the timeline (same logic as trades_add).
-    events: list[dict] = []
-    for t in db.query(Trade).all():
-        when = t.executed_at or t.created_at
-        events.append({"kind": "trade", "when": when, "obj": t})
-    _EOD = time(23, 59, 59, tzinfo=UTC)
-    for sp in db.query(StockSplit).all():
-        events.append({"kind": "split", "when": datetime.combine(sp.ex_date, _EOD), "obj": sp})
-    for d in db.query(Dividend).all():
-        events.append({"kind": "dividend", "when": datetime.combine(d.ex_date, _EOD), "obj": d})
-    events.sort(key=lambda e: e["when"], reverse=True)
-    _upd_total = len(events)
-    _upd_limit = 50
-    _upd_page = 1
-    _upd_total_pages = max(1, (_upd_total + _upd_limit - 1) // _upd_limit)
-    events = events[:_upd_limit]
-
-    return templates.TemplateResponse(
-        request,
-        "partials/trades_table.html",
-        {
-            "events": events,
-            "page": _upd_page,
-            "limit": _upd_limit,
-            "total_count": _upd_total,
-            "total_pages": _upd_total_pages,
-            "pager_window": list(range(1, min(_upd_total_pages, 5) + 1)),
-            "filters_qs": "",
-            "filter_ticker": None,
-            "filter_event_type": None,
-            "realized_pl_total": total_realized_pl(db),
-        },
+    # Re-render the partial, preserving pagination context.
+    from datetime import date as _date
+    fd = _date.fromisoformat(from_) if from_ else None
+    td = _date.fromisoformat(to) if to else None
+    q_clean = (q.strip() if q else None) or None
+    ctx = _build_trades_ctx(
+        db, page=page, limit=limit,
+        from_date=fd, to_date=td,
+        q=q_clean, ticker_alias=ticker_filter, event_type=event_type,
     )
+    return templates.TemplateResponse(request, "partials/trades_table.html", ctx)
 
 
 @router.delete("/trades/{trade_id}", response_class=HTMLResponse)
 def trades_delete(
+    request: Request,
     trade_id: int,
+    page: int = 1,
+    limit: int = 50,
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = None,
+    q: str | None = None,
+    ticker: str | None = None,
+    event_type: str | None = None,
     db: Session = Depends(get_db),
     _: None = Depends(require_auth),
 ):
     trade = db.query(Trade).filter(Trade.id == trade_id).one_or_none()
     if not trade:
         raise HTTPException(status_code=404, detail="trade not found")
-    ticker = trade.ticker
+    trade_ticker = trade.ticker
     db.delete(trade)
     db.commit()
     # Recompute Holding + realized_pl on remaining sells for this ticker.
-    recompute_ticker(db, ticker)
-    return HTMLResponse("")
+    recompute_ticker(db, trade_ticker)
+
+    # Re-render the partial, preserving pagination context.
+    # _build_trades_ctx will clamp page if the delete emptied the last page.
+    from datetime import date as _date
+    fd = _date.fromisoformat(from_) if from_ else None
+    td = _date.fromisoformat(to) if to else None
+    q_clean = (q.strip() if q else None) or None
+    ctx = _build_trades_ctx(
+        db, page=page, limit=limit,
+        from_date=fd, to_date=td,
+        q=q_clean, ticker_alias=ticker, event_type=event_type,
+    )
+    return templates.TemplateResponse(request, "partials/trades_table.html", ctx)
 
 
 def _is_duplicate(db: Session, t: ParsedTrade) -> bool:
