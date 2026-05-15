@@ -96,6 +96,7 @@ DB migration：`Holding.sector TEXT NULL`。
       "up_count": int, "down_count": int,
     },
     "ytd_realized": float,           # Jan 1 到 today 已实现 P&L
+    "this_month_dividends": float,   # 当前自然月分红总额; 0 if no data
   },
   "contributors": list[dict],        # top 5 P&L impact, mix pos+neg
   "sectors": list[dict],             # by sector aggregation
@@ -519,7 +520,7 @@ marketpulse/web/templates/
 | 市值 | `{:,.0f}\|format(totals.market_value)` | 实时 | `account_balance_wallet` | navy |
 | 未实现盈亏 | `{:+,.0f}\|format(pl)` | `{:+.2f}% \| pl_pct` | `trending_up` | up/down |
 | 已实现盈亏 · YTD | `{:+,.0f}\|format(kpi.ytd_realized)` | `胜率 {:.1f}% \| trade_stats.win_rate_pct` (or — when None) | `payments` | up/down |
-| 累计分红 | `{:+,.0f}\|format(total_dividends)` | 含本月 (TBD: 本月分红) | `redeem` | up |
+| 累计分红 | `{:+,.0f}\|format(total_dividends)` | `含本月 ${:.2f}\|format(this_month_div)` 其中 `this_month_div` 在 route 中由 `monthly_dividends(db)` 末项的 `amount` 字段取得 (若 list 为空则 0)；route 把它放进 `kpi.this_month_dividends` | `redeem` | up |
 
 格式：用 `"{:+,.0f}".format(...)` 新式格式化（5c 已确立该模式）。
 
@@ -661,12 +662,12 @@ marketpulse/web/templates/
     <span class="mp-card__sub">{{ generated_at | default('刚刚生成') }}</span>
   </div>
   <div class="mp-card__body mp-prose">
-    {{ analysis_markdown | render_markdown | safe }}
+    {{ analysis_markdown | markdown }}
   </div>
 </section>
 ```
 
-`render_markdown` 是现有 Jinja filter（Phase 5b 已有）。
+`markdown` 是现有 Jinja filter（在 `marketpulse/web/main.py` 注册为 `_render_markdown`，filter 名为 `markdown`，返回 `Markup` 已是安全 HTML，不需要再加 `| safe`）。
 
 ## CSS 新增 (`app.css` 追加)
 
