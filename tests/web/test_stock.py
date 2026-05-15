@@ -480,3 +480,29 @@ def test_chart_js_subscribes_crosshair_for_ohlc(client: TestClient, monkeypatch)
     assert "data-ohlc=" in body, (
         "updateOhlcBar must select OHLC field elements via data-ohlc"
     )
+
+
+def test_stock_page_uses_three_column_grid(client: TestClient, monkeypatch):
+    """Phase 5b-1: /stock/{ticker} uses TradingView-style 3-column layout."""
+    _login(client, monkeypatch)
+    r = client.get("/stock/AAPL")
+    assert r.status_code == 200
+    body = r.text
+    # 3-column grid with specific widths
+    assert "grid-cols-[280px_1fr_440px]" in body, (
+        "stock page must use 3-column grid: 280 watchlist | flex chart | 440 rail"
+    )
+    # Width slot override
+    assert "max-w-screen-2xl" in body, "stock page must widen container via main_width block"
+    # Record-trade form no longer hidden by default (no `hidden` class on the form)
+    import re
+    form_match = re.search(r'<form[^>]*id="record-trade-form"[^>]*>', body)
+    assert form_match is not None
+    assert "hidden" not in form_match.group(0), (
+        "record-trade form should be visible by default in 3-column layout"
+    )
+    # Chart element IDs still present (don't break chart.js)
+    assert 'id="chart-main"' in body
+    assert 'id="chart-rsi"' in body
+    assert 'id="chart-macd"' in body
+    assert 'id="chart-ohlc-bar"' in body
