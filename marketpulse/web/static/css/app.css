@@ -266,6 +266,7 @@ html, body {
 .mp-chip--up    { color: var(--mp-up); background: var(--mp-up-soft); border-color: transparent; }
 .mp-chip--down  { color: var(--mp-down); background: var(--mp-down-soft); border-color: transparent; }
 .mp-chip--periwinkle { color: var(--ns-primary); background: rgba(0,102,204,0.08); border-color: rgba(0,102,204,0.18); }
+.mp-chip--warn  { color: #92400e; background: #fef3c7; border-color: transparent; }
 
 .mp-pulse {
   width: 6px; height: 6px; border-radius: 50%;

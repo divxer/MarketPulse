@@ -16,7 +16,7 @@
         {{ "%+.2f"|format(change_amount) }} ({{ "%+.2f"|format(quote.change_pct) }}%)
       </span>
       {% if quote.stale %}
-      <span class="mp-chip" style="background: #fef3c7; color: #92400e; padding: 2px 8px; font-size: 11px;">
+      <span class="mp-chip mp-chip--warn">
         <span class="material-symbols-outlined" style="font-size: 12px;">warning</span> 缓存
       </span>
       {% endif %}
