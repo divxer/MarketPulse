@@ -728,3 +728,36 @@ def test_trades_page_visual_anchors_present(client, monkeypatch):
     assert "Trade Ledger" in r.text
     # Old Tailwind classes should be gone.
     assert 'class="bg-white rounded-md shadow-sm p-4"' not in r.text
+
+
+def test_kpi_strip_5_value_blocks(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/trades")
+    assert r.text.count("mp-kpi__value") == 5
+
+
+def test_kpi_avg_hold_days_dash_when_empty(client, monkeypatch):
+    """No trades → avg_hold_days is None → rendered as '—'."""
+    _login(client, monkeypatch)
+    r = client.get("/trades")
+    assert "平均持仓天数" in r.text
+    assert "—" in r.text
+
+
+def test_kpi_win_rate_dash_when_no_closed(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/trades")
+    assert "胜率" in r.text
+
+
+def test_kpi_ytd_label_default_is_ytd(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/trades")
+    assert "YTD" in r.text
+
+
+def test_kpi_ytd_label_reflects_explicit_range(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/trades?from=2026-01-01&to=2026-03-31")
+    assert "2026-01-01" in r.text
+    assert "2026-03-31" in r.text

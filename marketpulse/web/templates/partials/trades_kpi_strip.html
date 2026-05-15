@@ -1,0 +1,55 @@
+{# 5 KPI cards. All numeric values use tnum + grotesk. #}
+
+<div class="mp-card mp-kpi">
+  <div class="mp-kpi__head">
+    <span class="mp-eyebrow mp-eyebrow--primary">总笔数</span>
+    <span class="material-symbols-outlined mp-kpi__icon">receipt_long</span>
+  </div>
+  <div class="mp-kpi__value grotesk tnum">{{ kpi.total_trades }}</div>
+  <div class="mp-kpi__hint">{{ kpi.ytd_label }}</div>
+</div>
+
+<div class="mp-card mp-kpi">
+  <div class="mp-kpi__head">
+    <span class="mp-eyebrow mp-eyebrow--primary">已实现盈亏 · {{ kpi.ytd_label }}</span>
+    <span class="material-symbols-outlined mp-kpi__icon">payments</span>
+  </div>
+  <div class="mp-kpi__value grotesk tnum"
+       style="color: {% if kpi.ytd_realized >= 0 %}var(--mp-up){% else %}var(--mp-down){% endif %};">
+    {{ "{:+,.2f}".format(kpi.ytd_realized) }}
+  </div>
+  <div class="mp-kpi__hint">{{ kpi.wins + kpi.losses }} 笔已平仓</div>
+</div>
+
+<div class="mp-card mp-kpi">
+  <div class="mp-kpi__head">
+    <span class="mp-eyebrow mp-eyebrow--primary">胜率</span>
+    <span class="material-symbols-outlined mp-kpi__icon">trending_up</span>
+  </div>
+  <div class="mp-kpi__value grotesk tnum">
+    {{ "%.1f%%"|format(kpi.win_rate_pct) if kpi.win_rate_pct is not none else "—" }}
+  </div>
+  <div class="mp-kpi__hint">{{ kpi.wins }} 胜 / {{ kpi.losses }} 负</div>
+</div>
+
+<div class="mp-card mp-kpi">
+  <div class="mp-kpi__head">
+    <span class="mp-eyebrow mp-eyebrow--primary">平均持仓天数</span>
+    <span class="material-symbols-outlined mp-kpi__icon">schedule</span>
+  </div>
+  <div class="mp-kpi__value grotesk tnum">
+    {% if kpi.avg_hold_days is not none %}{{ "%d d"|format(kpi.avg_hold_days|round|int) }}{% else %}—{% endif %}
+  </div>
+  <div class="mp-kpi__hint">基于 FIFO 配对</div>
+</div>
+
+<div class="mp-card mp-kpi">
+  <div class="mp-kpi__head">
+    <span class="mp-eyebrow mp-eyebrow--primary">本月新笔数</span>
+    <span class="material-symbols-outlined mp-kpi__icon">event_available</span>
+  </div>
+  <div class="mp-kpi__value grotesk tnum">{{ kpi.this_month.total }}</div>
+  <div class="mp-kpi__hint">
+    {{ kpi.this_month.buys }} 买 · {{ kpi.this_month.sells }} 卖 · {{ kpi.this_month.dividends }} 分红
+  </div>
+</div>

@@ -617,3 +617,11 @@ hr.mp-hr {
   .mp-trades-kpi    { grid-template-columns: repeat(2, 1fr); }
   .mp-hero          { flex-direction:column; align-items:flex-start; gap:16px; }
 }
+
+/* ════════ Phase 5c: KPI cards ════════ */
+.mp-kpi             { padding:18px 20px; }
+.mp-kpi__head       { display:flex; justify-content:space-between; align-items:flex-start; }
+.mp-kpi__icon       { font-size:18px; color:var(--ns-outline-variant); }
+.mp-kpi__value      { font:700 30px/1.1 var(--ns-font-headline); letter-spacing:-0.02em;
+                      color:var(--ns-navy); margin-top:6px; }
+.mp-kpi__hint       { font-size:11.5px; color:var(--ns-on-surface-variant); margin-top:4px; }
