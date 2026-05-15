@@ -1,0 +1,300 @@
+/* ───────────────────────────────────────────────────────────────
+   NineScrolls — Colors & Type Tokens
+   Source of truth for all brand visual primitives.
+   Mirrors the production Tailwind v4 @theme in the marketing site
+   (src/styles/app.css) and the admin theme (src/styles/admin-tailwind.css).
+   Bring this file in with: <link rel="stylesheet" href="colors_and_type.css">
+─────────────────────────────────────────────────────────────── */
+
+/* ── Fonts: load from Google Fonts.
+   These are the production stack; keep weights in sync with HomePage usage. */
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap");
+
+:root {
+  /* ─────────── COLOR · BRAND PRIMARIES ─────────── */
+  /* Marketing primary (vivid action blue — used on .com hero CTAs, links) */
+  --ns-primary:                  #0066cc;
+  --ns-on-primary:               #ffffff;
+  --ns-primary-container:        #3b82f6; /* hover state — lighter, more saturated */
+  --ns-tertiary:                 #004e9f; /* deeper navy accent — uppercase eyebrows */
+
+  /* Editorial / admin primary (deep navy — used on the dragon mark + admin chrome) */
+  --ns-navy:                     #022448;
+  --ns-navy-container:           #1e3a5f;
+  --ns-navy-fixed:               #d5e3ff;
+  --ns-navy-fixed-dim:           #adc8f5;
+  --ns-on-navy-container:        #8aa4cf;
+
+  /* ─────────── COLOR · SURFACE ARCHITECTURE (warm violet white) ─────────── */
+  /* These come straight from app.css. The site reads as cool-white with a
+     subtle violet undertone (#fcf8ff base, ramping into #e2e0fc highest). */
+  --ns-background:               #fcf8ff;
+  --ns-surface:                  #fcf8ff;
+  --ns-surface-container-lowest: #ffffff;
+  --ns-surface-container-low:    #f5f2ff;
+  --ns-surface-container:        #efecff;
+  --ns-surface-container-high:   #e8e5ff;
+  --ns-surface-container-highest:#e2e0fc;
+
+  /* ─────────── COLOR · INK ─────────── */
+  --ns-on-surface:               #1a1a2e;  /* primary body ink — near-black with navy bias */
+  --ns-on-surface-variant:       #414753;  /* secondary ink, captions */
+  --ns-outline:                  #727784;  /* dividers, hairline rules */
+  --ns-outline-variant:          #c1c6d5;  /* subtle borders, card edges */
+
+  /* Slate scale (used liberally in the marketing site for navigation + footer copy) */
+  --ns-slate-900:                #0f172a;
+  --ns-slate-800:                #1e293b;
+  --ns-slate-600:                #475569;
+  --ns-slate-500:                #64748b;
+  --ns-slate-400:                #94a3b8;
+  --ns-slate-300:                #cbd5e1;
+  --ns-slate-200:                #e2e8f0;
+  --ns-slate-100:                #f1f5f9;
+
+  /* ─────────── COLOR · SEMANTIC / STATE ─────────── */
+  --ns-error:                    #ba1a1a;
+  --ns-error-container:          #ffdad6;
+  --ns-on-error:                 #ffffff;
+  --ns-on-error-container:       #93000a;
+  --ns-success:                  #1f7a4d;   /* not in production but harmonised */
+  --ns-warning:                  #c0570c;
+
+  /* Hero gradient endpoints */
+  --ns-hero-gradient-start:      #1e3a5f;
+  --ns-hero-gradient-end:        #1a1a2e;
+
+  /* Accent — single-word highlights over imagery (e.g. the word
+     "Semiconductor" in the hero h1). Periwinkle / cornflower blue
+     — NOT cyan. Reads as a brighter sibling of --ns-primary, sitting
+     visibly forward of navy backgrounds without going aqua. */
+  --ns-accent-periwinkle:        #4d94ff;
+  --ns-accent-cyan:              #4d94ff;   /* deprecated alias — use --ns-accent-periwinkle */
+
+  /* ─────────── TYPE · FAMILIES ─────────── */
+  --ns-font-headline: "Space Grotesk", "Helvetica Neue", Arial, sans-serif;
+  --ns-font-body:     "Inter", "Helvetica Neue", Arial, sans-serif;
+  --ns-font-label:    "Inter", "Helvetica Neue", Arial, sans-serif;
+  --ns-font-mono:     ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --ns-font-icon:     "Material Symbols Outlined";
+
+  /* ─────────── TYPE · SIZE SCALE ─────────── */
+  --ns-text-2xs:  10px;   /* hyper-eyebrow labels in footer */
+  --ns-text-xs:   12px;   /* eyebrow caps, microcopy */
+  --ns-text-sm:   14px;   /* nav, body small, button label */
+  --ns-text-base: 16px;   /* body */
+  --ns-text-lg:   18px;   /* lead paragraphs */
+  --ns-text-xl:   20px;   /* card titles */
+  --ns-text-2xl:  24px;
+  --ns-text-3xl:  30px;
+  --ns-text-4xl:  36px;   /* section h2 */
+  --ns-text-5xl:  48px;   /* page h1 */
+  --ns-text-6xl:  60px;
+  --ns-text-7xl:  72px;   /* hero h1 — display */
+
+  /* ─────────── TYPE · WEIGHT ─────────── */
+  --ns-weight-light:    300;
+  --ns-weight-regular:  400;
+  --ns-weight-medium:   500;
+  --ns-weight-semibold: 600;
+  --ns-weight-bold:     700;
+  --ns-weight-extrabold:800;
+
+  /* ─────────── TYPE · TRACKING ─────────── */
+  --ns-tracking-tighter: -0.04em;  /* hero display h1 */
+  --ns-tracking-tight:   -0.02em;  /* h2/h3 */
+  --ns-tracking-normal:   0em;
+  --ns-tracking-wide:     0.05em;
+  --ns-tracking-widest:   0.2em;   /* "PRECISION INSTRUMENTATION" eyebrows */
+
+  /* ─────────── TYPE · LEADING ─────────── */
+  --ns-leading-display: 0.95;
+  --ns-leading-tight:   1.1;
+  --ns-leading-snug:    1.3;
+  --ns-leading-normal:  1.5;
+  --ns-leading-relaxed: 1.625;   /* body default */
+  --ns-leading-loose:   1.8;
+
+  /* ─────────── SPACING (Tailwind v4 base = 4px) ─────────── */
+  --ns-space-1:  4px;
+  --ns-space-2:  8px;
+  --ns-space-3:  12px;
+  --ns-space-4:  16px;
+  --ns-space-5:  20px;
+  --ns-space-6:  24px;
+  --ns-space-8:  32px;
+  --ns-space-10: 40px;
+  --ns-space-12: 48px;
+  --ns-space-16: 64px;
+  --ns-space-24: 96px;
+  --ns-space-32: 128px;
+
+  /* ─────────── RADIUS — precision-editorial: very low rounding ─────────── */
+  --ns-radius-none: 0;
+  --ns-radius-sm:   2px;     /* default for buttons & cards (rounded-sm) */
+  --ns-radius-md:   6px;
+  --ns-radius-lg:   8px;
+  --ns-radius-xl:   12px;    /* product cards, larger panels */
+  --ns-radius-2xl:  16px;    /* feature panels */
+  --ns-radius-full: 9999px;  /* pills / chips */
+
+  /* ─────────── SHADOWS — navy-tinted, not gray ─────────── */
+  --ns-shadow-sm:        0 1px 2px rgba(2, 36, 72, 0.05);
+  --ns-shadow-card:      0 10px 30px rgba(2, 36, 72, 0.04);
+  --ns-shadow-elevated:  0 10px 30px rgba(2, 36, 72, 0.06);
+  --ns-shadow-float:     0 15px 40px rgba(2, 36, 72, 0.10);
+  --ns-shadow-lg:        0 20px 50px rgba(2, 36, 72, 0.12);
+  --ns-text-shadow-hero: 0 2px 8px rgba(0, 0, 0, 0.80);
+
+  /* ─────────── MOTION ─────────── */
+  --ns-ease:           cubic-bezier(0.4, 0, 0.2, 1);
+  --ns-ease-out:       cubic-bezier(0, 0, 0.2, 1);
+  --ns-duration-fast:  200ms;
+  --ns-duration-base:  300ms;
+  --ns-duration-slow:  500ms;
+  --ns-duration-slower:700ms;   /* image zoom on hover */
+
+  /* ─────────── EFFECTS ─────────── */
+  --ns-blur-glass:     blur(20px);
+  --ns-frosted-bg:     rgba(255, 255, 255, 0.6);
+  --ns-frosted-bg-dim: rgba(255, 255, 255, 0.8); /* sticky nav */
+}
+
+/* ════════════════════════════════════════════════════════════════
+   SEMANTIC TEXT STYLES
+   Use these (.ns-h1, .ns-eyebrow, etc) anywhere you don't want to
+   manually wire up font + weight + size + tracking + leading.
+═══════════════════════════════════════════════════════════════ */
+
+.ns-body-bg {
+  font-family: var(--ns-font-body);
+  color: var(--ns-on-surface);
+  background: var(--ns-background);
+  line-height: var(--ns-leading-relaxed);
+  -webkit-font-smoothing: antialiased;
+}
+
+.ns-display,
+.ns-h1-display {
+  font-family: var(--ns-font-headline);
+  font-weight: var(--ns-weight-extrabold);
+  font-size: var(--ns-text-7xl);
+  line-height: var(--ns-leading-display);
+  letter-spacing: var(--ns-tracking-tighter);
+  color: var(--ns-on-surface);
+}
+
+.ns-h1 {
+  font-family: var(--ns-font-headline);
+  font-weight: var(--ns-weight-bold);
+  font-size: var(--ns-text-5xl);
+  line-height: var(--ns-leading-tight);
+  letter-spacing: var(--ns-tracking-tighter);
+  color: var(--ns-on-surface);
+}
+
+.ns-h2 {
+  font-family: var(--ns-font-headline);
+  font-weight: var(--ns-weight-bold);
+  font-size: var(--ns-text-4xl);
+  line-height: var(--ns-leading-tight);
+  letter-spacing: var(--ns-tracking-tight);
+  color: var(--ns-on-surface);
+}
+
+.ns-h3 {
+  font-family: var(--ns-font-headline);
+  font-weight: var(--ns-weight-bold);
+  font-size: var(--ns-text-xl);
+  line-height: var(--ns-leading-snug);
+  color: var(--ns-on-surface);
+}
+
+.ns-h4 {
+  font-family: var(--ns-font-headline);
+  font-weight: var(--ns-weight-bold);
+  font-size: var(--ns-text-lg);
+  line-height: var(--ns-leading-snug);
+  color: var(--ns-on-surface);
+}
+
+/* Brand wordmark — used next to dragon mark. ALL CAPS Space Grotesk Bold,
+   tightly tracked. Never lowercase. */
+.ns-wordmark {
+  font-family: var(--ns-font-headline);
+  font-weight: var(--ns-weight-bold);
+  font-size: var(--ns-text-2xl);
+  text-transform: uppercase;
+  letter-spacing: var(--ns-tracking-tighter);
+  color: var(--ns-slate-900);
+}
+
+/* Eyebrow / kicker — short, very-wide-tracked uppercase label.
+   Pattern used everywhere: above section h2s, on product category chips,
+   in footer column headings, on testimonial labels. */
+.ns-eyebrow {
+  font-family: var(--ns-font-headline);
+  font-weight: var(--ns-weight-bold);
+  font-size: var(--ns-text-xs);
+  text-transform: uppercase;
+  letter-spacing: var(--ns-tracking-widest);
+  color: var(--ns-on-surface);
+}
+.ns-eyebrow--primary { color: var(--ns-primary); }
+.ns-eyebrow--tertiary { color: var(--ns-tertiary); }
+.ns-eyebrow--inverse { color: var(--ns-slate-400); }
+
+/* Lead — large body intro after an h1/h2 */
+.ns-lead {
+  font-family: var(--ns-font-body);
+  font-weight: var(--ns-weight-light);
+  font-size: var(--ns-text-lg);
+  line-height: var(--ns-leading-relaxed);
+  color: var(--ns-on-surface-variant);
+}
+
+/* Body */
+.ns-body {
+  font-family: var(--ns-font-body);
+  font-weight: var(--ns-weight-regular);
+  font-size: var(--ns-text-base);
+  line-height: var(--ns-leading-relaxed);
+  color: var(--ns-on-surface-variant);
+}
+.ns-body-sm {
+  font-family: var(--ns-font-body);
+  font-weight: var(--ns-weight-regular);
+  font-size: var(--ns-text-sm);
+  line-height: var(--ns-leading-relaxed);
+  color: var(--ns-on-surface-variant);
+}
+
+/* Nav / label — Space Grotesk medium, tight-tracked, small */
+.ns-nav-label {
+  font-family: var(--ns-font-headline);
+  font-weight: var(--ns-weight-medium);
+  font-size: var(--ns-text-sm);
+  letter-spacing: var(--ns-tracking-tight);
+  color: var(--ns-slate-600);
+}
+
+.ns-mono {
+  font-family: var(--ns-font-mono);
+  font-size: var(--ns-text-sm);
+}
+
+/* Hero divider — the recurring "h-1 w-20 bg-primary" accent rule
+   under every section h2. Use this class on a <div> after the h2. */
+.ns-rule {
+  display: block;
+  width: 80px;
+  height: 4px;
+  background: var(--ns-primary);
+  margin: 24px 0;
+}
+
+/* Drop shadow for white text over imagery (hero h1). */
+.ns-text-shadow-hero {
+  text-shadow: var(--ns-text-shadow-hero);
+}
