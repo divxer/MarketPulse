@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy.orm import Session
 
@@ -124,18 +124,38 @@ def dividends_list(
 
 @router.delete("/dividends/{div_id}", response_class=HTMLResponse)
 def dividends_delete(
+    request: Request,
     div_id: int,
+    page: int = 1,
+    limit: int = 50,
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = None,
+    q: str | None = None,
+    ticker: str | None = None,
+    event_type: str | None = None,
     db: Session = Depends(get_db),
     _: None = Depends(require_auth),
 ):
-    """Delete a dividend row. Used for cleanup / re-imports."""
+    """Delete a dividend row. Re-renders /trades table partial."""
     from marketpulse.db.models import Dividend
     div = db.query(Dividend).filter(Dividend.id == div_id).one_or_none()
     if not div:
         raise HTTPException(status_code=404, detail="dividend not found")
     db.delete(div)
     db.commit()
-    return HTMLResponse("")
+
+    from datetime import date as _date
+
+    from marketpulse.web.routes.trades import _build_trades_ctx
+    fd = _date.fromisoformat(from_) if from_ else None
+    td = _date.fromisoformat(to) if to else None
+    q_clean = (q.strip() if q else None) or None
+    ctx = _build_trades_ctx(
+        db, page=page, limit=limit,
+        from_date=fd, to_date=td,
+        q=q_clean, ticker_alias=ticker, event_type=event_type,
+    )
+    return templates.TemplateResponse(request, "partials/trades_table.html", ctx)
 
 
 @router.post("/holdings/risk-analysis", response_class=HTMLResponse)
