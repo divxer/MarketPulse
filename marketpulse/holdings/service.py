@@ -110,32 +110,53 @@ def sort_by_pl_impact(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(rows, key=key)
 
 
-def monthly_realized_pl(session: Session) -> list[dict[str, Any]]:
+def monthly_realized_pl(
+    session: Session,
+    *,
+    months: int | None = None,
+) -> list[dict[str, Any]]:
     """Aggregate realized P&L from sell trades grouped by (year, month).
 
-    Returns a list of {month: 'YYYY-MM', pl: float, trade_count: int} sorted
-    chronologically. Months with no trades are omitted (frontend can fill gaps).
+    months=None (default): return all months that have realized P&L,
+        chronologically; gaps omitted. Preserves existing /holdings behavior.
+    months=N: return the trailing N calendar months (including current);
+        missing months padded with {pl: 0, trade_count: 0}.
     """
-    sells = (
-        session.query(Trade)
-        .filter(Trade.realized_pl.isnot(None))
-        .all()
-    )
+    sells = session.query(Trade).filter(Trade.realized_pl.isnot(None)).all()
     buckets: dict[str, dict[str, Any]] = defaultdict(
         lambda: {"pl": 0.0, "trade_count": 0},
     )
     for t in sells:
-        when: date | None = t.executed_at.date() if t.executed_at else (
-            t.created_at.date() if t.created_at else None
+        when: date | None = (
+            t.executed_at.date() if t.executed_at
+            else (t.created_at.date() if t.created_at else None)
         )
         if when is None:
             continue
         key = f"{when.year:04d}-{when.month:02d}"
         buckets[key]["pl"] += t.realized_pl
         buckets[key]["trade_count"] += 1
+
+    if months is None:
+        return [
+            {"month": m, "pl": v["pl"], "trade_count": v["trade_count"]}
+            for m, v in sorted(buckets.items())
+        ]
+
+    # months=N: pad trailing N months including current.
+    today = date.today()
+    keys: list[str] = []
+    y, m = today.year, today.month
+    for _ in range(months):
+        keys.append(f"{y:04d}-{m:02d}")
+        m -= 1
+        if m == 0:
+            m = 12
+            y -= 1
+    keys.reverse()
     return [
-        {"month": m, "pl": v["pl"], "trade_count": v["trade_count"]}
-        for m, v in sorted(buckets.items())
+        {"month": k, "pl": buckets[k]["pl"], "trade_count": buckets[k]["trade_count"]}
+        for k in keys
     ]
 
 

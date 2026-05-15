@@ -103,3 +103,39 @@ def test_trading_stats_ticker_filter_still_works(db_session):
     assert s_aapl["wins"] == 1 and s_aapl["losses"] == 0
     s_nvda = trading_stats(db_session, ticker="NVDA")
     assert s_nvda["wins"] == 0 and s_nvda["losses"] == 1
+
+
+def test_monthly_realized_pl_default_returns_all_months_no_fill(db_session):
+    """Default months=None: matches existing behavior used by /holdings."""
+    from marketpulse.holdings.service import monthly_realized_pl
+
+    _trade(db_session, "AAPL", "buy",  10, 100.0, _dt(2026, 1, 1))
+    _trade(db_session, "AAPL", "sell",  5, 120.0, _dt(2026, 3, 15), pl=100.0)
+    _trade(db_session, "AAPL", "sell",  3, 90.0,  _dt(2026, 7, 1),  pl=-30.0)
+
+    rows = monthly_realized_pl(db_session)
+    months = [r["month"] for r in rows]
+    # Only the 2 months with sells; no Feb/Apr/May/Jun padding.
+    assert months == ["2026-03", "2026-07"]
+
+
+def test_monthly_realized_pl_with_months_fills_gaps(db_session):
+    """months=15: trailing 15 calendar months (incl. current), missing → 0."""
+    import datetime as dt
+    from marketpulse.holdings.service import monthly_realized_pl
+
+    _trade(db_session, "AAPL", "buy",  10, 100.0, _dt(2026, 1, 1))
+    _trade(db_session, "AAPL", "sell",  5, 120.0, _dt(2026, 3, 15), pl=100.0)
+
+    rows = monthly_realized_pl(db_session, months=15)
+    assert len(rows) == 15
+    # Sorted ascending; last entry = current month.
+    today = dt.date.today()
+    assert rows[-1]["month"] == f"{today.year:04d}-{today.month:02d}"
+    # Empty months → pl == 0, trade_count == 0
+    march = next(r for r in rows if r["month"] == "2026-03")
+    assert march["pl"] == pytest.approx(100.0)
+    other = [r for r in rows if r["month"] != "2026-03"]
+    for r in other:
+        assert r["pl"] == 0.0
+        assert r["trade_count"] == 0
