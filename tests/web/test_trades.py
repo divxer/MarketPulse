@@ -603,7 +603,7 @@ def test_trades_table_renders_time_with_data_utc(client: TestClient, monkeypatch
 import math
 from datetime import UTC, datetime, date
 
-from marketpulse.db.models import Trade
+from marketpulse.db.models import Dividend, Trade
 
 
 def _seed_trades(db_session, n: int):
@@ -780,3 +780,43 @@ def test_filter_card_active_chip_reflects_event_type(client, monkeypatch):
     r = client.get("/trades?event_type=trade")
     # The "买卖" chip should have mp-chip--active when event_type=trade
     assert "mp-chip--active" in r.text
+
+
+def test_trades_table_10_columns(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    db_session.add(Trade(ticker="AAPL", action="buy", quantity=1, price=100,
+                         fees=0, executed_at=datetime(2026, 5, 1, tzinfo=UTC)))
+    db_session.commit()
+    r = client.get("/trades")
+    # 11 th cells (10 data + 1 actions column header)
+    assert r.text.count("<th") >= 10
+
+
+def test_trades_table_pagination_footer(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    _seed_trades(db_session, 75)
+    r = client.get("/trades?page=2")
+    assert "上一页" in r.text
+    assert "下一页" in r.text
+    assert "mp-btn--navy" in r.text
+
+
+def test_trades_table_dividend_row_chip(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    db_session.add(Dividend(ticker="AAPL", ex_date=date(2026, 5, 1),
+                            amount_per_share=0.25, total_amount=2.5))
+    db_session.commit()
+    r = client.get("/trades")
+    assert "mp-chip--up" in r.text
+    assert "分红" in r.text
+
+
+def test_trades_table_split_row_purple(client, monkeypatch, db_session):
+    from marketpulse.db.models import StockSplit
+    _login(client, monkeypatch)
+    db_session.add(StockSplit(ticker="AAPL", ex_date=date(2026, 5, 1),
+                              ratio=2.0))
+    db_session.commit()
+    r = client.get("/trades")
+    assert "mp-chip--split" in r.text
+    assert "拆股" in r.text

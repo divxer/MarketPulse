@@ -461,13 +461,23 @@ def trades_add(
     for d in db.query(Dividend).all():
         events.append({"kind": "dividend", "when": datetime.combine(d.ex_date, _EOD), "obj": d})
     events.sort(key=lambda e: e["when"], reverse=True)
-    events = events[:200]
+    _add_total = len(events)
+    _add_limit = 50
+    _add_page = 1
+    _add_total_pages = max(1, (_add_total + _add_limit - 1) // _add_limit)
+    events = events[:_add_limit]
 
     return templates.TemplateResponse(
         request,
         "partials/trades_table.html",
         {
             "events": events,
+            "page": _add_page,
+            "limit": _add_limit,
+            "total_count": _add_total,
+            "total_pages": _add_total_pages,
+            "pager_window": list(range(1, min(_add_total_pages, 5) + 1)),
+            "filters_qs": "",
             "filter_ticker": None,
             "filter_event_type": None,
             "realized_pl_total": total_realized_pl(db),
@@ -551,13 +561,23 @@ def trades_update(
     for d in db.query(Dividend).all():
         events.append({"kind": "dividend", "when": datetime.combine(d.ex_date, _EOD), "obj": d})
     events.sort(key=lambda e: e["when"], reverse=True)
-    events = events[:200]
+    _upd_total = len(events)
+    _upd_limit = 50
+    _upd_page = 1
+    _upd_total_pages = max(1, (_upd_total + _upd_limit - 1) // _upd_limit)
+    events = events[:_upd_limit]
 
     return templates.TemplateResponse(
         request,
         "partials/trades_table.html",
         {
             "events": events,
+            "page": _upd_page,
+            "limit": _upd_limit,
+            "total_count": _upd_total,
+            "total_pages": _upd_total_pages,
+            "pager_window": list(range(1, min(_upd_total_pages, 5) + 1)),
+            "filters_qs": "",
             "filter_ticker": None,
             "filter_event_type": None,
             "realized_pl_total": total_realized_pl(db),

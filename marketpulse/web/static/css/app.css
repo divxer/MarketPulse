@@ -641,3 +641,55 @@ hr.mp-hr {
 .mp-trades-add__kind   { display:flex; flex-direction:column; gap:4px; }
 .mp-hr                 { border:0; border-top:1px solid var(--ns-outline-variant); }
 .hidden                { display:none !important; }
+
+/* ════════ Phase 5c: Trades table ════════ */
+#trades-container           { overflow-x: auto; }
+.mp-table--trades           { min-width: 1100px; width: 100%; border-collapse: collapse; }
+.mp-table--trades th        { font:600 10px/1 var(--ns-font-headline);
+                              letter-spacing:0.08em; text-transform:uppercase;
+                              color:var(--ns-on-surface-variant);
+                              padding:10px 12px;
+                              border-bottom:1px solid var(--ns-outline-variant);
+                              white-space:nowrap; text-align:left; }
+.mp-table--trades td        { padding:12px; font-size:13px;
+                              border-bottom:1px solid var(--ns-outline-variant);
+                              vertical-align: middle; }
+.mp-table--trades tbody tr:hover { background: var(--ns-surface-container-low); }
+.mp-table--trades .col-time   { width:140px; color:var(--ns-on-surface-variant); }
+.mp-table--trades .col-ticker { width:90px; }
+.mp-table--trades .col-type   { width:90px; }
+.mp-table--trades .col-qty,
+.mp-table--trades .col-price,
+.mp-table--trades .col-total,
+.mp-table--trades .col-fees,
+.mp-table--trades .col-pl,
+.mp-table--trades .col-plpct  { text-align:right; }
+.mp-table--trades .col-actions{ width:80px; text-align:right; }
+.mp-table--trades .up         { color:var(--mp-up); font-weight:600; }
+.mp-table--trades .down       { color:var(--mp-down); font-weight:600; }
+.mp-table--trades .muted      { color:var(--ns-on-surface-variant); }
+.mp-table--trades tr.split    { background:rgba(141,82,231,0.04); }
+.mp-table--trades tr.dividend { background:rgba(14,138,95,0.04); }
+
+.mp-chip--split             { color:#5e2cb4;
+                              background:rgba(141,82,231,0.12);
+                              border-color:transparent; }
+
+.mp-empty-row               { text-align:center; padding:32px;
+                              color:var(--ns-on-surface-variant); }
+
+.mp-ticker-link             { color:var(--ns-navy); font-weight:700;
+                              text-decoration:none;
+                              font-family:var(--ns-font-headline); }
+.mp-icon-btn                { background:transparent; border:0; cursor:pointer;
+                              color:var(--ns-slate-400); padding:4px;
+                              display:inline-flex; align-items:center; }
+.mp-icon-btn:hover          { color:var(--ns-navy); }
+.mp-icon-btn .material-symbols-outlined { font-size:18px; }
+
+.mp-table-footer            { display:flex; justify-content:space-between;
+                              align-items:center; padding:12px 18px;
+                              background:var(--ns-surface-container-low);
+                              border-top:1px solid var(--ns-outline-variant); }
+.mp-table-footer__count     { font-size:12px; color:var(--ns-on-surface-variant); }
+.mp-table-footer__pager     { display:flex; gap:4px; }

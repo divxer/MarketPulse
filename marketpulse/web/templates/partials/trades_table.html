@@ -1,109 +1,136 @@
-<table class="w-full text-sm">
-  <thead class="text-left text-slate-500">
+<table class="mp-table mp-table--trades">
+  <thead>
     <tr>
-      <th class="px-2 py-1">时间</th>
-      <th>代码</th>
-      <th>类型</th>
-      <th class="text-right">详情</th>
-      <th class="text-right">盈亏</th>
-      <th>备注</th>
-      <th></th>
+      <th class="col-time">时间</th>
+      <th class="col-ticker">代码</th>
+      <th class="col-type">类型</th>
+      <th class="col-qty">数量</th>
+      <th class="col-price">价格</th>
+      <th class="col-total">总额</th>
+      <th class="col-fees">手续费</th>
+      <th class="col-pl">已实现盈亏</th>
+      <th class="col-plpct">盈亏 %</th>
+      <th class="col-notes">备注</th>
+      <th class="col-actions"></th>
     </tr>
   </thead>
   <tbody>
     {% for e in events %}
       {% if e.kind == "trade" %}
         {% set t = e.obj %}
-        <tr class="border-t" id="trade-row-{{ t.id }}">
-          <td class="px-2 py-1 text-slate-500 text-xs">
+        <tr id="trade-row-{{ t.id }}">
+          <td class="col-time mono">
             <time data-utc="{{ (t.executed_at or t.created_at).isoformat() }}">{{ (t.executed_at or t.created_at).strftime("%Y-%m-%d %H:%M") }}</time>
           </td>
-          <td><a href="/stock/{{ t.ticker }}" class="font-medium">{{ t.ticker }}</a></td>
-          <td>
-            {% if t.action == "buy" %}
-              <span class="text-blue-600 text-xs">🟦 买入</span>
-            {% else %}
-              <span class="text-orange-600 text-xs">🟧 卖出</span>
-            {% endif %}
+          <td class="col-ticker"><a href="/stock/{{ t.ticker }}" class="mp-ticker-link">{{ t.ticker }}</a></td>
+          <td class="col-type">
+            {% if t.action == "buy" %}<span class="mp-chip mp-chip--periwinkle">买入</span>
+            {% else %}<span class="mp-chip mp-chip--down">卖出</span>{% endif %}
           </td>
-          <td class="text-right">
-            {{ "%g"|format(t.quantity) }} 股 @ ${{ "%.2f"|format(t.price) }}
-            {% if t.fees %}<span class="text-xs text-slate-500">(手续费 ${{ "%.2f"|format(t.fees) }})</span>{% endif %}
+          <td class="col-qty mono tnum">{{ "%g"|format(t.quantity) }}</td>
+          <td class="col-price mono tnum">${{ "%.2f"|format(t.price) }}</td>
+          <td class="col-total mono tnum">${{ "%.2f"|format(t.quantity * t.price) }}</td>
+          <td class="col-fees mono tnum">{{ "$%.2f"|format(t.fees) if t.fees else "—" }}</td>
+          <td class="col-pl mono tnum {% if t.realized_pl is not none and t.realized_pl >= 0 %}up{% elif t.realized_pl is not none %}down{% endif %}">
+            {% if t.realized_pl is not none %}{{ "%+.2f"|format(t.realized_pl) }}{% else %}—{% endif %}
           </td>
-          <td class="text-right {% if t.realized_pl is not none and t.realized_pl >= 0 %}text-green-600{% elif t.realized_pl is not none %}text-red-600{% endif %}">
-            {% if t.realized_pl is not none %}${{ "%+.2f"|format(t.realized_pl) }}{% endif %}
+          <td class="col-plpct mono tnum {% if t.realized_pl is not none and t.realized_pl >= 0 %}up{% elif t.realized_pl is not none %}down{% endif %}">
+            {% if t.realized_pl is not none and t.quantity and t.price %}{{ "%+.2f%%"|format(t.realized_pl / (t.quantity * t.price) * 100) }}{% else %}—{% endif %}
           </td>
-          <td class="text-xs text-slate-500 max-w-xs truncate">{{ t.notes or "" }}</td>
-          <td class="text-right">
-            <button
-              type="button"
-              onclick='loadTradeIntoForm({{ {
-                "id": t.id,
-                "ticker": t.ticker,
-                "action": t.action,
-                "quantity": t.quantity,
-                "price": t.price,
-                "fees": t.fees,
-                "notes": t.notes or "",
-                "executed_at_date": (t.executed_at.strftime("%Y-%m-%d") if t.executed_at else ""),
-                "executed_at_iso": (t.executed_at.isoformat() if t.executed_at else "")
-              } | tojson }})'
-              class="text-blue-600 text-xs hover:underline mr-2">编辑</button>
-            <button
-              hx-delete="/trades/{{ t.id }}"
-              hx-target="#trade-row-{{ t.id }}"
-              hx-swap="outerHTML"
-              hx-confirm="删除这笔交易?会自动重算该代码的持仓和已实现盈亏。"
-              class="text-red-600 text-xs hover:underline">删除</button>
+          <td class="col-notes muted">{{ t.notes or "" }}</td>
+          <td class="col-actions">
+            <button class="mp-icon-btn" type="button"
+                    onclick='loadTradeIntoForm({{ {
+                      "id": t.id, "ticker": t.ticker, "action": t.action,
+                      "quantity": t.quantity, "price": t.price, "fees": t.fees,
+                      "notes": t.notes or "",
+                      "executed_at_date": (t.executed_at.strftime("%Y-%m-%d") if t.executed_at else ""),
+                      "executed_at_iso": (t.executed_at.isoformat() if t.executed_at else "")
+                    } | tojson }})'>
+              <span class="material-symbols-outlined">edit</span>
+            </button>
+            <button class="mp-icon-btn"
+                    hx-delete="/trades/{{ t.id }}?{{ filters_qs }}&page={{ page }}&limit={{ limit }}"
+                    hx-target="#trades-container" hx-swap="innerHTML"
+                    hx-confirm="删除这笔交易?会自动重算该代码的持仓和已实现盈亏。">
+              <span class="material-symbols-outlined">delete_outline</span>
+            </button>
           </td>
         </tr>
       {% elif e.kind == "split" %}
         {% set s = e.obj %}
-        <tr class="border-t bg-purple-50" id="split-row-{{ s.id }}">
-          <td class="px-2 py-1 text-slate-500 text-xs">{{ s.ex_date.strftime("%Y-%m-%d") }}</td>
-          <td><a href="/stock/{{ s.ticker }}" class="font-medium">{{ s.ticker }}</a></td>
-          <td><span class="text-purple-700 text-xs">🟪 拆股</span></td>
-          <td class="text-right">
-            1 → {{ "%g"|format(s.ratio) }} (比例 {{ "%g"|format(s.ratio) }})
-            <span class="text-xs text-slate-400">[{{ s.source }}]</span>
+        <tr class="split" id="split-row-{{ s.id }}">
+          <td class="col-time mono">{{ s.ex_date.strftime("%Y-%m-%d") }}</td>
+          <td class="col-ticker"><a href="/stock/{{ s.ticker }}" class="mp-ticker-link">{{ s.ticker }}</a></td>
+          <td class="col-type"><span class="mp-chip mp-chip--split">拆股</span></td>
+          <td colspan="6" class="muted">
+            1 → <span class="mono" style="color:var(--ns-navy); font-weight:600;">{{ "%g"|format(s.ratio) }}</span>
+            自动重算 {{ s.ticker }} 持仓
+            <span class="muted">[{{ s.source }}]</span>
+            {% if s.notes %} · {{ s.notes }}{% endif %}
           </td>
-          <td class="text-right text-slate-400">—</td>
-          <td class="text-xs text-slate-500 max-w-xs truncate">{{ s.notes or "" }}</td>
-          <td class="text-right">
-            <button
-              hx-delete="/splits/{{ s.id }}"
-              hx-target="#split-row-{{ s.id }}"
-              hx-swap="outerHTML"
-              hx-confirm="删除这条拆股记录?会自动重算该代码的持仓。"
-              class="text-red-600 text-xs hover:underline">删除</button>
+          <td class="col-notes"></td>
+          <td class="col-actions">
+            <button class="mp-icon-btn"
+                    hx-delete="/splits/{{ s.id }}?{{ filters_qs }}&page={{ page }}&limit={{ limit }}"
+                    hx-target="#trades-container" hx-swap="innerHTML"
+                    hx-confirm="删除这条拆股记录?会自动重算该代码的持仓。">
+              <span class="material-symbols-outlined">delete_outline</span>
+            </button>
           </td>
         </tr>
       {% elif e.kind == "dividend" %}
         {% set d = e.obj %}
-        <tr class="border-t bg-emerald-50" id="dividend-row-{{ d.id }}">
-          <td class="px-2 py-1 text-slate-500 text-xs">{{ d.ex_date.strftime("%Y-%m-%d") }}</td>
-          <td><a href="/stock/{{ d.ticker }}" class="font-medium">{{ d.ticker }}</a></td>
-          <td><span class="text-emerald-700 text-xs">💰 分红</span></td>
-          <td class="text-right">
-            ${{ "%.4f"|format(d.amount_per_share) }}/股 总 ${{ "%.2f"|format(d.total_amount) }}
-          </td>
-          <td class="text-right text-slate-400">—</td>
-          <td class="text-xs text-slate-500 max-w-xs truncate">{{ d.notes or "" }}</td>
-          <td class="text-right">
-            <button
-              hx-delete="/dividends/{{ d.id }}"
-              hx-target="#dividend-row-{{ d.id }}"
-              hx-swap="outerHTML"
-              hx-confirm="删除这条分红记录?"
-              class="text-red-600 text-xs hover:underline">删除</button>
+        <tr class="dividend" id="dividend-row-{{ d.id }}">
+          <td class="col-time mono">{{ d.ex_date.strftime("%Y-%m-%d") }}</td>
+          <td class="col-ticker"><a href="/stock/{{ d.ticker }}" class="mp-ticker-link">{{ d.ticker }}</a></td>
+          <td class="col-type"><span class="mp-chip mp-chip--up">分红</span></td>
+          <td class="col-qty muted">—</td>
+          <td class="col-price mono tnum">${{ "%.4f"|format(d.amount_per_share) }}/股</td>
+          <td class="col-total mono tnum up" style="font-weight:600;">+${{ "%.2f"|format(d.total_amount) }}</td>
+          <td class="col-fees muted">—</td>
+          <td class="col-pl mono tnum up" style="font-weight:600;">+${{ "%.2f"|format(d.total_amount) }}</td>
+          <td class="col-plpct muted">—</td>
+          <td class="col-notes muted">{{ d.notes or "" }}</td>
+          <td class="col-actions">
+            <button class="mp-icon-btn"
+                    hx-delete="/dividends/{{ d.id }}?{{ filters_qs }}&page={{ page }}&limit={{ limit }}"
+                    hx-target="#trades-container" hx-swap="innerHTML"
+                    hx-confirm="删除这条分红记录?">
+              <span class="material-symbols-outlined">delete_outline</span>
+            </button>
           </td>
         </tr>
       {% endif %}
     {% endfor %}
     {% if not events %}
-    <tr><td colspan="7" class="px-4 py-8 text-center text-slate-500">
-      暂无记录。在上方表单中添加第一条。
-    </td></tr>
+      <tr><td colspan="11" class="mp-empty-row">暂无记录。在上方表单中添加第一条。</td></tr>
     {% endif %}
   </tbody>
 </table>
+
+{% if total_count > 0 %}
+<div class="mp-table-footer">
+  <span class="mp-table-footer__count">
+    显示 {{ (page-1)*limit + 1 }} – {{ (page-1)*limit + events|length }} · 总 {{ total_count }} 条
+  </span>
+  <div class="mp-table-footer__pager">
+    {% set base_qs = filters_qs %}
+    {% if page > 1 %}
+      <a class="mp-btn mp-btn--ghost mp-btn--sm"
+         hx-get="/trades?{{ base_qs }}&page={{ page-1 }}&limit={{ limit }}"
+         hx-target="#trades-container" hx-swap="innerHTML" hx-push-url="true">‹ 上一页</a>
+    {% endif %}
+    {% for p in pager_window %}
+      <a class="mp-btn mp-btn--{% if p == page %}navy{% else %}ghost{% endif %} mp-btn--sm"
+         hx-get="/trades?{{ base_qs }}&page={{ p }}&limit={{ limit }}"
+         hx-target="#trades-container" hx-swap="innerHTML" hx-push-url="true">{{ p }}</a>
+    {% endfor %}
+    {% if page < total_pages %}
+      <a class="mp-btn mp-btn--ghost mp-btn--sm"
+         hx-get="/trades?{{ base_qs }}&page={{ page+1 }}&limit={{ limit }}"
+         hx-target="#trades-container" hx-swap="innerHTML" hx-push-url="true">下一页 ›</a>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
