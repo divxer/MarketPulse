@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>MarketPulse · NineScrolls Redesign</title>
+<link rel="icon" href="assets/logo.svg" />
+<link rel="stylesheet" href="ns-tokens.css" />
+<link rel="stylesheet" href="app.css" />
+<style>
+  /* design-canvas overrides */
+  body { margin: 0; background: #d9d6e8; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="chart-data.jsx"></script>
+<script type="text/babel" src="chart-svg.jsx"></script>
+<script type="text/babel" src="shell.jsx"></script>
+<script type="text/babel" src="variant-a.jsx"></script>
+<script type="text/babel" src="variant-b.jsx"></script>
+<script type="text/babel" src="variant-c.jsx"></script>
+<script type="text/babel" src="page-trades.jsx"></script>
+<script type="text/babel" src="page-holdings.jsx"></script>
+<script type="text/babel" src="page-recap.jsx"></script>
+
+<script type="text/babel" data-presets="env,react">
+const { DesignCanvas, DCSection, DCArtboard } = window;
+
+function App() {
+  return (
+    <DesignCanvas title="MarketPulse · NineScrolls redesign" subtitle="From a 1024-px cramped column to a wide-screen trading surface — three stock-detail directions plus the supporting pages, applying NineScrolls' precision-editorial system.">
+      <DCSection id="stock" title="股票详情 · /stock/{ticker}" subtitle="Three directions for the cornerstone screen — K-line + RSI + MACD + holding + AI + news. Same data on all three so you can compare layout decisions directly.">
+        <DCArtboard id="va" label="A · TradingView style" width={2560} height={2050}>
+          <VariantA />
+        </DCArtboard>
+        <DCArtboard id="vb" label="B · Bloomberg terminal · dense dark" width={2560} height={1700}>
+          <VariantB />
+        </DCArtboard>
+        <DCArtboard id="vc" label="C · Modern minimal · floating panels" width={2560} height={2350}>
+          <VariantC />
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="pages" title="Supporting pages" subtitle="The other three priority surfaces, each redesigned to take the full 2560 px and breathe.">
+        <DCArtboard id="pg-trades" label="/trades — transactions ledger" width={2560} height={1700}>
+          <PageTrades />
+        </DCArtboard>
+        <DCArtboard id="pg-holdings" label="/holdings — portfolio overview" width={2560} height={2150}>
+          <PageHoldings />
+        </DCArtboard>
+        <DCArtboard id="pg-recap" label="/recap — AI commentary" width={2560} height={2300}>
+          <PageRecap />
+        </DCArtboard>
+      </DCSection>
+    </DesignCanvas>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
