@@ -793,12 +793,13 @@ def test_trades_table_10_columns(client, monkeypatch, db_session):
 
 
 def test_trades_table_pagination_footer(client, monkeypatch, db_session):
+    """Page 2 of 3+ pages: both prev and next links visible."""
     _login(client, monkeypatch)
-    _seed_trades(db_session, 75)
+    _seed_trades(db_session, 130)  # 3 pages at limit=50
     r = client.get("/trades?page=2")
     assert "上一页" in r.text
     assert "下一页" in r.text
-    assert "mp-btn--navy" in r.text
+    assert "mp-btn--navy" in r.text  # current page = navy
 
 
 def test_trades_table_dividend_row_chip(client, monkeypatch, db_session):
