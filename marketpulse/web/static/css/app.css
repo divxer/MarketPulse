@@ -693,3 +693,47 @@ hr.mp-hr {
                               border-top:1px solid var(--ns-outline-variant); }
 .mp-table-footer__count     { font-size:12px; color:var(--ns-on-surface-variant); }
 .mp-table-footer__pager     { display:flex; gap:4px; }
+
+/* ════════ Phase 5c: Drop zone ════════ */
+.mp-dropzone                { display:block; position:relative;
+                              border:1px dashed var(--ns-outline-variant);
+                              border-radius:2px; padding:24px 16px;
+                              text-align:center;
+                              background:var(--ns-surface-container-low);
+                              cursor:pointer;
+                              transition: background 200ms, border-color 200ms; }
+.mp-dropzone.is-dragover    { background:var(--ns-primary-container);
+                              border-color:var(--ns-primary); }
+.mp-dropzone__file          { position:absolute; opacity:0; pointer-events:none;
+                              width:1px; height:1px; }
+.mp-dropzone__icon          { font-size:36px; color:var(--ns-primary); }
+.mp-dropzone__title         { font-size:14px; font-weight:600;
+                              color:var(--ns-navy); margin-top:6px; }
+.mp-dropzone__sub           { font-size:11.5px;
+                              color:var(--ns-on-surface-variant); margin-top:4px; }
+.mp-link                    { color:var(--ns-primary); text-decoration:underline;
+                              cursor:pointer; }
+
+/* ════════ Phase 5c: Monthly bar chart ════════ */
+.mp-monthly-bars            { display:flex; gap:4px; align-items:flex-end; height:140px; }
+.mp-monthly-bar             { flex:1; display:flex; flex-direction:column;
+                              justify-content:flex-end; height:100%; }
+.mp-monthly-bar__bar        { border-radius:2px 2px 0 0;
+                              min-height:2px; margin-bottom:4px; }
+.mp-monthly-bar__label      { font:9px/1 var(--ns-font-mono);
+                              color:var(--ns-slate-400);
+                              text-align:center; letter-spacing:0.02em; }
+.mp-monthly-footer          { display:flex; justify-content:space-between;
+                              font-size:11px;
+                              color:var(--ns-on-surface-variant);
+                              margin-top:12px; }
+
+/* ════════ Phase 5c: By-ticker leaderboard ════════ */
+.mp-ticker-list             { list-style:none; margin:0; padding:10px 16px 18px; }
+.mp-ticker-row              { display:grid;
+                              grid-template-columns: 50px 1fr 90px 64px;
+                              gap:10px; align-items:center; padding:7px 0; }
+.mp-ticker-row__symbol      { font-weight:700; font-size:13px; color:var(--ns-navy); }
+.mp-ticker-row__bar         { height:8px; background:var(--ns-surface-container);
+                              border-radius:2px; position:relative; overflow:hidden; }
+.mp-ticker-row__bar > div   { position:absolute; left:0; top:0; bottom:0; }

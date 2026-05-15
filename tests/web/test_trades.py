@@ -821,3 +821,39 @@ def test_trades_table_split_row_purple(client, monkeypatch, db_session):
     r = client.get("/trades")
     assert "mp-chip--split" in r.text
     assert "拆股" in r.text
+
+
+def test_monthly_pl_card_15_bars(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/trades")
+    assert r.text.count("mp-monthly-bar__bar") == 15
+    assert "月度已实现盈亏" in r.text
+
+
+def test_dropzone_card_renders(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/trades")
+    assert 'action="/trades/import"' in r.text
+    assert 'enctype="multipart/form-data"' in r.text
+    assert "拖入" in r.text
+    assert "mp-dropzone" in r.text
+
+
+def test_by_ticker_card_empty_state(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/trades")
+    assert "按代码" in r.text
+
+
+def test_by_ticker_card_renders_data(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    db_session.add(Trade(ticker="AAPL", action="buy", quantity=10, price=100,
+                         fees=0, executed_at=datetime(2026, 1, 1, tzinfo=UTC),
+                         realized_pl=None))
+    db_session.add(Trade(ticker="AAPL", action="sell", quantity=10, price=120,
+                         fees=0, executed_at=datetime(2026, 6, 1, tzinfo=UTC),
+                         realized_pl=200.0))
+    db_session.commit()
+    r = client.get("/trades")
+    assert r.text.count("AAPL") >= 1
+    assert "mp-ticker-row" in r.text

@@ -1,0 +1,29 @@
+<section class="mp-card">
+  <div class="mp-card__head">
+    <span class="mp-card__title">
+      <span class="material-symbols-outlined">leaderboard</span>按代码 · 已实现盈亏
+    </span>
+    <span class="mp-card__sub">all-time 累计</span>
+  </div>
+  {% if by_ticker %}
+    <ul class="mp-ticker-list">
+      {% set max_abs_list = by_ticker | map(attribute='realized_pl') | map('abs') | list %}
+      {% set max_v = max_abs_list | max if max_abs_list else 0 %}
+      {% for r in by_ticker %}
+        <li class="mp-ticker-row">
+          <span class="grotesk mp-ticker-row__symbol">{{ r.ticker }}</span>
+          <div class="mp-ticker-row__bar">
+            <div style="width: {{ (r.realized_pl|abs / max_v * 100) if max_v else 0 }}%;
+                        background: {% if r.realized_pl >= 0 %}var(--mp-up){% else %}var(--mp-down){% endif %};"></div>
+          </div>
+          <span class="mono tnum {% if r.realized_pl >= 0 %}up{% else %}down{% endif %}"
+                style="text-align:right;">{{ "{:+,.0f}".format(r.realized_pl) }}</span>
+          <span class="mono tnum {% if r.realized_pl >= 0 %}up{% else %}down{% endif %}"
+                style="text-align:right;">{{ "{:+.1f}%".format(r.pct) }}</span>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <div class="mp-card__body mp-empty-row">暂无已实现盈亏数据</div>
+  {% endif %}
+</section>
