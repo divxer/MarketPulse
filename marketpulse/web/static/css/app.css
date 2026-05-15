@@ -782,3 +782,9 @@ hr.mp-hr {
                               color:var(--ns-navy); margin-top:16px; }
 .mp-prose p              { margin:8px 0; }
 .mp-prose ul             { padding-left:24px; }
+
+/* ════════ Phase 5d: Donut ════════ */
+.mp-donut                { display:flex; align-items:center; gap:20px; }
+.mp-donut__legend        { display:flex; flex-direction:column; gap:6px; flex:1; }
+.mp-donut__legend-row    { display:flex; align-items:center; gap:8px; font-size:12px; }
+.mp-donut__legend-swatch { width:10px; height:10px; border-radius:2px; }

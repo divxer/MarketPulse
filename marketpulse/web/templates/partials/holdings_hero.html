@@ -1,0 +1,42 @@
+<section class="mp-holdings-hero">
+  <div class="mp-holdings-hero__main">
+    <span class="mp-eyebrow mp-eyebrow--primary">投资组合</span>
+    <h1 class="grotesk mp-holdings-hero__title">Holdings · Portfolio Overview</h1>
+    <span class="mp-rule"></span>
+    <div class="mp-holdings-hero__stats">
+      <div>
+        <span class="mp-eyebrow">总市值 · USD</span>
+        <div class="mp-holdings-hero__mv-value mono tnum">
+          ${{ "{:,.0f}".format(totals.market_value or 0) }}
+        </div>
+      </div>
+      <div>
+        <span class="mp-eyebrow">未实现盈亏</span>
+        {% set pl = (totals.market_value or 0) - (totals.cost or 0) %}
+        {% set pl_pct = (pl / totals.cost * 100) if totals.cost else 0 %}
+        <div class="mp-holdings-hero__pl-value grotesk tnum {% if pl >= 0 %}up{% else %}down{% endif %}">
+          {{ "{:+,.0f}".format(pl) }}
+        </div>
+        <div class="mono tnum {% if pl >= 0 %}up{% else %}down{% endif %}"
+             style="font-size:14px; font-weight:600; margin-top:2px;">
+          {{ "{:+.2f}%".format(pl_pct) }}
+        </div>
+      </div>
+      <div>
+        <span class="mp-eyebrow">今日</span>
+        {% set tc = kpi.today_change %}
+        <div class="grotesk tnum {% if tc.dollars >= 0 %}up{% else %}down{% endif %}"
+             style="font-size:32px; font-weight:700; letter-spacing:-0.02em; line-height:1.05;">
+          {{ "{:+,.0f}".format(tc.dollars) }}
+        </div>
+        <div class="mono tnum {% if tc.dollars >= 0 %}up{% else %}down{% endif %}"
+             style="font-size:14px; font-weight:600; margin-top:2px;">
+          {{ "{:+.2f}%".format(tc.pct) }} · {{ tc.up_count }} 涨 {{ tc.down_count }} 跌
+        </div>
+      </div>
+    </div>
+  </div>
+  <aside class="mp-holdings-hero__donut">
+    {% include "partials/holdings_donut.html" %}
+  </aside>
+</section>

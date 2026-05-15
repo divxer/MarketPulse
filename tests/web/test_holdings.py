@@ -289,3 +289,40 @@ def test_holdings_page_uses_2400_max_width(client, monkeypatch):
     _login(client, monkeypatch)
     r = client.get("/holdings")
     assert "max-w-[2400px]" in r.text
+
+
+def test_holdings_hero_renders_three_big_numbers(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/holdings")
+    assert "总市值" in r.text
+    assert "未实现盈亏" in r.text
+    assert "今日" in r.text
+
+
+def test_holdings_donut_renders_svg(client, monkeypatch, db_session):
+    from datetime import UTC, datetime
+    from unittest.mock import MagicMock
+
+    from marketpulse.data.types import Quote
+    from marketpulse.db.models import Holding
+
+    _login(client, monkeypatch)
+
+    # Override DataService to return valid quote so allocation isn't empty
+    from marketpulse.web.deps import get_data_service
+    fake = MagicMock()
+    fake.get_quote.return_value = Quote(
+        ticker="AAPL", price=150.0, change_pct=1.0, volume=1000,
+        avg_volume_20d=2000, fetched_at=datetime.now(UTC), stale=False,
+    )
+    fake.get_history.return_value = []
+    client.app.dependency_overrides[get_data_service] = lambda: fake
+
+    db_session.add(Holding(ticker="AAPL", quantity=10.0, avg_cost=100.0,
+                           sort_order=0))
+    db_session.commit()
+    r = client.get("/holdings")
+    assert "<svg" in r.text
+    assert 'viewBox="0 0 100 100"' in r.text
+
+    client.app.dependency_overrides.clear()
