@@ -73,6 +73,34 @@ DB migration：`Holding.sector TEXT NULL`。
 
 已存在，扩展 context dict（无新 query 参数）。
 
+**Route 实现增量** (插入到现有 `holdings_page` 中)：
+
+```python
+from datetime import date as _date
+from marketpulse.holdings.sector import backfill_holding_sectors
+from marketpulse.holdings.service import (
+    today_portfolio_change, contributors_ranked, sector_breakdown,
+)
+
+# Backfill any NULL sectors (bounded — see §sector module for cap).
+backfill_holding_sectors(db)
+
+# Enrich (now includes sector / today_change_pct / sparkline per row).
+rows = enrich_holdings(holdings, data)
+
+# Phase 5d KPI block
+today_year_start = _date(_date.today().year, 1, 1)
+this_month_div = monthly_dividends_list[-1]["amount"] if monthly_dividends_list else 0.0
+kpi = {
+    "today_change": today_portfolio_change(rows),
+    "ytd_realized": total_realized_pl(db, from_date=today_year_start),
+    "this_month_dividends": this_month_div,
+}
+
+contributors = contributors_ranked(rows, top_n=5)
+sectors = sector_breakdown(rows)
+```
+
 **返回 context：**
 
 ```python
@@ -144,9 +172,21 @@ def holdings_risk_analysis_get(
     _: None = Depends(require_auth),
 ):
     """HTMX endpoint: returns the AI risk analysis card as outerHTML
-    replacement. Called by hx-trigger='load' on the placeholder."""
-    # Existing AI analysis logic (call Anthropic with portfolio context)
-    # Render `partials/holdings_risk_card.html` with markdown → HTML
+    replacement. Called by hx-trigger='load' on the placeholder.
+
+    IMPORTANT:
+    - Render `partials/holdings_risk_card.html` (NEW path, this phase).
+      The legacy POST handler renders `partials/risk_analysis.html` —
+      that template is for the legacy POST flow; do not reuse here.
+    - Pass `analysis_markdown=...` to the template (NOT `markdown=` —
+      the legacy template used `markdown` but the new partial uses
+      `analysis_markdown` to avoid filter-name collision since the
+      Jinja filter is also named `markdown`).
+    - On Anthropic error: render the same template with
+      `analysis_markdown="**AI 服务暂时不可用,请稍后重试。**"`
+      and return HTTP 200 (do not 4xx/5xx — HTMX will then leave
+      the placeholder in place).
+    """
 ```
 
 **错误处理：** Anthropic 调用失败 → 返回友好 fallback card（"AI 服务暂时不可用,请稍后重试" + 重试按钮），HTTP 200（不让 HTMX 因为 4xx/5xx 留空）。
@@ -194,14 +234,23 @@ def get_sector(ticker: str) -> str | None:
     return sector
 
 
-def backfill_holding_sectors(session: Session) -> int:
-    """Fill Holding.sector for rows where it's NULL. Idempotent.
+def backfill_holding_sectors(session: Session, *, max_per_call: int = 3) -> int:
+    """Fill Holding.sector for rows where it's NULL. Idempotent and BOUNDED.
 
-    Returns count of rows newly filled. Safe to call on every
-    /holdings render — only touches NULL rows.
+    yfinance .info is ~1-3s per ticker. To avoid blocking the /holdings
+    render path for tens of seconds on first load, we cap to `max_per_call`
+    per request. Subsequent renders pick up the next batch. After
+    ceil(N/3) page visits all rows are filled.
+
+    Returns count of rows newly filled.
     """
     from marketpulse.db.models import Holding
-    holdings = session.query(Holding).filter(Holding.sector.is_(None)).all()
+    holdings = (
+        session.query(Holding)
+        .filter(Holding.sector.is_(None))
+        .limit(max_per_call)
+        .all()
+    )
     n = 0
     for h in holdings:
         sec = get_sector(h.ticker)
@@ -215,43 +264,22 @@ def backfill_holding_sectors(session: Session) -> int:
 
 ### `marketpulse/holdings/service.py` 扩展
 
-#### `enrich_holdings()` 加 3 字段
+#### `enrich_holdings()` 扩展 3 字段
+
+**重要：** 不要重写整个函数。现有 `enrich_holdings` (service.py:24-54) 已处理：
+- quote 拉取失败时 `market_value=None` / `stale=True` 容忍模式
+- 自动填 `id` / `notes` / `stale` 字段
+- 不要丢这些既有行为
+
+实施者应**在 row dict 构造完毕后追加 3 个新字段**，保持原 `try/except` 容错逻辑：
 
 ```python
-def enrich_holdings(
-    holdings: list[Holding],
-    data: DataService,
-) -> list[dict[str, Any]]:
-    """... existing logic ...
+# 在现有 enrich_holdings 的 row 字典构造尾部添加:
+row["sector"] = h.sector or "未分类"
+row["today_change_pct"] = getattr(quote, "change_pct", None) if quote else None
+row["sparkline"] = _fetch_sparkline(data, h.ticker)
 
-    Phase 5d additions to each row:
-    - sector: h.sector or "未分类"
-    - today_change_pct: quote.change_pct or None
-    - sparkline: list[float] last 30 daily closes, [] on fetch fail
-    """
-    rows = []
-    for h in holdings:
-        quote = data.get_quote(h.ticker)
-        market_value = h.quantity * quote.price
-        cost_basis = h.quantity * h.avg_cost
-        row = {
-            "ticker": h.ticker,
-            "name": getattr(quote, "name", None) or h.ticker,
-            "sector": h.sector or "未分类",
-            "quantity": h.quantity,
-            "avg_cost": h.avg_cost,
-            "current_price": quote.price,
-            "today_change_pct": getattr(quote, "change_pct", None),
-            "market_value": market_value,
-            "cost_basis": cost_basis,
-            "pl_dollars": market_value - cost_basis,
-            "pl_pct": ((market_value - cost_basis) / cost_basis * 100) if cost_basis else 0.0,
-            "sparkline": _fetch_sparkline(data, h.ticker),
-        }
-        rows.append(row)
-    return rows
-
-
+# 新增辅助函数 (写在 service.py 模块级):
 def _fetch_sparkline(data: DataService, ticker: str) -> list[float]:
     """Return last 30 daily closes; [] on fetch failure."""
     try:
@@ -260,6 +288,10 @@ def _fetch_sparkline(data: DataService, ticker: str) -> list[float]:
     except Exception:
         return []
 ```
+
+**Quote.name 说明**：`Quote` dataclass (`marketpulse/data/types.py`) 当前**没有** `name` 字段——仅 `ticker / price / change_pct / volume / avg_volume_20d / fetched_at / stale`。设计稿表格"名称"列暂用 `r.ticker` 作为占位即可；后续可扩展 Quote dataclass 或单独存 ticker → name 映射 (out of scope of 5d)。
+
+**`data.get_history` 接口**：已存在于 `marketpulse/data/__init__.py` 的 `DataService` (yfinance + Tencent hybrid)，签名 `get_history(ticker, period="30d") -> list[Bar]`，Bar 有 `.close` 属性。
 
 #### 新增 `today_portfolio_change`
 
@@ -302,10 +334,12 @@ def contributors_ranked(
     *,
     top_n: int = 5,
 ) -> list[dict[str, Any]]:
-    """Top N rows by |pl_dollars| (positive + negative contributors).
+    """Top N rows by |pl_dollars| — the biggest movers in absolute terms.
 
-    Reuses sort_by_pl_impact ordering (already places top gains and
-    top losses at the top), then slices first top_n.
+    NOTE: 'biggest by |pl|' does NOT guarantee a mix of positive and
+    negative. If a portfolio has 5 large winners and 1 small loser,
+    all 5 returned rows will be winners — that's correct behavior
+    (the question is 'who moved the needle most').
     """
     ranked = sort_by_pl_impact(rows)
     return ranked[:top_n]
@@ -344,25 +378,32 @@ def sector_breakdown(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 ## DB Migration
 
+实施者应运行 `uv run alembic revision -m "add holdings sector"` 自动生成空 revision 文件，然后填写 upgrade/downgrade 体。预期内容：
+
 ```python
-# alembic/versions/2026_05_15_add_holding_sector.py
+# alembic/versions/<auto_generated>_add_holdings_sector.py
 """add Holding.sector column
 
 Revision ID: <auto>
-Revises: <previous>
+Revises: 0df4e23abe4e
 Create Date: 2026-05-15
 """
 from alembic import op
 import sqlalchemy as sa
 
+revision = "<auto>"
+down_revision = "0df4e23abe4e"  # evaluation_event_and_outcome_tables
+
 
 def upgrade() -> None:
-    op.add_column("holding", sa.Column("sector", sa.Text(), nullable=True))
+    op.add_column("holdings", sa.Column("sector", sa.Text(), nullable=True))
 
 
 def downgrade() -> None:
-    op.drop_column("holding", "sector")
+    op.drop_column("holdings", "sector")
 ```
+
+注意：表名是 `holdings` (复数,见 `marketpulse/db/models.py:67`)，不是 `holding`。
 
 `Holding.sector` 默认 NULL — `backfill_holding_sectors` 在 `/holdings` 渲染时填。
 
@@ -488,7 +529,7 @@ marketpulse/web/templates/
   <svg viewBox="0 0 100 100" width="160" height="160">
     {% set ns = namespace(offset=0) %}
     {% for slice in allocation[:8] %}
-      {% set pct = (slice.value / total * 100) if total else 0 %}
+      {% set pct = (slice.market_value / total * 100) if total else 0 %}
       {% set dasharray = pct * 2.513 %}
       <circle cx="50" cy="50" r="40" fill="none"
               stroke="{{ palette[loop.index0 % palette|length] }}" stroke-width="14"
@@ -504,7 +545,7 @@ marketpulse/web/templates/
       <div class="mp-donut__legend-row">
         <span class="mp-donut__legend-swatch" style="background:{{ palette[loop.index0 % palette|length] }};"></span>
         <span class="grotesk" style="font-weight:700; font-size:12px; color:var(--ns-navy); flex:1;">{{ slice.ticker }}</span>
-        <span class="mono tnum muted" style="font-size:12px;">{{ "%.1f%%"|format((slice.value / total * 100) if total else 0) }}</span>
+        <span class="mono tnum muted" style="font-size:12px;">{{ "%.1f%%"|format((slice.market_value / total * 100) if total else 0) }}</span>
       </div>
     {% endfor %}
   </div>
@@ -520,7 +561,7 @@ marketpulse/web/templates/
 | 市值 | `{:,.0f}\|format(totals.market_value)` | 实时 | `account_balance_wallet` | navy |
 | 未实现盈亏 | `{:+,.0f}\|format(pl)` | `{:+.2f}% \| pl_pct` | `trending_up` | up/down |
 | 已实现盈亏 · YTD | `{:+,.0f}\|format(kpi.ytd_realized)` | `胜率 {:.1f}% \| trade_stats.win_rate_pct` (or — when None) | `payments` | up/down |
-| 累计分红 | `{:+,.0f}\|format(total_dividends)` | `含本月 ${:.2f}\|format(this_month_div)` 其中 `this_month_div` 在 route 中由 `monthly_dividends(db)` 末项的 `amount` 字段取得 (若 list 为空则 0)；route 把它放进 `kpi.this_month_dividends` | `redeem` | up |
+| 累计分红 | `{:+,.0f}\|format(total_dividends)` | `含本月 ${:.2f}\|format(kpi.this_month_dividends)` — route 已计算好放在 `kpi.this_month_dividends` (来自 `monthly_dividends(db)` 末项的 `amount`,空 list → 0.0) | `redeem` | up |
 
 格式：用 `"{:+,.0f}".format(...)` 新式格式化（5c 已确立该模式）。
 
@@ -583,7 +624,9 @@ marketpulse/web/templates/
         </td>
         <td class="col-actions">
           <button class="mp-icon-btn"
-                  hx-delete="/holdings/{{ r.ticker }}"
+                  hx-delete="/holdings/{{ r.id }}"
+                  hx-target="#holding-row-{{ r.ticker }}"
+                  hx-swap="outerHTML"
                   hx-confirm="删除 {{ r.ticker }} 的所有交易和持仓?">
             <span class="material-symbols-outlined">delete_outline</span>
           </button>
@@ -623,15 +666,15 @@ marketpulse/web/templates/
     </span>
   </div>
   <ul class="mp-allocation-list">
-    {% set max_val = allocation | map(attribute='value') | max if allocation else 0 %}
+    {% set max_val = allocation | map(attribute='market_value') | max if allocation else 0 %}
     {% for r in allocation %}
       <li class="mp-allocation-row">
         <span class="grotesk" style="font-weight:700; font-size:13px; color:var(--ns-navy); width:60px;">{{ r.ticker }}</span>
         <div class="mp-allocation-bar">
-          <div style="width: {{ (r.value / max_val * 100) if max_val else 0 }}%; background:var(--ns-navy);"></div>
+          <div style="width: {{ (r.market_value / max_val * 100) if max_val else 0 }}%; background:var(--ns-navy);"></div>
         </div>
         <span class="mono tnum muted" style="font-size:11.5px; margin-left:auto;">
-          {{ "%.1f%%"|format(r.pct) }} · ${{ "{:,.0f}".format(r.value) }}
+          {{ "%.1f%%"|format(r.pct) }} · ${{ "{:,.0f}".format(r.market_value) }}
         </span>
       </li>
     {% endfor %}
@@ -767,7 +810,7 @@ marketpulse/web/templates/
 |------|------|------|
 | AI 风险分析 | `hx-get="/holdings/risk-analysis"` `hx-trigger="load"` `hx-swap="outerHTML"` | `#holdings-risk-card` |
 | 删除分红 | 现有 (Phase 5c 已让 dividends_delete 返回 trades_table partial) | n/a 跳 /trades |
-| 删除 holding | 现有 `hx-delete="/holdings/{ticker}"` | `holding-row-{ticker}` (outerHTML) |
+| 删除 holding | 现有 `hx-delete="/holdings/{item_id}"` (路由是 int 路径参数,不是 ticker) | `holding-row-{ticker}` (outerHTML) |
 | 导出 CSV | 普通 `<a href="/holdings/export.csv">`，非 HTMX | 下载 |
 
 ## 错误处理
