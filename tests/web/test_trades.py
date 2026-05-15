@@ -1,6 +1,9 @@
+from datetime import UTC, date, datetime
+
 from fastapi.testclient import TestClient
 
 from marketpulse.auth.password import hash_password
+from marketpulse.db.models import Dividend, Trade
 
 
 def _login(client, monkeypatch):
@@ -598,12 +601,6 @@ def test_trades_table_renders_time_with_data_utc(client: TestClient, monkeypatch
     assert "htmx:afterSwap" in body, (
         "trades.html must re-apply local time after HTMX swaps the table"
     )
-
-
-import math
-from datetime import UTC, datetime, date
-
-from marketpulse.db.models import Dividend, Trade
 
 
 def _seed_trades(db_session, n: int):
