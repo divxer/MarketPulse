@@ -477,9 +477,47 @@ marketpulse/web/templates/
           </td>
         </tr>
       {% elif e.kind == "split" %}
-        <!-- split: bg 加 rgba(141,82,231,0.04)，紫色 chip "拆股"，合并 6 列 colspan 显示 "1 → ratio 拆股" -->
+        <tr class="split" id="split-row-{{ e.obj.id }}">
+          <td class="col-time mono">{{ e.obj.ex_date.strftime("%Y-%m-%d") }}</td>
+          <td class="col-ticker"><a href="/stock/{{ e.obj.ticker }}" class="mp-ticker-link">{{ e.obj.ticker }}</a></td>
+          <td class="col-type"><span class="mp-chip mp-chip--split">拆股</span></td>
+          <td colspan="6" class="muted">
+            1 → <span class="mono" style="color: var(--ns-navy); font-weight: 600;">{{ "%g"|format(e.obj.ratio) }}</span>
+            自动重算 {{ e.obj.ticker }} 持仓
+            <span class="muted">[{{ e.obj.source }}]</span>
+            {% if e.obj.notes %}· {{ e.obj.notes }}{% endif %}
+          </td>
+          <td class="col-notes"></td>
+          <td class="col-actions">
+            <button class="mp-icon-btn"
+                    hx-delete="/splits/{{ e.obj.id }}?{{ filters_qs }}&page={{ page }}&limit={{ limit }}"
+                    hx-target="#trades-container" hx-swap="innerHTML"
+                    hx-confirm="删除这条拆股记录?会自动重算该代码的持仓。">
+              <span class="material-symbols-outlined">delete_outline</span>
+            </button>
+          </td>
+        </tr>
       {% elif e.kind == "dividend" %}
-        <!-- dividend: bg 加 rgba(14,138,95,0.04)，绿色 chip "分红" (mp-chip--up)，总额上色 -->
+        <tr class="dividend" id="dividend-row-{{ e.obj.id }}">
+          <td class="col-time mono">{{ e.obj.ex_date.strftime("%Y-%m-%d") }}</td>
+          <td class="col-ticker"><a href="/stock/{{ e.obj.ticker }}" class="mp-ticker-link">{{ e.obj.ticker }}</a></td>
+          <td class="col-type"><span class="mp-chip mp-chip--up">分红</span></td>
+          <td class="col-qty muted">—</td>
+          <td class="col-price mono tnum">${{ "%.4f"|format(e.obj.amount_per_share) }}/股</td>
+          <td class="col-total mono tnum up" style="font-weight: 600;">+${{ "%.2f"|format(e.obj.total_amount) }}</td>
+          <td class="col-fees muted">—</td>
+          <td class="col-pl mono tnum up" style="font-weight: 600;">+${{ "%.2f"|format(e.obj.total_amount) }}</td>
+          <td class="col-plpct muted">—</td>
+          <td class="col-notes">{{ e.obj.notes or "" }}</td>
+          <td class="col-actions">
+            <button class="mp-icon-btn"
+                    hx-delete="/dividends/{{ e.obj.id }}?{{ filters_qs }}&page={{ page }}&limit={{ limit }}"
+                    hx-target="#trades-container" hx-swap="innerHTML"
+                    hx-confirm="删除这条分红记录?">
+              <span class="material-symbols-outlined">delete_outline</span>
+            </button>
+          </td>
+        </tr>
       {% endif %}
     {% endfor %}
     {% if not events %}
@@ -639,6 +677,8 @@ JS：drag-over 加 `.is-dragover`；drop 时把 file 塞进 hidden input，自�
 .mp-trades-add__kind   { display:flex; flex-direction:column; gap:4px; }
 
 /* ════════ Trades table ════════ */
+#trades-container           { overflow-x: auto; }
+.mp-table--trades           { min-width: 1100px; }   /* 10 列在 < 1100 时触发横向滚动 */
 .mp-table--trades th        { font:600 10px/1 var(--ns-font-headline);
                               letter-spacing:0.08em; text-transform:uppercase;
                               color:var(--ns-on-surface-variant); padding:10px 12px;
@@ -662,6 +702,11 @@ JS：drag-over 加 `.is-dragover`；drop 时把 file 塞进 hidden input，自�
 .mp-table--trades .muted     { color:var(--ns-on-surface-variant); }
 .mp-table--trades tr.split   { background:rgba(141,82,231,0.04); }
 .mp-table--trades tr.dividend{ background:rgba(14,138,95,0.04); }
+
+/* split chip (新增,跟 .mp-chip--up/down 系列对齐) */
+.mp-chip--split             { color:#5e2cb4;
+                              background:rgba(141,82,231,0.12);
+                              border-color:transparent; }
 
 .mp-empty-row               { text-align:center; padding:32px; color:var(--ns-on-surface-variant); }
 
@@ -782,6 +827,9 @@ tests/holdings/test_fifo.py                     新
   - test_sell_exceeds_open_quantity_drops       sell 50 但 open 30 → 只配 30，溢出丢弃，不报错
   - test_hold_days_calculation                  买 1/1 卖 6/30 → 180 days
   - test_excludes_splits_and_dividends          只匹配 Trade，splits/dividends 不参与
+  - test_buy_after_sell_is_independent_lot      卖完所有 open lot 之后又买 → 新 lot
+                                                不参与之前的 match;再卖时 FIFO 只
+                                                配对 sell 之后的 buy
 
 tests/holdings/test_aggregations.py             新
   - test_total_realized_pl_with_date_window     from/to 边界 inclusive
@@ -804,7 +852,12 @@ tests/web/test_trades_page.py                   扩展
   - test_pagination_clamps_to_max               ?page=999 不报错
   - test_filter_date_range                      from/to 生效
   - test_filter_q_case_insensitive              ?q=aapl 命中 AAPL
-  - test_legacy_ticker_query_alias              ?ticker=AAPL 等价 ?q=AAPL
+  - test_filter_q_prefix_match                  ?q=AA 命中 AAPL,AMZN 不命中
+  - test_filter_q_empty_string_treated_as_none  ?q= 视为无过滤(不报错,不空集)
+  - test_legacy_ticker_query_alias              ?ticker=AAPL 精确匹配,只命中 AAPL
+                                                (不命中 AAPLX 之类前缀)
+  - test_kpi_this_month_unaffected_by_filter    ?from=2020-01&to=2020-12 时
+                                                this_month 仍是当前自然月数字
   - test_invalid_date_returns_422               ?from=garbage
   - test_from_greater_than_to_returns_422
   - test_kpi_strip_renders_5_cards              .mp-kpi 计数 == 5
@@ -822,6 +875,8 @@ tests/web/test_trades_export.py                 新
   - test_export_csv_robinhood_header_row        包含 "Activity Date" 等列
   - test_export_csv_filters_apply               ?event_type=trade 只导买卖
   - test_export_csv_skips_splits                splits 不在输出里
+  - test_export_csv_empty_filter_no_match       ?ticker=NONEXIST → 只有 header,
+                                                无 data 行,200 OK
   - test_export_csv_round_trip                  fixture 仅含 buy/sell/dividend
                                                 导出 → 重 import → 买卖+分红
                                                 行数一致 (splits 显式排除在
