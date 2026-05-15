@@ -257,6 +257,7 @@ html, body {
   font-family: var(--ns-font-headline);
   font-weight: 600; font-size: 11px;
   letter-spacing: 0.02em;
+  white-space: nowrap;
   background: var(--ns-surface-container-low);
   color: var(--ns-on-surface-variant);
   border: 1px solid var(--ns-outline-variant);
