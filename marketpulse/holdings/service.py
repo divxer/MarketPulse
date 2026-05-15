@@ -345,6 +345,33 @@ def today_portfolio_change(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def sector_breakdown(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group rows by sector.
+
+    Returns: [{sector, market_value, pct, holding_count}, ...]
+    sorted by market_value desc. '未分类' falls naturally to its own bucket.
+    """
+    buckets: dict[str, dict[str, float]] = defaultdict(
+        lambda: {"market_value": 0.0, "holding_count": 0},
+    )
+    for r in rows:
+        s = r["sector"]
+        buckets[s]["market_value"] += r["market_value"]
+        buckets[s]["holding_count"] += 1
+    total = sum(b["market_value"] for b in buckets.values())
+    out = [
+        {
+            "sector": sector,
+            "market_value": v["market_value"],
+            "pct": (v["market_value"] / total * 100) if total else 0.0,
+            "holding_count": v["holding_count"],
+        }
+        for sector, v in buckets.items()
+    ]
+    out.sort(key=lambda x: x["market_value"], reverse=True)
+    return out
+
+
 def contributors_ranked(
     rows: list[dict[str, Any]],
     *,

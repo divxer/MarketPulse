@@ -448,3 +448,47 @@ def test_contributors_ranked_fewer_than_top_n():
 def test_contributors_ranked_empty():
     from marketpulse.holdings.service import contributors_ranked
     assert contributors_ranked([]) == []
+
+
+def test_sector_breakdown_groups_by_sector():
+    from marketpulse.holdings.service import sector_breakdown
+    rows = [
+        {"sector": "Technology", "market_value": 1000.0},
+        {"sector": "Technology", "market_value": 500.0},
+        {"sector": "Healthcare", "market_value": 300.0},
+    ]
+    result = sector_breakdown(rows)
+    assert len(result) == 2
+    assert result[0]["sector"] == "Technology"
+    assert result[0]["market_value"] == pytest.approx(1500.0)
+    assert result[0]["holding_count"] == 2
+    assert result[1]["sector"] == "Healthcare"
+    assert result[1]["holding_count"] == 1
+
+
+def test_sector_breakdown_pct_sums_to_100():
+    from marketpulse.holdings.service import sector_breakdown
+    rows = [
+        {"sector": "A", "market_value": 600.0},
+        {"sector": "B", "market_value": 400.0},
+    ]
+    result = sector_breakdown(rows)
+    assert sum(r["pct"] for r in result) == pytest.approx(100.0)
+    assert result[0]["pct"] == pytest.approx(60.0)
+    assert result[1]["pct"] == pytest.approx(40.0)
+
+
+def test_sector_breakdown_unclassified_separate_bucket():
+    from marketpulse.holdings.service import sector_breakdown
+    rows = [
+        {"sector": "Technology", "market_value": 1000.0},
+        {"sector": "未分类", "market_value": 200.0},
+    ]
+    result = sector_breakdown(rows)
+    sectors = [r["sector"] for r in result]
+    assert "未分类" in sectors
+
+
+def test_sector_breakdown_empty():
+    from marketpulse.holdings.service import sector_breakdown
+    assert sector_breakdown([]) == []
