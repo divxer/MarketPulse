@@ -493,7 +493,7 @@ def test_stock_page_uses_three_column_grid(client: TestClient, monkeypatch):
         "stock page must use 3-column grid: 280 watchlist | flex chart | 440 rail"
     )
     # Width slot override
-    assert "max-w-screen-2xl" in body, "stock page must widen container via main_width block"
+    assert "max-w-[2400px]" in body, "stock page must widen container via main_width block (2400px cap)"
     # Record-trade form no longer hidden by default (no `hidden` class on the form)
     import re
     form_match = re.search(r'<form[^>]*id="record-trade-form"[^>]*>', body)
