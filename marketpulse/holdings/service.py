@@ -345,6 +345,22 @@ def today_portfolio_change(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def contributors_ranked(
+    rows: list[dict[str, Any]],
+    *,
+    top_n: int = 5,
+) -> list[dict[str, Any]]:
+    """Top N rows by |pl_dollars| — the biggest movers in absolute terms.
+
+    NOTE: 'biggest by |pl|' does NOT guarantee a mix of positive and
+    negative. If a portfolio has 5 large winners and 1 small loser,
+    all 5 returned rows will be winners — that's correct behavior
+    (the question is 'who moved the needle most').
+    """
+    ranked = sort_by_pl_impact(rows)
+    return ranked[:top_n]
+
+
 def avg_hold_days(
     session: Session,
     *,

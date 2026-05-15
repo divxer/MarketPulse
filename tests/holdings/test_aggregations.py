@@ -410,3 +410,41 @@ def test_today_portfolio_change_all_none_returns_zero():
     assert today_portfolio_change(rows) == {
         "dollars": 0.0, "pct": 0.0, "up_count": 0, "down_count": 0,
     }
+
+
+def test_contributors_ranked_top_n_slice():
+    from marketpulse.holdings.service import contributors_ranked
+    rows = [
+        {"ticker": "A", "pl_dollars": +1000.0, "market_value": 5000.0},
+        {"ticker": "B", "pl_dollars": -2000.0, "market_value": 3000.0},
+        {"ticker": "C", "pl_dollars": +500.0, "market_value": 2000.0},
+        {"ticker": "D", "pl_dollars": +100.0, "market_value": 1000.0},
+        {"ticker": "E", "pl_dollars": -50.0, "market_value": 500.0},
+        {"ticker": "F", "pl_dollars": +10.0, "market_value": 100.0},
+    ]
+    result = contributors_ranked(rows, top_n=3)
+    assert len(result) == 3
+    assert [r["ticker"] for r in result] == ["B", "A", "C"]
+
+
+def test_contributors_ranked_default_top_n_5():
+    from marketpulse.holdings.service import contributors_ranked
+    rows = [{"ticker": str(i), "pl_dollars": float(i),
+             "market_value": 100.0} for i in range(10)]
+    result = contributors_ranked(rows)
+    assert len(result) == 5
+
+
+def test_contributors_ranked_fewer_than_top_n():
+    from marketpulse.holdings.service import contributors_ranked
+    rows = [
+        {"ticker": "A", "pl_dollars": +1000.0, "market_value": 5000.0},
+        {"ticker": "B", "pl_dollars": -500.0, "market_value": 3000.0},
+    ]
+    result = contributors_ranked(rows, top_n=10)
+    assert len(result) == 2
+
+
+def test_contributors_ranked_empty():
+    from marketpulse.holdings.service import contributors_ranked
+    assert contributors_ranked([]) == []
