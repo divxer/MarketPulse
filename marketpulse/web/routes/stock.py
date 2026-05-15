@@ -58,6 +58,46 @@ def stock_page(
         log.warning("stock_page_news_failed", ticker=ticker, error=str(exc))
         news = []
 
+    # Watchlist sidebar (Phase 5b-2). Capped to bound worst-case cold-cache
+    # page time. User can add more but the rail only shows the first N.
+    MAX_WATCHLIST_RENDER = 20
+    watchlist_rows = (
+        db.query(WatchlistItem.ticker)
+        .order_by(WatchlistItem.added_at.asc())
+        .limit(MAX_WATCHLIST_RENDER)
+        .all()
+    )
+    watchlist_items: list[dict] = []
+    for (wl_ticker,) in watchlist_rows:
+        try:
+            wl_quote = data.get_quote(wl_ticker)
+            try:
+                wl_bars = data.get_history(wl_ticker, period="30d")
+                spark = [b.close for b in wl_bars[-30:]]
+            except Exception:  # noqa: BLE001
+                spark = []
+            watchlist_items.append({
+                "ticker": wl_ticker,
+                "name": getattr(wl_quote, "name", None) or wl_ticker,
+                "price": wl_quote.price,
+                "change_pct": wl_quote.change_pct,
+                "sparkline": spark,
+                "is_active": wl_ticker == ticker,
+            })
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "stock_page_watchlist_quote_failed",
+                ticker=wl_ticker, error=str(exc),
+            )
+            watchlist_items.append({
+                "ticker": wl_ticker,
+                "name": wl_ticker,
+                "price": None,
+                "change_pct": None,
+                "sparkline": [],
+                "is_active": wl_ticker == ticker,
+            })
+
     holding = db.query(Holding).filter(Holding.ticker == ticker).one_or_none()
     in_watchlist = db.query(WatchlistItem).filter(
         WatchlistItem.ticker == ticker,
@@ -82,6 +122,7 @@ def stock_page(
             "holding": holding,
             "in_watchlist": in_watchlist,
             "recent_trades": recent_trades,
+            "watchlist_items": watchlist_items,
         },
     )
 

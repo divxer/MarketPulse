@@ -33,6 +33,38 @@ def _render_markdown(text: str | None) -> Markup:
 templates.env.filters["markdown"] = _render_markdown
 
 
+def _sparkpoints(values: list[float] | None, width: int, height: int) -> str:
+    """Convert a values list to SVG polyline points attribute.
+
+    Linearly normalizes values to fit [0, width] × [0, height], inverting Y
+    (higher value → smaller y, closer to top). Returns empty string for
+    inputs < 2 points (no line to draw).
+
+    Used by stock.html watchlist sparkline rendering.
+    """
+    if not values or len(values) < 2:
+        return ""
+    lo = min(values)
+    hi = max(values)
+    n = len(values)
+    if hi == lo:
+        # Flat line — horizontal at midline so it's visible
+        mid = height / 2
+        return " ".join(
+            f"{i * width / (n - 1):.1f},{mid:.1f}" for i in range(n)
+        )
+    span = hi - lo
+    pts = []
+    for i, v in enumerate(values):
+        x = i * width / (n - 1)
+        y = height - (v - lo) / span * height
+        pts.append(f"{x:.1f},{y:.1f}")
+    return " ".join(pts)
+
+
+templates.env.filters["sparkpoints"] = _sparkpoints
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
     configure_logging(settings.log_level)
