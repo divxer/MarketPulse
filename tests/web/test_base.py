@@ -70,11 +70,12 @@ def test_base_html_cache_busts_css_assets(client: TestClient, monkeypatch):
 def test_static_version_helper_returns_stable_hash():
     """Direct unit test of the static_version function — first 8 hex chars
     of md5, cached, missing files return 'missing'."""
+    from pathlib import Path
+
     from marketpulse.web.static_versioning import (
         configure,
         static_version,
     )
-    from pathlib import Path
 
     # Use the real STATIC_DIR
     static_dir = Path(__file__).resolve().parent.parent.parent / "marketpulse" / "web" / "static"

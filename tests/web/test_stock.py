@@ -11,35 +11,53 @@ def _login(client, monkeypatch):
     pw = "secret"
     monkeypatch.setenv("APP_PASSWORD_HASH", hash_password(pw))
     from marketpulse.config import get_settings
+
     get_settings.cache_clear()
     client.post("/login", data={"password": pw})
 
 
 class _FakeData:
     def get_quote(self, ticker):
-        return Quote(ticker=ticker, price=100, change_pct=1, volume=10,
-                     avg_volume_20d=10, fetched_at=datetime.now(UTC))
+        return Quote(
+            ticker=ticker,
+            price=100,
+            change_pct=1,
+            volume=10,
+            avg_volume_20d=10,
+            fetched_at=datetime.now(UTC),
+        )
+
     def get_history(self, ticker, period="60d"):
         return [Bar(date=date(2026, 5, 7), open=1, high=2, low=0.5, close=1.5, volume=100)]
+
     def get_news(self, ticker, limit=10):
-        return [NewsItem(ticker=ticker, headline="hello", url="u",
-                         published_at=datetime.now(UTC), source="s")]
+        return [
+            NewsItem(
+                ticker=ticker, headline="hello", url="u", published_at=datetime.now(UTC), source="s"
+            )
+        ]
+
     def get_fundamentals(self, ticker):
-        return Fundamentals(ticker=ticker, market_cap=1, pe_ratio=10, eps=1,
-                            sector="t", industry="i")
+        return Fundamentals(
+            ticker=ticker, market_cap=1, pe_ratio=10, eps=1, sector="t", industry="i"
+        )
 
 
 class _FakeAi:
     def analyze(self, ticker):
         return AnalysisResult(
-            ticker=ticker, model="m", prompt_version="v",
-            response_markdown="## Fundamentals\nstuff", requested_at=datetime.now(UTC),
+            ticker=ticker,
+            model="m",
+            prompt_version="v",
+            response_markdown="## Fundamentals\nstuff",
+            requested_at=datetime.now(UTC),
         )
 
 
 def test_stock_page(client: TestClient, monkeypatch) -> None:
     _login(client, monkeypatch)
     from marketpulse.web.deps import get_data_service
+
     client.app.dependency_overrides[get_data_service] = lambda: _FakeData()
     try:
         res = client.get("/stock/AAPL")
@@ -50,17 +68,25 @@ def test_stock_page(client: TestClient, monkeypatch) -> None:
 
 
 def test_stock_page_shows_holding_strip_when_position_exists(
-    client: TestClient, monkeypatch,
+    client: TestClient,
+    monkeypatch,
 ) -> None:
     """When the user holds the ticker, /stock shows current shares + avg cost + live P&L."""
     _login(client, monkeypatch)
     from marketpulse.web.deps import get_data_service
+
     client.app.dependency_overrides[get_data_service] = lambda: _FakeData()
     try:
         # Buy 10 @ $200 → holding row exists
-        client.post("/trades", data={
-            "ticker": "AAPL", "action": "buy", "quantity": 10, "price": 200,
-        })
+        client.post(
+            "/trades",
+            data={
+                "ticker": "AAPL",
+                "action": "buy",
+                "quantity": 10,
+                "price": 200,
+            },
+        )
         res = client.get("/stock/AAPL")
         assert res.status_code == 200
         assert "持仓" in res.text
@@ -73,6 +99,7 @@ def test_stock_page_shows_holding_strip_when_position_exists(
 def test_stock_page_shows_in_watchlist_state(client: TestClient, monkeypatch) -> None:
     _login(client, monkeypatch)
     from marketpulse.web.deps import get_data_service
+
     client.app.dependency_overrides[get_data_service] = lambda: _FakeData()
     try:
         client.post("/watchlist", data={"ticker": "AAPL"})
@@ -85,11 +112,18 @@ def test_stock_page_shows_in_watchlist_state(client: TestClient, monkeypatch) ->
 def test_stock_page_shows_recent_trades(client: TestClient, monkeypatch) -> None:
     _login(client, monkeypatch)
     from marketpulse.web.deps import get_data_service
+
     client.app.dependency_overrides[get_data_service] = lambda: _FakeData()
     try:
-        client.post("/trades", data={
-            "ticker": "AAPL", "action": "buy", "quantity": 5, "price": 199.50,
-        })
+        client.post(
+            "/trades",
+            data={
+                "ticker": "AAPL",
+                "action": "buy",
+                "quantity": 5,
+                "price": 199.50,
+            },
+        )
         res = client.get("/stock/AAPL")
         assert "最近交易" in res.text
         assert "199.50" in res.text
@@ -98,7 +132,8 @@ def test_stock_page_shows_recent_trades(client: TestClient, monkeypatch) -> None
 
 
 def test_stock_page_recent_trades_orders_null_executed_at_by_created_at(
-    client: TestClient, monkeypatch,
+    client: TestClient,
+    monkeypatch,
 ) -> None:
     """Regression: trades with NULL executed_at (entered via the form before
     PR #8's date-input fix) must appear in correct chronological position by
@@ -108,8 +143,10 @@ def test_stock_page_recent_trades_orders_null_executed_at_by_created_at(
 
     from marketpulse.db import base as db_base
     from marketpulse.db.models import Trade
+
     _login(client, monkeypatch)
     from marketpulse.web.deps import get_data_service
+
     client.app.dependency_overrides[get_data_service] = lambda: _FakeData()
     try:
         # Insert two trades directly to control NULL state:
@@ -122,12 +159,26 @@ def test_stock_page_recent_trades_orders_null_executed_at_by_created_at(
         # Use unusual prices that won't collide with chart axis labels or
         # other rendered numbers — pinning the assertion to these specific
         # values is brittle otherwise.
-        s.add(Trade(ticker="AAPL", action="buy", quantity=1, price=987.65,
-                    executed_at=datetime(2024, 1, 1, tzinfo=UTC),
-                    created_at=datetime(2024, 1, 1, tzinfo=UTC)))
-        s.add(Trade(ticker="AAPL", action="sell", quantity=1, price=876.54,
-                    executed_at=None,
-                    created_at=datetime.now(UTC)))
+        s.add(
+            Trade(
+                ticker="AAPL",
+                action="buy",
+                quantity=1,
+                price=987.65,
+                executed_at=datetime(2024, 1, 1, tzinfo=UTC),
+                created_at=datetime(2024, 1, 1, tzinfo=UTC),
+            )
+        )
+        s.add(
+            Trade(
+                ticker="AAPL",
+                action="sell",
+                quantity=1,
+                price=876.54,
+                executed_at=None,
+                created_at=datetime.now(UTC),
+            )
+        )
         s.commit()
 
         res = client.get("/stock/AAPL")
@@ -148,6 +199,7 @@ def test_stock_page_recent_trades_orders_null_executed_at_by_created_at(
 def test_stock_analyze(client: TestClient, monkeypatch) -> None:
     _login(client, monkeypatch)
     from marketpulse.web.deps import get_ai_service, get_data_service
+
     client.app.dependency_overrides[get_data_service] = lambda: _FakeData()
     client.app.dependency_overrides[get_ai_service] = lambda: _FakeAi()
     try:
@@ -166,6 +218,7 @@ def test_stock_analyze_failure_renders_error_fragment(client: TestClient, monkey
             raise RuntimeError("anthropic unavailable")
 
     from marketpulse.web.deps import get_ai_service, get_data_service
+
     client.app.dependency_overrides[get_data_service] = lambda: _FakeData()
     client.app.dependency_overrides[get_ai_service] = lambda: _BoomAi()
     try:
@@ -181,10 +234,14 @@ def test_stock_analyze_failure_renders_error_fragment(client: TestClient, monkey
 def _make_bars(n: int, start_close: float = 100.0) -> list[Bar]:
     today = date.today()
     return [
-        Bar(date=today - timedelta(days=n - i),
-            open=start_close + i, high=start_close + i + 1,
-            low=start_close + i - 1, close=start_close + i,
-            volume=1_000_000)
+        Bar(
+            date=today - timedelta(days=n - i),
+            open=start_close + i,
+            high=start_close + i + 1,
+            low=start_close + i - 1,
+            close=start_close + i,
+            volume=1_000_000,
+        )
         for i in range(n)
     ]
 
@@ -195,29 +252,44 @@ class _FakeDataChart:
         self.last_period: str | None = None
 
     def get_quote(self, ticker: str) -> Quote:
-        return Quote(ticker=ticker, price=100.0, change_pct=0,
-                     volume=1, avg_volume_20d=1, fetched_at=datetime.now(UTC))
+        return Quote(
+            ticker=ticker,
+            price=100.0,
+            change_pct=0,
+            volume=1,
+            avg_volume_20d=1,
+            fetched_at=datetime.now(UTC),
+        )
 
     def get_history(self, ticker: str, period: str = "60d") -> list[Bar]:
         self.last_period = period
         return self.bars
 
-    def get_news(self, ticker: str, limit: int = 10): return []
+    def get_news(self, ticker: str, limit: int = 10):
+        return []
 
 
 def test_chart_data_returns_expected_keys(client, monkeypatch) -> None:
     _login(client, monkeypatch)
     fake = _FakeDataChart(_make_bars(300))
     from marketpulse.web.deps import get_data_service
+
     client.app.dependency_overrides[get_data_service] = lambda: fake
     try:
         r = client.get("/stock/AAPL/chart-data?period=60d")
         assert r.status_code == 200
         data = r.json()
         assert set(data.keys()) >= {
-            "bars", "ema12", "ema26", "sma50", "sma200",
-            "bb_upper", "bb_lower",
-            "rsi", "macd", "signal_markers",
+            "bars",
+            "ema12",
+            "ema26",
+            "sma50",
+            "sma200",
+            "bb_upper",
+            "bb_lower",
+            "rsi",
+            "macd",
+            "signal_markers",
         }
         assert "bb_middle" not in data, "bb_middle was dropped from the contract"
         assert isinstance(data["bars"], list)
@@ -232,6 +304,7 @@ def test_chart_data_fetches_with_200d_headroom_for_sma(client, monkeypatch) -> N
     _login(client, monkeypatch)
     fake = _FakeDataChart(_make_bars(300))
     from marketpulse.web.deps import get_data_service
+
     client.app.dependency_overrides[get_data_service] = lambda: fake
     try:
         client.get("/stock/AAPL/chart-data?period=60d")
@@ -245,6 +318,7 @@ def test_chart_data_unknown_period_returns_422(client, monkeypatch) -> None:
     _login(client, monkeypatch)
     fake = _FakeDataChart(_make_bars(10))
     from marketpulse.web.deps import get_data_service
+
     client.app.dependency_overrides[get_data_service] = lambda: fake
     try:
         r = client.get("/stock/AAPL/chart-data?period=banana")
@@ -257,6 +331,7 @@ def test_chart_data_empty_bars_returns_empty_arrays(client, monkeypatch) -> None
     _login(client, monkeypatch)
     fake = _FakeDataChart([])
     from marketpulse.web.deps import get_data_service
+
     client.app.dependency_overrides[get_data_service] = lambda: fake
     try:
         r = client.get("/stock/AAPL/chart-data?period=60d")
@@ -273,6 +348,7 @@ def test_chart_data_sets_cache_control_header(client, monkeypatch) -> None:
     _login(client, monkeypatch)
     fake = _FakeDataChart(_make_bars(10))
     from marketpulse.web.deps import get_data_service
+
     client.app.dependency_overrides[get_data_service] = lambda: fake
     try:
         r = client.get("/stock/AAPL/chart-data?period=60d")
@@ -282,7 +358,8 @@ def test_chart_data_sets_cache_control_header(client, monkeypatch) -> None:
 
 
 def test_chart_data_before_param_returns_window_before_date(
-    client: TestClient, monkeypatch,
+    client: TestClient,
+    monkeypatch,
 ) -> None:
     """?before=2024-06-01&count=180 → bars dated strictly before 2024-06-01,
     at most 180 of them, indicators trimmed to the same window.
@@ -300,9 +377,9 @@ def test_chart_data_before_param_returns_window_before_date(
     base = date(2023, 3, 28)  # 430 calendar days back is approximate; use 430
     for i in range(430):
         d = base + _td(days=i)
-        fake_bars.append(Bar(date=d, open=10.0, high=10.5, low=9.5,
-                             close=10.0 + (i * 0.01),
-                             volume=1_000_000))
+        fake_bars.append(
+            Bar(date=d, open=10.0, high=10.5, low=9.5, close=10.0 + (i * 0.01), volume=1_000_000)
+        )
 
     with patch(
         "marketpulse.data.yfinance_client.YFinanceClient.fetch_history_range",
@@ -344,6 +421,7 @@ def test_chart_data_period_still_works(client: TestClient, monkeypatch) -> None:
     """Regression: the existing ?period=60d path is unchanged."""
     _login(client, monkeypatch)
     from marketpulse.web.deps import get_data_service
+
     client.app.dependency_overrides[get_data_service] = lambda: _FakeData()
     try:
         res = client.get("/stock/AAPL/chart-data?period=60d")
@@ -354,7 +432,8 @@ def test_chart_data_period_still_works(client: TestClient, monkeypatch) -> None:
 
 
 def test_chart_data_before_invalid_date_returns_422(
-    client: TestClient, monkeypatch,
+    client: TestClient,
+    monkeypatch,
 ) -> None:
     _login(client, monkeypatch)
     res = client.get("/stock/AAPL/chart-data?before=not-a-date&count=180")
@@ -372,6 +451,7 @@ def test_chart_data_count_capped_at_max(client: TestClient, monkeypatch) -> None
 
 def test_chart_data_ytd_returns_year_to_date(client: TestClient, monkeypatch):
     from datetime import date
+
     _login(client, monkeypatch)
     r = client.get("/stock/AAPL/chart-data?period=ytd")
     assert r.status_code == 200
@@ -388,13 +468,16 @@ def test_chart_data_5y_uses_yfinance(client: TestClient, monkeypatch):
     from datetime import date, timedelta
 
     from marketpulse.data.yfinance_client import YFinanceClient
+
     _login(client, monkeypatch)
     called_with = {}
+
     def fake_fetch_range(self, ticker, *, start, end):
         called_with["ticker"] = ticker
         called_with["start"] = start
         called_with["end"] = end
         return []
+
     monkeypatch.setattr(YFinanceClient, "fetch_history_range", fake_fetch_range)
     r = client.get("/stock/AAPL/chart-data?period=5y")
     assert r.status_code == 200
@@ -408,11 +491,14 @@ def test_chart_data_all_uses_yfinance_from_1900(client: TestClient, monkeypatch)
     from datetime import date
 
     from marketpulse.data.yfinance_client import YFinanceClient
+
     _login(client, monkeypatch)
     called_with = {}
+
     def fake_fetch_range(self, ticker, *, start, end):
         called_with["start"] = start
         return []
+
     monkeypatch.setattr(YFinanceClient, "fetch_history_range", fake_fetch_range)
     r = client.get("/stock/AAPL/chart-data?period=all")
     assert r.status_code == 200
@@ -477,9 +563,7 @@ def test_chart_js_subscribes_crosshair_for_ohlc(client: TestClient, monkeypatch)
         "chart.js must subscribe to crosshair to keep OHLC bar in sync"
     )
     assert "updateOhlcBar" in body, "updateOhlcBar function missing"
-    assert "data-ohlc=" in body, (
-        "updateOhlcBar must select OHLC field elements via data-ohlc"
-    )
+    assert "data-ohlc=" in body, "updateOhlcBar must select OHLC field elements via data-ohlc"
 
 
 def test_stock_page_uses_three_column_grid(client: TestClient, monkeypatch):
@@ -493,9 +577,12 @@ def test_stock_page_uses_three_column_grid(client: TestClient, monkeypatch):
         "stock page must use 3-column grid: 280 watchlist | flex chart | 440 rail"
     )
     # Width slot override
-    assert "max-w-[2400px]" in body, "stock page must widen container via main_width block (2400px cap)"
+    assert "max-w-[2400px]" in body, (
+        "stock page must widen container via main_width block (2400px cap)"
+    )
     # Record-trade form no longer hidden by default (no `hidden` class on the form)
     import re
+
     form_match = re.search(r'<form[^>]*id="record-trade-form"[^>]*>', body)
     assert form_match is not None
     assert "hidden" not in form_match.group(0), (
