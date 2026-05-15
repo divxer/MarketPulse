@@ -145,12 +145,15 @@ Activity Date,Process Date,Settle Date,Instrument,Description,Trans Code,Quantit
   "kpi": {
     "total_trades": int,           # 当前过滤范围内
     "ytd_realized": float,         # 当前过滤范围内的 realized_pl
-    "ytd_label": str,              # "YTD" or "2026-03-01 → 2026-05-15"
+                                   # 无 from/to 时窗口 = [Jan 1 当年, today]
+                                   # 有 from/to 时窗口 = [from, to]
+    "ytd_label": str,              # 无 from/to: "YTD"
+                                   # 有 from/to: "{from} → {to}"
     "win_rate_pct": float,         # 当前过滤范围
-    "wins": int,                   # 同上
-    "losses": int,                 # 同上
+    "wins": int,                   # 同上 (realized_pl > 0 的 sell 数)
+    "losses": int,                 # 同上 (realized_pl < 0 的 sell 数)
     "avg_hold_days": float | None, # 同上；无数据时 None
-    "this_month": {                # 永远当前自然月，不受筛选
+    "this_month": {                # 永远当前自然月 (UTC)，不受筛选
       "total": int,
       "buys": int,
       "sells": int,
@@ -161,6 +164,17 @@ Activity Date,Process Date,Settle Date,Instrument,Description,Trans Code,Quantit
     "monthly_pl": [{"month": "YYYY-MM", "pl": float, "trade_count": int}, ...],  # 15 月
     "by_ticker": [{"ticker": str, "realized_pl": float, "pct": float}, ...],     # top 8
   },
+  "counts": {                      # 4 个 event_type 在当前过滤(除 event_type 本身)
+    "all": int,
+    "trade": int,
+    "split": int,
+    "dividend": int,
+  },
+  "filters_qs": str,               # 序列化当前过滤参数(不含 page/limit)，URL-encoded
+                                   # 用于 export 链接和分页链接
+                                   # 例 "from=2026-01-01&to=2026-05-15&q=AAPL"
+  "filters_qs_no_event_type": str, # 同上但额外去掉 event_type，用于 chip 切换
+  "pager_window": [int, ...],      # max(1,page-2) .. min(total_pages,page+2)
 }
 ```
 
@@ -337,7 +351,7 @@ marketpulse/web/templates/
 | label | value | hint | icon | value_color |
 |---|---|---|---|---|
 | `总笔数` | `kpi.total_trades` | `kpi.ytd_label`(显示日期范围标签) | `receipt_long` | navy |
-| `已实现盈亏 · {{ kpi.ytd_label }}` | `"%+,.2f"\|format(kpi.ytd_realized)` | `"%d 胜 / %d 负"\|format(kpi.wins, kpi.losses)` | `payments` | up/down |
+| `已实现盈亏 · {{ kpi.ytd_label }}` | `"%+,.2f"\|format(kpi.ytd_realized)` | `"%d 笔已平仓"\|format(kpi.wins + kpi.losses)` | `payments` | up/down |
 | `胜率` | `"%.1f%%"\|format(kpi.win_rate_pct)` | `"%d 胜 / %d 负"\|format(kpi.wins, kpi.losses)` | `trending_up` | navy |
 | `平均持仓天数` | `kpi.avg_hold_days(int) + "d"` or `—` | `"基于 FIFO 配对"` | `schedule` | navy |
 | `本月新笔数` | `kpi.this_month.total` | `"%d 买 · %d 卖 · %d 分红"\|format(...)` | `event_available` | navy |
@@ -700,6 +714,21 @@ JS：drag-over 加 `.is-dragover`；drop 时把 file 塞进 hidden input，自�
 | Dropzone 上传 | 普通 form POST | 跳转到 `/trades/import?preview=...` |
 
 **HTMX 只管表格内的"快"操作**；任何改变 KPI / 右栏的过滤，整页刷新。简化心智模型。
+
+### HTMX 局部响应
+
+`GET /trades` 路由检测 `HX-Request: true` header：
+- 有 → 只返回 `partials/trades_table.html`（含分页 footer）
+- 无 → 返回完整 `trades.html`
+
+`POST /trades`、`PUT /trades/{id}`、`DELETE /trades/{id}` 在 partial 返回时也需要分页 context：handler 从 form 拿 `page`/`limit` hidden field（或 `Referer` URL 解析），重新跑当前页查询并返回 `trades_table.html`。新增交易后默认回到 page 1（因为新交易在最顶）。删除/编辑保持当前 page。
+
+模板里在 `<form id="event-form">` 加 hidden field：
+
+```html
+<input type="hidden" name="page" value="{{ page }}" />
+<input type="hidden" name="limit" value="{{ limit }}" />
+```
 
 ## 错误处理
 
