@@ -326,3 +326,11 @@ def test_holdings_donut_renders_svg(client, monkeypatch, db_session):
     assert 'viewBox="0 0 100 100"' in r.text
 
     client.app.dependency_overrides.clear()
+
+
+def test_holdings_kpi_strip_5_cards(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/holdings")
+    assert r.text.count("mp-kpi__value") == 5
+    for label in ("总成本", "市值", "未实现盈亏", "已实现盈亏", "累计分红"):
+        assert label in r.text

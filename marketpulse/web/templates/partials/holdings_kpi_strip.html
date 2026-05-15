@@ -1,0 +1,61 @@
+{% set pl = (totals.market_value or 0) - (totals.cost or 0) %}
+{% set pl_pct = (pl / totals.cost * 100) if totals.cost else 0 %}
+
+<div class="mp-card mp-kpi">
+  <div class="mp-kpi__head">
+    <span class="mp-eyebrow mp-eyebrow--primary">总成本 · 含手续费</span>
+    <span class="material-symbols-outlined mp-kpi__icon">payments</span>
+  </div>
+  <div class="mp-kpi__value grotesk tnum">${{ "{:,.0f}".format(totals.cost or 0) }}</div>
+  <div class="mp-kpi__hint">{{ trade_stats.total_trades }} 笔交易累计</div>
+</div>
+
+<div class="mp-card mp-kpi">
+  <div class="mp-kpi__head">
+    <span class="mp-eyebrow mp-eyebrow--primary">市值</span>
+    <span class="material-symbols-outlined mp-kpi__icon">account_balance_wallet</span>
+  </div>
+  <div class="mp-kpi__value grotesk tnum">${{ "{:,.0f}".format(totals.market_value or 0) }}</div>
+  <div class="mp-kpi__hint">实时</div>
+</div>
+
+<div class="mp-card mp-kpi">
+  <div class="mp-kpi__head">
+    <span class="mp-eyebrow mp-eyebrow--primary">未实现盈亏</span>
+    <span class="material-symbols-outlined mp-kpi__icon">trending_up</span>
+  </div>
+  <div class="mp-kpi__value grotesk tnum"
+       style="color: {% if pl >= 0 %}var(--mp-up){% else %}var(--mp-down){% endif %};">
+    {{ "{:+,.0f}".format(pl) }}
+  </div>
+  <div class="mp-kpi__hint">{{ "{:+.2f}%".format(pl_pct) }} · 持仓盈亏</div>
+</div>
+
+<div class="mp-card mp-kpi">
+  <div class="mp-kpi__head">
+    <span class="mp-eyebrow mp-eyebrow--primary">已实现盈亏 · YTD</span>
+    <span class="material-symbols-outlined mp-kpi__icon">payments</span>
+  </div>
+  <div class="mp-kpi__value grotesk tnum"
+       style="color: {% if kpi.ytd_realized >= 0 %}var(--mp-up){% else %}var(--mp-down){% endif %};">
+    {{ "{:+,.0f}".format(kpi.ytd_realized) }}
+  </div>
+  <div class="mp-kpi__hint">
+    {% if trade_stats.win_rate_pct is not none %}
+      胜率 {{ "%.1f%%"|format(trade_stats.win_rate_pct) }}
+    {% else %}
+      胜率 —
+    {% endif %}
+  </div>
+</div>
+
+<div class="mp-card mp-kpi">
+  <div class="mp-kpi__head">
+    <span class="mp-eyebrow mp-eyebrow--primary">累计分红</span>
+    <span class="material-symbols-outlined mp-kpi__icon">redeem</span>
+  </div>
+  <div class="mp-kpi__value grotesk tnum" style="color: var(--mp-up);">
+    {{ "{:+,.2f}".format(total_dividends) }}
+  </div>
+  <div class="mp-kpi__hint">含本月 ${{ "{:.2f}".format(kpi.this_month_dividends) }}</div>
+</div>
