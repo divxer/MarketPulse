@@ -11,7 +11,7 @@ from typing import Any, Protocol
 from sqlalchemy.orm import Session
 
 from marketpulse.data.types import Quote
-from marketpulse.db.models import Holding, Trade
+from marketpulse.db.models import Dividend, Holding, Trade
 from marketpulse.logging import get_logger
 
 log = get_logger(__name__)
@@ -214,4 +214,40 @@ def trading_stats(
         "losses": losses,
         "win_rate_pct": (wins / closed * 100) if closed else None,
         "realized_pl": realized,
+    }
+
+
+def trade_count_this_month(session: Session) -> dict[str, int]:
+    """Activity count in the current calendar month (UTC).
+
+    Returns {total, buys, sells, dividends}. Splits intentionally not
+    counted — they're corporate actions, not user activity.
+    Not affected by any filter (always current month).
+    """
+    today = date.today()
+    y, m = today.year, today.month
+    next_y, next_m = (y + 1, 1) if m == 12 else (y, m + 1)
+    start = date(y, m, 1)
+    end_excl = date(next_y, next_m, 1)
+
+    buys = sells = 0
+    for t in session.query(Trade).all():
+        when = (t.executed_at.date() if t.executed_at
+                else (t.created_at.date() if t.created_at else None))
+        if when is None or when < start or when >= end_excl:
+            continue
+        if t.action == "buy":
+            buys += 1
+        elif t.action == "sell":
+            sells += 1
+
+    dividends = (
+        session.query(Dividend)
+        .filter(Dividend.ex_date >= start, Dividend.ex_date < end_excl)
+        .count()
+    )
+
+    return {
+        "total": buys + sells + dividends,
+        "buys": buys, "sells": sells, "dividends": dividends,
     }

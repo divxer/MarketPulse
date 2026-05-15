@@ -140,3 +140,39 @@ def test_monthly_realized_pl_with_months_fills_gaps(db_session):
     for r in other:
         assert r["pl"] == 0.0
         assert r["trade_count"] == 0
+
+
+def test_trade_count_this_month_classifies(db_session, monkeypatch):
+    """Counts BUY/SELL/dividend in the current calendar month (UTC)."""
+    from datetime import date
+
+    import marketpulse.holdings.service as svc
+    from marketpulse.db.models import Dividend
+    from marketpulse.holdings.service import trade_count_this_month
+
+    # Freeze "today" via a tiny shim — the function reads date.today() in svc.
+    class _FakeDate(date):
+        @classmethod
+        def today(cls): return date(2026, 5, 15)
+    monkeypatch.setattr(svc, "date", _FakeDate)
+
+    # In-month
+    _trade(db_session, "AAPL", "buy",  1, 100, _dt(2026, 5, 3))
+    _trade(db_session, "AAPL", "buy",  1, 100, _dt(2026, 5, 10))
+    _trade(db_session, "AAPL", "sell", 1, 120, _dt(2026, 5, 12), pl=20.0)
+    db_session.add(Dividend(ticker="AAPL", ex_date=date(2026, 5, 8),
+                            amount_per_share=0.25, total_amount=0.25))
+    # Out of month
+    _trade(db_session, "AAPL", "buy", 1, 100, _dt(2026, 4, 30))
+    _trade(db_session, "AAPL", "buy", 1, 100, _dt(2026, 6, 1))
+    db_session.commit()
+
+    counts = trade_count_this_month(db_session)
+    assert counts == {"total": 4, "buys": 2, "sells": 1, "dividends": 1}
+
+
+def test_trade_count_this_month_empty(db_session):
+    from marketpulse.holdings.service import trade_count_this_month
+    assert trade_count_this_month(db_session) == {
+        "total": 0, "buys": 0, "sells": 0, "dividends": 0,
+    }
