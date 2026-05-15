@@ -4,6 +4,15 @@
   <meta charset="utf-8" />
   <title>MarketPulse</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- NineScrolls design system fonts (Space Grotesk + Inter + Material Symbols) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700&family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap" />
+  <!-- NineScrolls design tokens (color/type/spacing/radius/shadow/motion) -->
+  <link rel="stylesheet" href="/static/css/ns-tokens.css" />
+  <!-- NineScrolls app overlay (.mp-card / .mp-chip / .mp-table / .bb-root) -->
+  <link rel="stylesheet" href="/static/css/app.css" />
+  <!-- Tailwind build output — LAST so utility classes win in cascade -->
   <link rel="stylesheet" href="/static/app.css" />
   <script src="https://unpkg.com/htmx.org@2.0.4"></script>
   <script src="https://unpkg.com/htmx-ext-sse@2.2.2"></script>
@@ -45,7 +54,7 @@
 </head>
 <body class="bg-slate-50 text-slate-900 font-sans">
   <header class="border-b bg-white">
-    <nav class="max-w-5xl mx-auto px-4 py-3 flex gap-4 text-sm">
+    <nav class="mx-auto px-4 py-3 flex gap-4 text-sm {% block nav_width %}max-w-5xl{% endblock %}">
       <a href="/" class="font-semibold">MarketPulse</a>
       <a href="/watchlist">自选股</a>
       <a href="/holdings">持仓</a>
@@ -54,7 +63,7 @@
       <a href="/recaps">复盘</a>
     </nav>
   </header>
-  <main class="max-w-5xl mx-auto p-4">
+  <main class="mx-auto p-4 {% block main_width %}max-w-5xl{% endblock %}">
     {% block content %}{% endblock %}
   </main>
 </body>
