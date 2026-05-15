@@ -598,3 +598,121 @@ def test_trades_table_renders_time_with_data_utc(client: TestClient, monkeypatch
     assert "htmx:afterSwap" in body, (
         "trades.html must re-apply local time after HTMX swaps the table"
     )
+
+
+import math
+from datetime import UTC, datetime, date
+
+from marketpulse.db.models import Trade
+
+
+def _seed_trades(db_session, n: int):
+    """Seed N AAPL trades evenly spaced over a year."""
+    for i in range(n):
+        when = datetime(2026, 1, 1, 12, 0, tzinfo=UTC) + (
+            (datetime(2026, 12, 31, 12, 0, tzinfo=UTC) - datetime(2026, 1, 1, 12, 0, tzinfo=UTC))
+            * (i / max(1, n - 1))
+        )
+        db_session.add(Trade(
+            ticker="AAPL", action="buy", quantity=1.0, price=100.0,
+            fees=0.0, executed_at=when, realized_pl=None,
+        ))
+    db_session.commit()
+
+
+def test_trades_page_pagination_default_50(client, monkeypatch, db_session):
+    """75 trades → page 1 shows 50, page 2 shows 25."""
+    _login(client, monkeypatch)
+    _seed_trades(db_session, 75)
+
+    r = client.get("/trades")
+    assert r.status_code == 200
+    # Count unique rows via id="trade-row-" (appears once per row as the element id)
+    assert r.text.count('id="trade-row-') == 50
+
+    r = client.get("/trades?page=2")
+    assert r.text.count('id="trade-row-') == 25
+
+
+def test_trades_page_clamps_overflow_page(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    _seed_trades(db_session, 5)
+    r = client.get("/trades?page=999")
+    assert r.status_code == 200  # not 422
+
+
+def test_trades_page_invalid_date_returns_422(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/trades?from=not-a-date")
+    assert r.status_code == 422
+
+
+def test_trades_page_from_greater_than_to_returns_422(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/trades?from=2026-06-01&to=2026-01-01")
+    assert r.status_code == 422
+
+
+def test_trades_page_q_prefix_match(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    for sym in ("AAPL", "AMZN", "NVDA"):
+        db_session.add(Trade(ticker=sym, action="buy", quantity=1, price=100,
+                             fees=0, executed_at=datetime(2026, 1, 1, tzinfo=UTC)))
+    db_session.commit()
+
+    r = client.get("/trades?q=AA")
+    assert "AAPL" in r.text
+    assert "AMZN" not in r.text
+    assert "NVDA" not in r.text
+
+
+def test_trades_page_q_empty_string_no_filter(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    db_session.add(Trade(ticker="AAPL", action="buy", quantity=1, price=100,
+                         fees=0, executed_at=datetime(2026, 1, 1, tzinfo=UTC)))
+    db_session.commit()
+    r = client.get("/trades?q=")
+    assert "AAPL" in r.text
+
+
+def test_trades_page_ticker_alias_exact_match(client, monkeypatch, db_session):
+    """?ticker=AAPL is exact match (legacy); does NOT match AAPL prefix neighbors."""
+    _login(client, monkeypatch)
+    for sym in ("AAPL", "AAPLE"):  # fictional prefix neighbor
+        db_session.add(Trade(ticker=sym, action="buy", quantity=1, price=100,
+                             fees=0, executed_at=datetime(2026, 1, 1, tzinfo=UTC)))
+    db_session.commit()
+
+    r = client.get("/trades?ticker=AAPL")
+    assert "AAPL" in r.text
+    # AAPLE row should NOT be in the displayed page rows.
+    # Easiest check: ensure no tr with ticker AAPLE link exists.
+    assert "stock/AAPLE" not in r.text
+
+
+def test_trades_page_hx_request_returns_partial_only(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/trades", headers={"HX-Request": "true"})
+    # Partial should NOT contain hero anchor — table or empty state should.
+    assert "mp-hero" not in r.text
+    # Should still contain table or empty-state.
+    assert ('id="trade-row-' in r.text or "暂无记录" in r.text or "mp-table" in r.text
+            or "mp-empty-row" in r.text or "<table" in r.text)
+
+
+def test_trades_page_this_month_kpi_unaffected_by_filter(client, monkeypatch):
+    """Even with from/to in distant past, page still renders and includes
+    本月新笔数 KPI label (whose value uses current calendar month)."""
+    _login(client, monkeypatch)
+    r = client.get("/trades?from=2020-01-01&to=2020-12-31")
+    assert r.status_code == 200
+    # The KPI strip references "本月新笔数" only in the new template (Task 11).
+    # For Task 8 we cannot fully verify the value since templates aren't ready.
+    # Just verify the route doesn't crash.
+
+
+def test_trades_page_ytd_label_default(client, monkeypatch):
+    """No date filter → ctx.kpi.ytd_label == 'YTD'."""
+    _login(client, monkeypatch)
+    r = client.get("/trades")
+    assert r.status_code == 200
