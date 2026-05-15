@@ -226,3 +226,45 @@ def test_realized_pl_by_ticker_pct_uses_lot_cost_basis(db_session):
 def test_realized_pl_by_ticker_empty(db_session):
     from marketpulse.holdings.service import realized_pl_by_ticker
     assert realized_pl_by_ticker(db_session) == []
+
+
+def test_avg_hold_days_basic(db_session):
+    """Two matches: 100 days and 200 days → avg 150."""
+    from marketpulse.holdings.service import avg_hold_days
+
+    _trade(db_session, "AAPL", "buy",  1, 100, _dt(2026, 1, 1))
+    _trade(db_session, "AAPL", "sell", 1, 120, _dt(2026, 4, 11), pl=20.0)  # 100d
+    _trade(db_session, "NVDA", "buy",  1, 100, _dt(2026, 1, 1))
+    _trade(db_session, "NVDA", "sell", 1, 120, _dt(2026, 7, 20), pl=20.0)  # 200d
+
+    assert avg_hold_days(db_session) == pytest.approx(150.0)
+
+
+def test_avg_hold_days_no_data_returns_none(db_session):
+    from marketpulse.holdings.service import avg_hold_days
+    assert avg_hold_days(db_session) is None
+
+    _trade(db_session, "AAPL", "buy", 1, 100, _dt(2026, 1, 1))
+    # No sells → no matches → None
+    assert avg_hold_days(db_session) is None
+
+
+def test_avg_hold_days_window_filters_by_sell_date(db_session):
+    """Only LotMatches whose sell_executed_at falls in window count."""
+    from datetime import date
+
+    from marketpulse.holdings.service import avg_hold_days
+
+    _trade(db_session, "AAPL", "buy",  1, 100, _dt(2026, 1, 1))
+    _trade(db_session, "AAPL", "sell", 1, 120, _dt(2026, 3, 1), pl=20.0)  # 59d
+    _trade(db_session, "NVDA", "buy",  1, 100, _dt(2026, 1, 1))
+    _trade(db_session, "NVDA", "sell", 1, 120, _dt(2026, 9, 1), pl=20.0)  # 243d
+
+    # Both → avg of 59 and 243 = 151
+    assert avg_hold_days(db_session) == pytest.approx(151.0)
+    # Q1 only → 59
+    val = avg_hold_days(
+        db_session,
+        from_date=date(2026, 1, 1), to_date=date(2026, 3, 31),
+    )
+    assert val == pytest.approx(59.0)

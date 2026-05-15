@@ -292,3 +292,24 @@ def realized_pl_by_ticker(
     ]
     rows.sort(key=lambda r: abs(r["realized_pl"]), reverse=True)
     return rows[:top_n]
+
+
+def avg_hold_days(
+    session: Session,
+    *,
+    from_date: "date | None" = None,
+    to_date: "date | None" = None,
+) -> float | None:
+    """Average hold_days across FIFO LotMatches whose sell_executed_at.date()
+    falls in the inclusive window. Returns None when no matches qualify.
+    """
+    from marketpulse.holdings.fifo import match_lots_fifo
+
+    matches = match_lots_fifo(session)
+    if from_date is not None:
+        matches = [m for m in matches if m.sell_executed_at.date() >= from_date]
+    if to_date is not None:
+        matches = [m for m in matches if m.sell_executed_at.date() <= to_date]
+    if not matches:
+        return None
+    return sum(m.hold_days for m in matches) / len(matches)
