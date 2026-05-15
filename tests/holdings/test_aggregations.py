@@ -122,6 +122,7 @@ def test_monthly_realized_pl_default_returns_all_months_no_fill(db_session):
 def test_monthly_realized_pl_with_months_fills_gaps(db_session):
     """months=15: trailing 15 calendar months (incl. current), missing → 0."""
     import datetime as dt
+
     from marketpulse.holdings.service import monthly_realized_pl
 
     _trade(db_session, "AAPL", "buy",  10, 100.0, _dt(2026, 1, 1))
