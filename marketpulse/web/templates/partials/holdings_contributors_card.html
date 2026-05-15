@@ -6,8 +6,9 @@
     <span class="mp-card__sub">按 |P&amp;L| 降序</span>
   </div>
   <ul class="mp-allocation-list">
-    {% set max_abs = contributors | map(attribute='pl_dollars') | map('abs') | max if contributors else 0 %}
-    {% for c in contributors %}
+    {% set valued = contributors | selectattr('pl_dollars', 'ne', none) | list %}
+    {% set max_abs = valued | map(attribute='pl_dollars') | map('abs') | max if valued else 0 %}
+    {% for c in valued %}
       <li class="mp-allocation-row">
         <span class="grotesk" style="font-weight:700; font-size:13px; color:var(--ns-navy); width:60px;">{{ c.ticker }}</span>
         <div class="mp-allocation-bar">
@@ -20,7 +21,7 @@
         </span>
       </li>
     {% endfor %}
-    {% if not contributors %}
+    {% if not valued %}
       <li class="muted" style="padding: 16px;">暂无盈亏数据</li>
     {% endif %}
   </ul>
