@@ -256,3 +256,13 @@ def test_holdings_page_shows_total_dividends_kpi(client: TestClient, monkeypatch
         assert "+6.02" in page.text
     finally:
         client.app.dependency_overrides.clear()
+
+
+def test_holdings_page_renders_with_phase_5d_context(client, monkeypatch):
+    """Smoke test: page renders without UndefinedError after route extension."""
+    _login(client, monkeypatch)
+    r = client.get("/holdings")
+    assert r.status_code == 200
+    # The old template still references context keys; new keys are extra
+    # and silently ignored by Jinja. Just verify no 500.
+    assert "已实现盈亏" in r.text or "YTD" in r.text or "holdings" in r.text.lower()

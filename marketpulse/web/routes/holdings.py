@@ -43,15 +43,36 @@ def holdings_page(
     data: DataService = Depends(get_data_service),
     _: None = Depends(require_auth),
 ):
+    from datetime import date as _date
+
+    from marketpulse.holdings.sector import backfill_holding_sectors
+    from marketpulse.holdings.service import (
+        contributors_ranked,
+        sector_breakdown,
+        today_portfolio_change,
+    )
+
+    # Backfill any NULL sectors (bounded to 3 tickers per call).
+    backfill_holding_sectors(db)
+
     holdings = db.query(Holding).order_by(Holding.sort_order, Holding.id).all()
     rows = enrich_holdings(holdings, data)
     totals = compute_totals(rows)
     realized = total_realized_pl(db)
     dividends_by_ticker = per_ticker_dividends(db)
-    # Attach per-ticker dividend total to each enriched row so the table can
-    # show it inline without a second query loop.
     for r in rows:
         r["dividends_received"] = dividends_by_ticker.get(r["ticker"], 0.0)
+
+    # Phase 5d KPI block
+    today_year_start = _date(_date.today().year, 1, 1)
+    monthly_div_list = monthly_dividends(db)
+    this_month_div = monthly_div_list[-1]["amount"] if monthly_div_list else 0.0
+    kpi = {
+        "today_change": today_portfolio_change(rows),
+        "ytd_realized": total_realized_pl(db, from_date=today_year_start),
+        "this_month_dividends": this_month_div,
+    }
+
     return templates.TemplateResponse(
         request,
         "holdings.html",
@@ -63,8 +84,12 @@ def holdings_page(
             "total_dividends": total_dividends(db),
             "allocation": allocation_breakdown(rows),
             "monthly_pl": monthly_realized_pl(db),
-            "monthly_dividends": monthly_dividends(db),
+            "monthly_dividends": monthly_div_list,
             "trade_stats": trading_stats(db),
+            # Phase 5d additions
+            "kpi": kpi,
+            "contributors": contributors_ranked(rows, top_n=5),
+            "sectors": sector_breakdown(rows),
         },
     )
 

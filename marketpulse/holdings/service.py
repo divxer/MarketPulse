@@ -356,7 +356,7 @@ def sector_breakdown(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     )
     for r in rows:
         s = r["sector"]
-        buckets[s]["market_value"] += r["market_value"]
+        buckets[s]["market_value"] += r["market_value"] or 0.0
         buckets[s]["holding_count"] += 1
     total = sum(b["market_value"] for b in buckets.values())
     out = [
