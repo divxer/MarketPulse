@@ -18,7 +18,7 @@ def _trade(session, ticker, action, qty, price, when) -> Trade:
         price=price,
         fees=0.0,
         executed_at=when,
-        realized_pl=None if action == "buy" else 0.0,  # filled later by FIFO
+        realized_pl=None if action == "buy" else 0.0,  # placeholder; FIFO never writes this
     )
     session.add(t)
     session.commit()
@@ -137,3 +137,43 @@ def test_excludes_splits_and_dividends(db_session):
 
     matches = match_lots_fifo(db_session)
     assert len(matches) == 1  # only the buy/sell pair
+
+
+def test_executed_at_none_falls_back_to_created_at(db_session):
+    """When executed_at is None, ordering and hold_days use created_at.
+
+    Both buy and sell have executed_at=None so nulls_last places them after
+    all dated rows; within that group id-order (insertion order) keeps buy
+    before sell, and hold_days is derived from their backdated created_at.
+    """
+    from marketpulse.holdings.fifo import match_lots_fifo
+
+    # Insert buy then sell, both with executed_at=None.
+    t_buy = Trade(
+        ticker="AAPL", action="buy",
+        quantity=10, price=100.0, fees=0.0,
+        executed_at=None, realized_pl=None,
+    )
+    t_sell = Trade(
+        ticker="AAPL", action="sell",
+        quantity=10, price=120.0, fees=0.0,
+        executed_at=None, realized_pl=0.0,
+    )
+    db_session.add_all([t_buy, t_sell])
+    db_session.commit()
+
+    # Backdate created_at to a deterministic spread (100 days apart).
+    t_buy.created_at = _dt(2026, 1, 1)
+    t_sell.created_at = _dt(2026, 4, 11)
+    db_session.commit()
+
+    matches = match_lots_fifo(db_session)
+    assert len(matches) == 1
+    assert matches[0].buy_executed_at == _dt(2026, 1, 1)
+    assert matches[0].hold_days == 100
+
+
+def test_empty_table_returns_empty_list(db_session):
+    """No trades at all → empty list (not exception)."""
+    from marketpulse.holdings.fifo import match_lots_fifo
+    assert match_lots_fifo(db_session) == []

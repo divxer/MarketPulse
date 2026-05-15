@@ -8,6 +8,12 @@ Used by aggregation layer to compute:
 Read-only: never writes back to Trade.realized_pl. Existing Trade.realized_pl
 column is filled by trades_service on sell-row creation; this matcher is an
 independent view on the same data.
+
+Note: LotMatch.realized_pl is GROSS — buy/sell spread only, no fees.
+Trade.realized_pl (filled by trades_service) is NET (includes fees).
+The two values diverge for any portfolio with non-zero fees. Consumers
+that need fee-accurate per-ticker totals should sum Trade.realized_pl
+directly, not fold over LotMatch.
 """
 from __future__ import annotations
 
@@ -27,7 +33,7 @@ class LotMatch:
     sell_executed_at: datetime
     quantity: float
     hold_days: int
-    realized_pl: float
+    realized_pl: float  # gross PL only — does NOT deduct Trade.fees (use Trade.realized_pl for net)
     buy_price: float  # for cost basis aggregation
 
 
@@ -37,12 +43,16 @@ def match_lots_fifo(session: Session) -> list[LotMatch]:
     sell_executed_at (i.e., when the match was realized).
 
     Trades with executed_at=None fall back to created_at for ordering.
+    Sells with executed_at=None (using created_at fallback) appear after all
+    sells with explicit executed_at.
     Sells exceeding total open quantity have the overflow silently dropped
     (matches Trade.realized_pl behavior in trades_service).
     """
+    # Tiebreak by id (insertion order, monotone) for trades sharing the same
+    # executed_at — more reliable than created_at for sub-second commits.
     trades = (
         session.query(Trade)
-        .order_by(Trade.executed_at.asc().nullslast(), Trade.id.asc())
+        .order_by(Trade.executed_at.asc().nulls_last(), Trade.id.asc())
         .all()
     )
 
