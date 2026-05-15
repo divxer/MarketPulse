@@ -1,194 +1,43 @@
 {% extends "base.html" %}
+{% block main_width %}max-w-[2400px]{% endblock %}
+{% block nav_width %}max-w-[2400px]{% endblock %}
 {% block content %}
 
-{# ===== Top KPI strip ===== #}
-<section class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
-  <div class="bg-white rounded-md shadow-sm p-3">
-    <div class="text-xs text-slate-500">总成本</div>
-    <div class="text-xl font-semibold mt-1">${{ "%.2f"|format(totals.cost) }}</div>
-  </div>
-  <div class="bg-white rounded-md shadow-sm p-3">
-    <div class="text-xs text-slate-500">市值</div>
-    <div class="text-xl font-semibold mt-1">${{ "%.2f"|format(totals.market_value) }}</div>
-  </div>
-  <div class="bg-white rounded-md shadow-sm p-3">
-    <div class="text-xs text-slate-500">未实现盈亏</div>
-    <div class="text-xl font-semibold mt-1 {% if totals.pl_dollars >= 0 %}text-green-600{% else %}text-red-600{% endif %}">
-      {{ "%+.2f"|format(totals.pl_dollars) }}
-    </div>
-    <div class="text-xs {% if totals.pl_pct >= 0 %}text-green-600{% else %}text-red-600{% endif %}">
-      {{ "%+.2f"|format(totals.pl_pct) }}%
-    </div>
-  </div>
-  <div class="bg-white rounded-md shadow-sm p-3">
-    <div class="text-xs text-slate-500">已实现盈亏</div>
-    <div class="text-xl font-semibold mt-1 {% if realized_pl >= 0 %}text-green-600{% else %}text-red-600{% endif %}">
-      {{ "%+.2f"|format(realized_pl) }}
-    </div>
-    <div class="text-xs text-slate-500">{{ trade_stats.total_trades }} 笔交易 · 胜率 {% if trade_stats.win_rate_pct is not none %}{{ "%.0f"|format(trade_stats.win_rate_pct) }}%{% else %}—{% endif %}</div>
-  </div>
-  <div class="bg-white rounded-md shadow-sm p-3">
-    <div class="text-xs text-slate-500">累计分红</div>
-    <div class="text-xl font-semibold mt-1 text-green-600">
-      {{ "%+.2f"|format(total_dividends) }}
-    </div>
-    {% set combined = realized_pl + total_dividends %}
-    <div class="text-xs text-slate-500">含分红总收益
-      <span class="{% if combined >= 0 %}text-green-600{% else %}text-red-600{% endif %}">{{ "%+.0f"|format(combined) }}</span>
-    </div>
+{% include "partials/holdings_hero.html" ignore missing %}
+
+<section class="mp-holdings-kpi">
+  {% include "partials/holdings_kpi_strip.html" ignore missing %}
+</section>
+
+<section class="mp-holdings-row3">
+  {% include "partials/holdings_allocation_card.html" ignore missing %}
+  {% include "partials/holdings_sector_card.html" ignore missing %}
+  {% include "partials/holdings_contributors_card.html" ignore missing %}
+</section>
+
+<section class="mp-holdings-table">
+  <div id="holdings-container">
+    {% include "partials/holdings_table.html" %}
   </div>
 </section>
 
-{% if rows %}
-
-{# ===== Allocation + Contribution row ===== #}
-<section class="grid grid-cols-1 lg:grid-cols-5 gap-3 mb-4">
-  {# Allocation card (3/5) #}
-  <div class="bg-white rounded-md shadow-sm p-4 lg:col-span-3">
-    <h2 class="text-sm font-semibold mb-3">持仓分布</h2>
-    {% if allocation %}
-    <div class="w-full h-6 flex rounded overflow-hidden">
-      {% for a in allocation %}
-        <div style="width: {{ a.pct }}%; background: {{ a.color }};"
-             title="{{ a.ticker }} {{ '%.1f'|format(a.pct) }}% (${{ '%.0f'|format(a.market_value) }})">
-        </div>
-      {% endfor %}
-    </div>
-    <ul class="mt-3 grid grid-cols-2 md:grid-cols-3 gap-x-4 gap-y-1 text-xs">
-      {% for a in allocation %}
-        <li class="flex items-center gap-2">
-          <span class="inline-block w-3 h-3 rounded-sm" style="background: {{ a.color }};"></span>
-          <span class="font-medium">{{ a.ticker }}</span>
-          <span class="text-slate-500 tabular-nums">{{ "%.1f"|format(a.pct) }}%</span>
-          <span class="text-slate-400 tabular-nums ml-auto">${{ "%.0f"|format(a.market_value) }}</span>
-        </li>
-      {% endfor %}
-    </ul>
-    {% else %}
-      <p class="text-slate-500 text-xs">无可用市值数据。</p>
-    {% endif %}
-  </div>
-
-  {# Contribution ranking card (2/5) #}
-  <div class="bg-white rounded-md shadow-sm p-4 lg:col-span-2">
-    <h2 class="text-sm font-semibold mb-3">贡献度排行</h2>
-    <ul class="space-y-2 text-sm">
-      {% for r in ranked_rows %}
-      {% set pl = r.pl_dollars %}
-      <li class="flex items-center gap-2">
-        <a href="/stock/{{ r.ticker }}" class="font-medium w-16 truncate hover:underline">{{ r.ticker }}</a>
-        {% if pl is not none %}
-          {% set max_pl = ranked_rows[0].pl_dollars|default(1) %}
-          {% set max_abs = max_pl|abs if max_pl else 1 %}
-          {% set bar_pct = ((pl|abs) / max_abs * 100) if max_abs else 0 %}
-          <div class="flex-1 h-2 bg-slate-100 rounded overflow-hidden">
-            <div class="h-full {% if pl >= 0 %}bg-green-500{% else %}bg-red-500{% endif %}"
-                 style="width: {{ bar_pct }}%;"></div>
-          </div>
-          <span class="text-xs tabular-nums w-20 text-right {% if pl >= 0 %}text-green-600{% else %}text-red-600{% endif %}">
-            {{ "%+.0f"|format(pl) }}
-          </span>
-          <span class="text-xs text-slate-500 tabular-nums w-14 text-right">
-            {% if r.pl_pct is not none %}{{ "%+.1f"|format(r.pl_pct) }}%{% endif %}
-          </span>
-        {% else %}
-          <span class="text-xs text-slate-400 flex-1">— 行情不可用 —</span>
-        {% endif %}
-      </li>
-      {% endfor %}
-    </ul>
-  </div>
-</section>
-
-{# ===== Holdings detail table ===== #}
-<section class="bg-white rounded-md shadow-sm p-4 mb-4">
-  <div class="flex items-center justify-between mb-3">
-    <h2 class="text-sm font-semibold">持仓明细</h2>
-    <p class="text-xs text-slate-500">
-      通过 <a href="/trades" class="text-slate-700 hover:underline">交易记录</a> 自动计算
-    </p>
-  </div>
-  <table class="w-full text-sm">
-    <thead class="text-left text-slate-500 text-xs">
-      <tr>
-        <th class="px-2 py-1">代码</th>
-        <th class="text-right">数量</th>
-        <th class="text-right">均价</th>
-        <th class="text-right">现价</th>
-        <th class="text-right">市值</th>
-        <th class="text-right">未实现盈亏</th>
-        <th>占组合</th>
-        <th></th>
-      </tr>
-    </thead>
-    <tbody id="holdings-rows">
-      {% for row in rows %}{% include "partials/holding_row.html" %}{% endfor %}
-      {% if not rows %}
-      <tr><td colspan="8" class="px-4 py-8 text-center text-slate-500">
-        暂无持仓。去<a href="/trades" class="text-slate-700 underline">交易</a>页面录入第一笔买入。
-      </td></tr>
-      {% endif %}
-    </tbody>
-  </table>
-</section>
-
-{# ===== Monthly realized P&L histogram ===== #}
-{% if monthly_pl %}
-{% set max_abs_pl = monthly_pl | map(attribute='pl') | map('abs') | max %}
-<section class="bg-white rounded-md shadow-sm p-4 mb-4">
-  <div class="flex items-center justify-between mb-3">
-    <h2 class="text-sm font-semibold">月度已实现盈亏</h2>
-    <p class="text-xs text-slate-500">{{ monthly_pl|length }} 个月 · 累计 {{ "%+.2f"|format(realized_pl) }}</p>
-  </div>
-  <div class="flex items-end gap-1 h-32">
-    {% for m in monthly_pl %}
-    {% set height_pct = ((m.pl|abs) / max_abs_pl * 100) if max_abs_pl else 0 %}
-    <div class="flex flex-col items-center flex-1 min-w-0" title="{{ m.month }}: ${{ '%+.2f'|format(m.pl) }} ({{ m.trade_count }} 笔)">
-      <div class="w-full flex flex-col-reverse h-24">
-        <div class="{% if m.pl >= 0 %}bg-green-500{% else %}bg-red-500{% endif %} rounded-t"
-             style="height: {{ height_pct }}%;"></div>
+<section class="mp-holdings-bottom">
+  {% include "partials/holdings_monthly_card.html" ignore missing %}
+  <div id="holdings-risk-card"
+       hx-get="/holdings/risk-analysis"
+       hx-trigger="load"
+       hx-swap="outerHTML">
+    <section class="mp-card">
+      <div class="mp-card__head">
+        <span class="mp-card__title">
+          <span class="material-symbols-outlined">auto_awesome</span>AI 风险分析
+        </span>
       </div>
-      <div class="text-[10px] text-slate-500 mt-1 truncate w-full text-center">{{ m.month[5:] }}</div>
-    </div>
-    {% endfor %}
+      <div class="mp-card__body mp-risk-loading">
+        <span class="muted">正在分析…</span>
+      </div>
+    </section>
   </div>
-  <p class="text-xs text-slate-500 mt-2">悬停查看具体金额和笔数</p>
-</section>
-{% endif %}
-
-{# ===== AI Risk analysis card ===== #}
-<section class="bg-white rounded-md shadow-sm p-4 mb-4">
-  <div class="flex items-center justify-between">
-    <h2 class="text-sm font-semibold">AI 风险分析</h2>
-    <button hx-get="/holdings/risk-analysis"
-            hx-target="#risk-analysis-result" hx-swap="innerHTML"
-            hx-indicator="#risk-spinner"
-            class="bg-slate-900 text-white px-3 py-1 rounded text-xs">
-      🤖 生成分析
-    </button>
-  </div>
-  <p class="text-xs text-slate-500 mt-2">
-    基于当前持仓、占比、盈亏、交易历史,让 Claude 分析集中度、盈亏结构,
-    并给出可关注的方向(不构成买卖建议)。
-  </p>
-  <span id="risk-spinner" class="htmx-indicator text-xs text-slate-400">分析中…</span>
-  <div id="risk-analysis-result"></div>
 </section>
 
-{% else %}
-
-<section class="bg-white rounded-md shadow-sm p-8 text-center">
-  <p class="text-slate-500">
-    暂无持仓。去 <a href="/trades" class="text-slate-700 underline">交易</a> 页面录入第一笔买入,
-    持仓会自动出现在这里。
-  </p>
-</section>
-
-{% endif %}
-
-<style>
-  .htmx-indicator { opacity: 0; transition: opacity 200ms; }
-  .htmx-request .htmx-indicator { opacity: 1; }
-  .htmx-request.htmx-indicator { opacity: 1; }
-</style>
 {% endblock %}

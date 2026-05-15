@@ -1,0 +1,31 @@
+{# Holdings detail table — transitional Tailwind markup (Task 16 will rewrite) #}
+<section class="bg-white rounded-md shadow-sm p-4 mb-4">
+  <div class="flex items-center justify-between mb-3">
+    <h2 class="text-sm font-semibold">持仓明细</h2>
+    <p class="text-xs text-slate-500">
+      通过 <a href="/trades" class="text-slate-700 hover:underline">交易记录</a> 自动计算
+    </p>
+  </div>
+  <table class="w-full text-sm">
+    <thead class="text-left text-slate-500 text-xs">
+      <tr>
+        <th class="px-2 py-1">代码</th>
+        <th class="text-right">数量</th>
+        <th class="text-right">均价</th>
+        <th class="text-right">现价</th>
+        <th class="text-right">市值</th>
+        <th class="text-right">未实现盈亏</th>
+        <th>占组合</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody id="holdings-rows">
+      {% for row in rows %}{% include "partials/holding_row.html" %}{% endfor %}
+      {% if not rows %}
+      <tr><td colspan="8" class="px-4 py-8 text-center text-slate-500">
+        暂无持仓。去<a href="/trades" class="text-slate-700 underline">交易</a>页面录入第一笔买入。
+      </td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+</section>

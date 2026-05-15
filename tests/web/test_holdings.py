@@ -266,3 +266,26 @@ def test_holdings_page_renders_with_phase_5d_context(client, monkeypatch):
     # The old template still references context keys; new keys are extra
     # and silently ignored by Jinja. Just verify no 500.
     assert "已实现盈亏" in r.text or "YTD" in r.text or "holdings" in r.text.lower()
+
+
+def test_holdings_page_visual_anchors_present(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/holdings")
+    for cls in ("mp-holdings-hero", "mp-holdings-kpi",
+                "mp-holdings-row3", "mp-holdings-table",
+                "mp-holdings-bottom"):
+        assert cls in r.text, f"missing {cls}"
+
+
+def test_holdings_page_h1_renders(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/holdings")
+    assert "Holdings · Portfolio Overview" in r.text
+
+
+def test_holdings_page_uses_2400_max_width(client, monkeypatch):
+    """Like /stock and /trades, /holdings must override base.html's
+    default max-w-5xl with max-w-[2400px]."""
+    _login(client, monkeypatch)
+    r = client.get("/holdings")
+    assert "max-w-[2400px]" in r.text

@@ -739,3 +739,46 @@ hr.mp-hr {
 .mp-ticker-row__bar         { height:8px; background:var(--ns-surface-container);
                               border-radius:2px; position:relative; overflow:hidden; }
 .mp-ticker-row__bar > div   { position:absolute; left:0; top:0; bottom:0; }
+
+/* ════════ Phase 5d: /holdings layout ════════ */
+.mp-holdings-hero        { padding:32px 48px 24px;
+                           display:grid; grid-template-columns:1fr 360px; gap:48px;
+                           align-items:flex-start; }
+.mp-holdings-hero__title { font:700 48px/1 var(--ns-font-headline);
+                           letter-spacing:-0.04em; color:var(--ns-navy); margin:6px 0 0; }
+.mp-holdings-hero__stats { display:flex; align-items:flex-end; gap:48px; margin-top:28px; }
+.mp-holdings-hero__mv-value { font:600 60px/1 var(--ns-font-mono); letter-spacing:-0.04em;
+                              color:var(--ns-navy); }
+.mp-holdings-hero__pl-value { font:700 32px/1.05 var(--ns-font-headline);
+                              letter-spacing:-0.02em; }
+
+.mp-holdings-kpi         { padding:0 48px 16px;
+                           display:grid; grid-template-columns:repeat(5,1fr); gap:16px; }
+.mp-holdings-row3        { padding:16px 48px 16px;
+                           display:grid; grid-template-columns:1.4fr 1fr 1.4fr; gap:16px; }
+.mp-holdings-table       { padding:0 48px 16px; }
+.mp-holdings-bottom      { padding:0 48px 32px;
+                           display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+
+@media (max-width: 1600px) {
+  .mp-holdings-row3      { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 1440px) {
+  .mp-holdings-hero      { grid-template-columns: 1fr; }
+  .mp-holdings-hero__donut { max-width: 360px; }
+  .mp-holdings-row3      { grid-template-columns: 1fr; }
+  .mp-holdings-bottom    { grid-template-columns: 1fr; }
+}
+@media (max-width: 900px) {
+  .mp-holdings-kpi       { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* Risk card loading state */
+.mp-risk-loading         { min-height:200px; display:flex;
+                           align-items:center; justify-content:center; }
+.mp-prose                { font-size:14px; line-height:1.7;
+                           color:var(--ns-on-surface); padding:20px; }
+.mp-prose h2, .mp-prose h3 { font-family:var(--ns-font-headline);
+                              color:var(--ns-navy); margin-top:16px; }
+.mp-prose p              { margin:8px 0; }
+.mp-prose ul             { padding-left:24px; }
