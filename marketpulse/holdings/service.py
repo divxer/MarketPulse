@@ -11,7 +11,7 @@ from typing import Any, Protocol
 from sqlalchemy.orm import Session
 
 from marketpulse.data.types import Quote
-from marketpulse.db.models import Holding, Trade
+from marketpulse.db.models import Dividend, Holding, Trade
 from marketpulse.logging import get_logger
 
 log = get_logger(__name__)
@@ -110,38 +110,99 @@ def sort_by_pl_impact(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(rows, key=key)
 
 
-def monthly_realized_pl(session: Session) -> list[dict[str, Any]]:
+def monthly_realized_pl(
+    session: Session,
+    *,
+    months: int | None = None,
+) -> list[dict[str, Any]]:
     """Aggregate realized P&L from sell trades grouped by (year, month).
 
-    Returns a list of {month: 'YYYY-MM', pl: float, trade_count: int} sorted
-    chronologically. Months with no trades are omitted (frontend can fill gaps).
+    months=None (default): return all months that have realized P&L,
+        chronologically; gaps omitted. Preserves existing /holdings behavior.
+    months=N: return the trailing N calendar months (including current);
+        missing months padded with {pl: 0, trade_count: 0}.
     """
-    sells = (
-        session.query(Trade)
-        .filter(Trade.realized_pl.isnot(None))
-        .all()
-    )
+    sells = session.query(Trade).filter(Trade.realized_pl.isnot(None)).all()
     buckets: dict[str, dict[str, Any]] = defaultdict(
         lambda: {"pl": 0.0, "trade_count": 0},
     )
     for t in sells:
-        when: date | None = t.executed_at.date() if t.executed_at else (
-            t.created_at.date() if t.created_at else None
+        when: date | None = (
+            t.executed_at.date() if t.executed_at
+            else (t.created_at.date() if t.created_at else None)
         )
         if when is None:
             continue
         key = f"{when.year:04d}-{when.month:02d}"
         buckets[key]["pl"] += t.realized_pl
         buckets[key]["trade_count"] += 1
+
+    if months is None:
+        return [
+            {"month": m, "pl": v["pl"], "trade_count": v["trade_count"]}
+            for m, v in sorted(buckets.items())
+        ]
+
+    # months=N: pad trailing N months including current.
+    today = date.today()
+    keys: list[str] = []
+    y, m = today.year, today.month
+    for _ in range(months):
+        keys.append(f"{y:04d}-{m:02d}")
+        m -= 1
+        if m == 0:
+            m = 12
+            y -= 1
+    keys.reverse()
     return [
-        {"month": m, "pl": v["pl"], "trade_count": v["trade_count"]}
-        for m, v in sorted(buckets.items())
+        {"month": k, "pl": buckets[k]["pl"], "trade_count": buckets[k]["trade_count"]}
+        for k in keys
     ]
 
 
-def trading_stats(session: Session) -> dict[str, Any]:
-    """High-level stats across all trades: count, win rate, total realized P&L."""
-    trades = session.query(Trade).all()
+def trading_stats(
+    session: Session,
+    *,
+    ticker: str | None = None,
+    from_date: "date | None" = None,
+    to_date: "date | None" = None,
+) -> dict[str, Any]:
+    """High-level stats across trades: count, win rate, total realized P&L.
+
+    `ticker` filters to a single symbol (case-insensitive).
+    `from_date`/`to_date` is an inclusive window on each row's
+    executed_at.date() (fallback to created_at). Both BUY and SELL
+    rows are filtered — `total_trades` counts BUY+SELL within the
+    window; `wins`/`losses` count only the SELL rows that fell in.
+
+    Returns:
+      total_trades: BUY+SELL count within filter (NOT just sells)
+      closed_positions: wins+losses
+      wins / losses: per realized_pl sign
+      win_rate_pct: float OR None when wins+losses == 0
+      realized_pl: sum of realized_pl in window
+    """
+    q = session.query(Trade)
+    if ticker:
+        q = q.filter(Trade.ticker == ticker.upper())
+    trades = q.all()
+
+    # Single-pass filter (compute _row_date once per row)
+    if from_date is not None or to_date is not None:
+        def _row_date(t: Trade):
+            d = t.executed_at or t.created_at
+            return d.date() if d is not None else None
+
+        def _keep(t: Trade) -> bool:
+            d = _row_date(t)
+            if d is None:
+                return False
+            if from_date is not None and d < from_date:
+                return False
+            return not (to_date is not None and d > to_date)
+
+        trades = [t for t in trades if _keep(t)]
+
     total = len(trades)
     sells = [t for t in trades if t.realized_pl is not None]
     wins = sum(1 for t in sells if t.realized_pl > 0)
@@ -153,6 +214,104 @@ def trading_stats(session: Session) -> dict[str, Any]:
         "closed_positions": closed,
         "wins": wins,
         "losses": losses,
-        "win_rate_pct": (wins / closed * 100) if closed else 0.0,
+        "win_rate_pct": (wins / closed * 100) if closed else None,
         "realized_pl": realized,
     }
+
+
+def trade_count_this_month(session: Session) -> dict[str, int]:
+    """Activity count in the current calendar month (UTC).
+
+    Returns {total, buys, sells, dividends}. Splits intentionally not
+    counted — they're corporate actions, not user activity.
+    Not affected by any filter (always current month).
+    """
+    today = date.today()
+    y, m = today.year, today.month
+    next_y, next_m = (y + 1, 1) if m == 12 else (y, m + 1)
+    start = date(y, m, 1)
+    end_excl = date(next_y, next_m, 1)
+
+    buys = sells = 0
+    for t in session.query(Trade).all():
+        when = (t.executed_at.date() if t.executed_at
+                else (t.created_at.date() if t.created_at else None))
+        if when is None or when < start or when >= end_excl:
+            continue
+        if t.action == "buy":
+            buys += 1
+        elif t.action == "sell":
+            sells += 1
+
+    dividends = (
+        session.query(Dividend)
+        .filter(Dividend.ex_date >= start, Dividend.ex_date < end_excl)
+        .count()
+    )
+
+    return {
+        "total": buys + sells + dividends,
+        "buys": buys, "sells": sells, "dividends": dividends,
+    }
+
+
+def realized_pl_by_ticker(
+    session: Session,
+    *,
+    top_n: int = 8,
+) -> list[dict[str, Any]]:
+    """Per-ticker realized P&L leaderboard, sorted by abs(P&L) desc, top_n cap.
+
+    Uses FIFO matcher (LotMatch) to compute both realized_pl and cost basis.
+    Note: LotMatch.realized_pl is GROSS (excludes fees) — see fifo.py docstring.
+    For fee-accurate per-ticker totals, sum Trade.realized_pl directly instead.
+
+    Returns: [{ticker, realized_pl, pct}, ...]
+      pct = realized_pl / cost_basis_of_sold_lots * 100
+      Tickers with zero realized_pl are omitted.
+    """
+    from marketpulse.holdings.fifo import match_lots_fifo
+
+    matches = match_lots_fifo(session)
+    if not matches:
+        return []
+
+    by_ticker: dict[str, dict[str, float]] = defaultdict(
+        lambda: {"realized_pl": 0.0, "cost_basis": 0.0},
+    )
+    for m in matches:
+        by_ticker[m.ticker]["realized_pl"] += m.realized_pl
+        by_ticker[m.ticker]["cost_basis"] += m.quantity * m.buy_price
+
+    rows = [
+        {
+            "ticker": t,
+            "realized_pl": v["realized_pl"],
+            "pct": (v["realized_pl"] / v["cost_basis"] * 100) if v["cost_basis"] else 0.0,
+        }
+        for t, v in by_ticker.items()
+        if v["realized_pl"] != 0.0
+    ]
+    rows.sort(key=lambda r: abs(r["realized_pl"]), reverse=True)
+    return rows[:top_n]
+
+
+def avg_hold_days(
+    session: Session,
+    *,
+    from_date: "date | None" = None,
+    to_date: "date | None" = None,
+) -> float | None:
+    """Average hold_days across FIFO LotMatches whose sell_executed_at.date()
+    falls in the inclusive window. Returns None when no matches qualify.
+    """
+    from marketpulse.holdings.fifo import match_lots_fifo
+
+    matches = match_lots_fifo(session)
+    if from_date is not None:
+        matches = [m for m in matches if m.sell_executed_at.date() >= from_date]
+    if to_date is not None:
+        matches = [m for m in matches if m.sell_executed_at.date() <= to_date]
+    if not matches:
+        return None
+    return sum(m.hold_days for m in matches) / len(matches)

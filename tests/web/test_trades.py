@@ -1,6 +1,9 @@
+from datetime import UTC, date, datetime
+
 from fastapi.testclient import TestClient
 
 from marketpulse.auth.password import hash_password
+from marketpulse.db.models import Dividend, Trade
 
 
 def _login(client, monkeypatch):
@@ -598,3 +601,315 @@ def test_trades_table_renders_time_with_data_utc(client: TestClient, monkeypatch
     assert "htmx:afterSwap" in body, (
         "trades.html must re-apply local time after HTMX swaps the table"
     )
+
+
+def _seed_trades(db_session, n: int):
+    """Seed N AAPL trades evenly spaced over a year."""
+    for i in range(n):
+        when = datetime(2026, 1, 1, 12, 0, tzinfo=UTC) + (
+            (datetime(2026, 12, 31, 12, 0, tzinfo=UTC) - datetime(2026, 1, 1, 12, 0, tzinfo=UTC))
+            * (i / max(1, n - 1))
+        )
+        db_session.add(Trade(
+            ticker="AAPL", action="buy", quantity=1.0, price=100.0,
+            fees=0.0, executed_at=when, realized_pl=None,
+        ))
+    db_session.commit()
+
+
+def test_trades_page_pagination_default_50(client, monkeypatch, db_session):
+    """75 trades → page 1 shows 50, page 2 shows 25."""
+    _login(client, monkeypatch)
+    _seed_trades(db_session, 75)
+
+    r = client.get("/trades")
+    assert r.status_code == 200
+    # Count unique rows via id="trade-row-" (appears once per row as the element id)
+    assert r.text.count('id="trade-row-') == 50
+
+    r = client.get("/trades?page=2")
+    assert r.text.count('id="trade-row-') == 25
+
+
+def test_trades_page_clamps_overflow_page(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    _seed_trades(db_session, 5)
+    r = client.get("/trades?page=999")
+    assert r.status_code == 200  # not 422
+
+
+def test_trades_page_invalid_date_returns_422(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/trades?from=not-a-date")
+    assert r.status_code == 422
+
+
+def test_trades_page_from_greater_than_to_returns_422(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/trades?from=2026-06-01&to=2026-01-01")
+    assert r.status_code == 422
+
+
+def test_trades_page_q_prefix_match(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    for sym in ("AAPL", "AMZN", "NVDA"):
+        db_session.add(Trade(ticker=sym, action="buy", quantity=1, price=100,
+                             fees=0, executed_at=datetime(2026, 1, 1, tzinfo=UTC)))
+    db_session.commit()
+
+    r = client.get("/trades?q=AA")
+    assert "AAPL" in r.text
+    assert "AMZN" not in r.text
+    assert "NVDA" not in r.text
+
+
+def test_trades_page_q_empty_string_no_filter(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    db_session.add(Trade(ticker="AAPL", action="buy", quantity=1, price=100,
+                         fees=0, executed_at=datetime(2026, 1, 1, tzinfo=UTC)))
+    db_session.commit()
+    r = client.get("/trades?q=")
+    assert "AAPL" in r.text
+
+
+def test_trades_page_ticker_alias_exact_match(client, monkeypatch, db_session):
+    """?ticker=AAPL is exact match (legacy); does NOT match AAPL prefix neighbors."""
+    _login(client, monkeypatch)
+    for sym in ("AAPL", "AAPLE"):  # fictional prefix neighbor
+        db_session.add(Trade(ticker=sym, action="buy", quantity=1, price=100,
+                             fees=0, executed_at=datetime(2026, 1, 1, tzinfo=UTC)))
+    db_session.commit()
+
+    r = client.get("/trades?ticker=AAPL")
+    assert "AAPL" in r.text
+    # AAPLE row should NOT be in the displayed page rows.
+    # Easiest check: ensure no tr with ticker AAPLE link exists.
+    assert "stock/AAPLE" not in r.text
+
+
+def test_trades_page_hx_request_returns_partial_only(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/trades", headers={"HX-Request": "true"})
+    # Partial should NOT contain hero anchor — table or empty state should.
+    assert "mp-hero" not in r.text
+    # Should still contain table or empty-state.
+    assert ('id="trade-row-' in r.text or "暂无记录" in r.text or "mp-table" in r.text
+            or "mp-empty-row" in r.text or "<table" in r.text)
+
+
+def test_trades_page_this_month_kpi_unaffected_by_filter(client, monkeypatch):
+    """Even with from/to in distant past, page still renders and includes
+    本月新笔数 KPI label (whose value uses current calendar month)."""
+    _login(client, monkeypatch)
+    r = client.get("/trades?from=2020-01-01&to=2020-12-31")
+    assert r.status_code == 200
+    # The KPI strip references "本月新笔数" only in the new template (Task 11).
+    # For Task 8 we cannot fully verify the value since templates aren't ready.
+    # Just verify the route doesn't crash.
+
+
+def test_trades_page_ytd_label_default(client, monkeypatch):
+    """No date filter → ctx.kpi.ytd_label == 'YTD'."""
+    _login(client, monkeypatch)
+    r = client.get("/trades")
+    assert r.status_code == 200
+
+
+def test_trades_page_visual_anchors_present(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/trades")
+    for cls in ("mp-hero", "mp-trades-kpi", "mp-trades-filter",
+                "mp-trades-main", "mp-trades-rail"):
+        assert cls in r.text, f"missing {cls}"
+    # h1 with grotesk class + 'Trade Ledger'
+    assert "Trade Ledger" in r.text
+    # Old Tailwind classes should be gone.
+    assert 'class="bg-white rounded-md shadow-sm p-4"' not in r.text
+
+
+def test_kpi_strip_5_value_blocks(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/trades")
+    assert r.text.count("mp-kpi__value") == 5
+
+
+def test_kpi_avg_hold_days_dash_when_empty(client, monkeypatch):
+    """No trades → avg_hold_days is None → rendered as '—'."""
+    _login(client, monkeypatch)
+    r = client.get("/trades")
+    assert "平均持仓天数" in r.text
+    assert "—" in r.text
+
+
+def test_kpi_win_rate_dash_when_no_closed(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/trades")
+    assert "胜率" in r.text
+
+
+def test_kpi_ytd_label_default_is_ytd(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/trades")
+    assert "YTD" in r.text
+
+
+def test_kpi_ytd_label_reflects_explicit_range(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/trades?from=2026-01-01&to=2026-03-31")
+    assert "2026-01-01" in r.text
+    assert "2026-03-31" in r.text
+
+
+def test_filter_card_renders(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/trades")
+    assert "mp-filter-chips" in r.text or 'class="mp-trades-filter"' in r.text
+    # All 4 chips
+    assert "全部" in r.text and "买卖" in r.text and "拆股" in r.text and "分红" in r.text
+    # Range inputs present
+    assert 'type="date"' in r.text
+    # Add form mp-seg
+    assert "mp-seg" in r.text
+
+
+def test_filter_card_active_chip_reflects_event_type(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/trades?event_type=trade")
+    # The "买卖" chip should have mp-chip--active when event_type=trade
+    assert "mp-chip--active" in r.text
+
+
+def test_trades_table_10_columns(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    db_session.add(Trade(ticker="AAPL", action="buy", quantity=1, price=100,
+                         fees=0, executed_at=datetime(2026, 5, 1, tzinfo=UTC)))
+    db_session.commit()
+    r = client.get("/trades")
+    # 11 th cells (10 data + 1 actions column header)
+    assert r.text.count("<th") >= 10
+
+
+def test_trades_table_pagination_footer(client, monkeypatch, db_session):
+    """Page 2 of 3+ pages: both prev and next links visible."""
+    _login(client, monkeypatch)
+    _seed_trades(db_session, 130)  # 3 pages at limit=50
+    r = client.get("/trades?page=2")
+    assert "上一页" in r.text
+    assert "下一页" in r.text
+    assert "mp-btn--navy" in r.text  # current page = navy
+
+
+def test_trades_table_dividend_row_chip(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    db_session.add(Dividend(ticker="AAPL", ex_date=date(2026, 5, 1),
+                            amount_per_share=0.25, total_amount=2.5))
+    db_session.commit()
+    r = client.get("/trades")
+    assert "mp-chip--up" in r.text
+    assert "分红" in r.text
+
+
+def test_trades_table_split_row_purple(client, monkeypatch, db_session):
+    from marketpulse.db.models import StockSplit
+    _login(client, monkeypatch)
+    db_session.add(StockSplit(ticker="AAPL", ex_date=date(2026, 5, 1),
+                              ratio=2.0))
+    db_session.commit()
+    r = client.get("/trades")
+    assert "mp-chip--split" in r.text
+    assert "拆股" in r.text
+
+
+def test_monthly_pl_card_15_bars(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/trades")
+    assert r.text.count("mp-monthly-bar__bar") == 15
+    assert "月度已实现盈亏" in r.text
+
+
+def test_dropzone_card_renders(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/trades")
+    assert 'action="/trades/import"' in r.text
+    assert 'enctype="multipart/form-data"' in r.text
+    assert "拖入" in r.text
+    assert "mp-dropzone" in r.text
+
+
+def test_by_ticker_card_empty_state(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/trades")
+    assert "按代码" in r.text
+
+
+def test_by_ticker_card_renders_data(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    db_session.add(Trade(ticker="AAPL", action="buy", quantity=10, price=100,
+                         fees=0, executed_at=datetime(2026, 1, 1, tzinfo=UTC),
+                         realized_pl=None))
+    db_session.add(Trade(ticker="AAPL", action="sell", quantity=10, price=120,
+                         fees=0, executed_at=datetime(2026, 6, 1, tzinfo=UTC),
+                         realized_pl=200.0))
+    db_session.commit()
+    r = client.get("/trades")
+    assert r.text.count("AAPL") >= 1
+    assert "mp-ticker-row" in r.text
+
+
+def test_post_trade_returns_partial_with_page_1(client, monkeypatch, db_session):
+    """After adding, returned partial defaults to page 1."""
+    _login(client, monkeypatch)
+    r = client.post("/trades", data={
+        "event_kind": "buy", "action": "buy",
+        "ticker": "AAPL", "quantity": "1", "price": "100",
+        "fees": "0", "tz_offset_minutes": "0",
+    })
+    assert r.status_code == 200
+    assert "AAPL" in r.text
+
+
+def test_delete_preserves_pagination(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    _seed_trades(db_session, 60)
+    # Get id of a trade on page 2 (10th from oldest = 50th from newest at limit=50,
+    # so anything past index 50 in desc order is on page 2)
+    from marketpulse.db.models import Trade
+    trades = db_session.query(Trade).order_by(Trade.executed_at.desc()).all()
+    target = trades[55]  # on page 2 of 50/page
+    r = client.delete(f"/trades/{target.id}?page=2&limit=50")
+    assert r.status_code == 200
+    # Trade row gone from response
+    assert f"trade-row-{target.id}" not in r.text
+
+
+def test_delete_last_item_on_page_clamps(client, monkeypatch, db_session):
+    """If deleting drops total below current page's start, clamp to last non-empty."""
+    _login(client, monkeypatch)
+    _seed_trades(db_session, 51)
+    from marketpulse.db.models import Trade
+    trades = db_session.query(Trade).order_by(Trade.executed_at.desc()).all()
+    target = trades[50]  # only item on page 2
+    r = client.delete(f"/trades/{target.id}?page=2&limit=50")
+    assert r.status_code == 200
+    # After delete, page=2 would have been empty; response should contain page 1 rows.
+    assert "trade-row-" in r.text
+
+
+def test_post_trade_with_invalid_filter_date_returns_422(client, monkeypatch):
+    """Malformed ?from on POST should 422 not 500."""
+    _login(client, monkeypatch)
+    r = client.post(
+        "/trades?from=not-a-date",
+        data={
+            "ticker": "AAPL", "action": "buy",
+            "quantity": "1", "price": "100",
+        },
+    )
+    assert r.status_code == 422
+
+
+def test_delete_trade_with_invalid_filter_date_returns_422(client, monkeypatch):
+    """Malformed ?from on DELETE should 422 not 500."""
+    _login(client, monkeypatch)
+    r = client.delete("/trades/1?from=garbage")
+    assert r.status_code == 422

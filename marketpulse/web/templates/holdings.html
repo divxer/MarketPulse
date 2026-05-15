@@ -25,7 +25,7 @@
     <div class="text-xl font-semibold mt-1 {% if realized_pl >= 0 %}text-green-600{% else %}text-red-600{% endif %}">
       {{ "%+.2f"|format(realized_pl) }}
     </div>
-    <div class="text-xs text-slate-500">{{ trade_stats.total_trades }} 笔交易 · 胜率 {{ "%.0f"|format(trade_stats.win_rate_pct) }}%</div>
+    <div class="text-xs text-slate-500">{{ trade_stats.total_trades }} 笔交易 · 胜率 {% if trade_stats.win_rate_pct is not none %}{{ "%.0f"|format(trade_stats.win_rate_pct) }}%{% else %}—{% endif %}</div>
   </div>
   <div class="bg-white rounded-md shadow-sm p-3">
     <div class="text-xs text-slate-500">累计分红</div>

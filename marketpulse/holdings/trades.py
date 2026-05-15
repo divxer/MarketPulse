@@ -195,9 +195,30 @@ def recompute_ticker(session: Session, ticker: str) -> None:
     session.commit()
 
 
-def total_realized_pl(session: Session, *, ticker: str | None = None) -> float:
-    """Sum of realized P&L across all sell trades (optionally filtered by ticker)."""
+def total_realized_pl(
+    session: Session,
+    *,
+    ticker: str | None = None,
+    from_date: date | None = None,
+    to_date: date | None = None,
+) -> float:
+    """Sum of realized P&L across sell trades (filter by ticker and/or date window).
+
+    Date window filters the SELL row's executed_at.date() (inclusive on both
+    ends). Trades with executed_at=None fall back to created_at.
+    """
     q = session.query(Trade).filter(Trade.realized_pl.isnot(None))
     if ticker:
         q = q.filter(Trade.ticker == ticker.upper())
-    return sum(t.realized_pl for t in q.all())
+    rows = q.all()
+
+    def _row_date(t: Trade):
+        d = t.executed_at or t.created_at
+        return d.date() if d is not None else None
+
+    if from_date is not None:
+        rows = [r for r in rows if _row_date(r) is not None and _row_date(r) >= from_date]
+    if to_date is not None:
+        rows = [r for r in rows if _row_date(r) is not None and _row_date(r) <= to_date]
+
+    return sum(t.realized_pl for t in rows)

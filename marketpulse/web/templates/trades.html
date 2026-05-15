@@ -1,181 +1,46 @@
 {% extends "base.html" %}
 {% block content %}
-<section class="bg-white rounded-md shadow-sm p-4">
-  <header class="flex items-center justify-between mb-3">
-    <h1 class="font-semibold">
-      交易记录
-      {% if filter_ticker %}— {{ filter_ticker }}{% endif %}
-    </h1>
-    <div class="text-sm text-slate-600 flex items-center gap-4">
-      <a href="/trades/import" class="text-slate-700 hover:underline">导入 Robinhood CSV</a>
-      <span>已实现盈亏</span>
-      <span class="font-semibold {% if realized_pl_total >= 0 %}text-green-600{% else %}text-red-600{% endif %}">
-        ${{ "%+.2f"|format(realized_pl_total) }}
-      </span>
-    </div>
-  </header>
 
-  <!-- Filter strip: links re-fetch with ?event_type=... -->
-  <div class="flex gap-2 mb-3 text-sm">
-    {% set base = "/trades" + ("?ticker=" + filter_ticker if filter_ticker else "") %}
-    {% set sep = "&" if filter_ticker else "?" %}
-    <a href="{{ base }}"
-       class="px-2 py-0.5 rounded {% if not filter_event_type %}bg-slate-900 text-white{% else %}bg-slate-100 text-slate-700{% endif %}">全部</a>
-    <a href="{{ base }}{{ sep }}event_type=trade"
-       class="px-2 py-0.5 rounded {% if filter_event_type == 'trade' %}bg-slate-900 text-white{% else %}bg-slate-100 text-slate-700{% endif %}">仅买卖</a>
-    <a href="{{ base }}{{ sep }}event_type=split"
-       class="px-2 py-0.5 rounded {% if filter_event_type == 'split' %}bg-slate-900 text-white{% else %}bg-slate-100 text-slate-700{% endif %}">仅拆股</a>
-    <a href="{{ base }}{{ sep }}event_type=dividend"
-       class="px-2 py-0.5 rounded {% if filter_event_type == 'dividend' %}bg-slate-900 text-white{% else %}bg-slate-100 text-slate-700{% endif %}">仅分红</a>
+<!-- Hero -->
+<section class="mp-hero">
+  <div>
+    <span class="mp-eyebrow mp-eyebrow--primary">交易记录</span>
+    <h1 class="grotesk mp-hero__title">Trade Ledger</h1>
+    <span class="mp-rule"></span>
+    <p class="mp-hero__desc">买卖、拆股、分红的完整流水。所有持仓与已实现盈亏均由此推算。</p>
   </div>
+  <div class="mp-hero__actions">
+    <a href="/trades/import" class="mp-btn mp-btn--ghost mp-btn--lg">
+      <span class="material-symbols-outlined">upload_file</span>导入 Robinhood CSV
+    </a>
+    <a href="/trades/export.csv{% if filters_qs %}?{{ filters_qs }}{% endif %}"
+       class="mp-btn mp-btn--ghost mp-btn--lg">
+      <span class="material-symbols-outlined">download</span>导出 CSV
+    </a>
+  </div>
+</section>
 
-  <!-- Type-aware form. JS swaps which fields are visible based on the type select. -->
-  <form id="event-form"
-        hx-post="/trades" hx-target="#trades-container" hx-swap="innerHTML"
-        hx-on::after-request="if(event.detail.successful) exitEditMode();"
-        class="grid grid-cols-2 md:grid-cols-7 gap-2 mb-4 text-sm">
-    <select name="event_kind" id="event-kind"
-            onchange="onEventKindChange(this.value)"
-            class="border rounded px-3 py-1">
-      <option value="buy">买入</option>
-      <option value="sell">卖出</option>
-      <option value="split">拆股</option>
-      <option value="dividend">分红</option>
-    </select>
-    <input name="ticker" placeholder="代码" required
-           class="border rounded px-3 py-1 uppercase" />
+<!-- KPI strip (populated by Task 11) -->
+<section class="mp-trades-kpi">
+  {% include "partials/trades_kpi_strip.html" ignore missing %}
+</section>
 
-    <!-- Trade-only fields -->
-    <input name="quantity" type="number" step="any" min="0" placeholder="数量" required
-           class="border rounded px-3 py-1 trade-field" />
-    <input name="price" type="number" step="any" min="0" placeholder="价格 $" required
-           class="border rounded px-3 py-1 trade-field" />
-    <input name="fees" type="number" step="any" min="0" placeholder="手续费 $" value="0"
-           class="border rounded px-3 py-1 trade-field" />
-    <input name="executed_at" type="date" title="交易日期 (留空=今天)"
-           data-optional="true"
-           class="border rounded px-3 py-1 trade-field" />
+<!-- Filter + Add card -->
+<section class="mp-trades-filter">
+  {% include "partials/trades_filter_card.html" %}
+</section>
 
-    <!-- Split-only fields -->
-    <input name="ratio" type="number" step="any" min="0.0001" placeholder="比例 (1:2 填 2)"
-           class="border rounded px-3 py-1 split-field hidden" />
-    <input name="ex_date" type="date" placeholder="生效日期"
-           class="border rounded px-3 py-1 split-field hidden" />
-
-    <!-- Dividend-only fields -->
-    <input name="amount_per_share" type="number" step="any" min="0" placeholder="每股金额 $"
-           class="border rounded px-3 py-1 dividend-field hidden" />
-    <input name="total_amount" type="number" step="any" min="0" placeholder="总金额 $"
-           class="border rounded px-3 py-1 dividend-field hidden" />
-
-    <input name="notes" placeholder="备注(可选)"
-           class="border rounded px-3 py-1 col-span-2 md:col-span-1 min-w-0" />
-    <input type="hidden" name="trade_id" id="trade-id-input" value="" />
-    <input type="hidden" name="tz_offset_minutes" id="tz-offset-input" value="0" />
-    <input type="hidden" name="original_executed_at_iso" id="original-executed-at-iso" value="" />
-    <button id="submit-btn" type="submit"
-            class="bg-slate-900 text-white px-3 py-1 rounded">记录</button>
-    <button id="cancel-edit-btn" type="button" onclick="exitEditMode()"
-            class="bg-slate-200 text-slate-700 px-3 py-1 rounded hidden">取消编辑</button>
-  </form>
-
-  <script>
-    // Swap the form action AND which fields are required based on event kind.
-    // Trade kinds POST to /trades; split → /splits; dividend → /dividends.
-    function onEventKindChange(kind) {
-      const form = document.getElementById('event-form');
-      const tradeFields = form.querySelectorAll('.trade-field');
-      const splitFields = form.querySelectorAll('.split-field');
-      const dividendFields = form.querySelectorAll('.dividend-field');
-      const all = [tradeFields, splitFields, dividendFields];
-      all.forEach(group => group.forEach(el => {
-        el.classList.add('hidden');
-        el.required = false;
-      }));
-      let action = '/trades';
-      let showGroup = tradeFields;
-      if (kind === 'split') { action = '/splits'; showGroup = splitFields; }
-      else if (kind === 'dividend') { action = '/dividends'; showGroup = dividendFields; }
-      showGroup.forEach(el => {
-        el.classList.remove('hidden');
-        if (!el.dataset.optional) el.required = true;
-      });
-      form.setAttribute('hx-post', action);
-      // For trade kinds we need an `action` form field carrying buy/sell.
-      let actionInput = form.querySelector('input[name="action"]');
-      if (kind === 'buy' || kind === 'sell') {
-        if (!actionInput) {
-          actionInput = document.createElement('input');
-          actionInput.type = 'hidden';
-          actionInput.name = 'action';
-          form.appendChild(actionInput);
-        }
-        actionInput.value = kind;
-      } else if (actionInput) {
-        actionInput.remove();
-      }
-    }
-    // Initialize on load (default kind is "buy").
-    onEventKindChange(document.getElementById('event-kind').value);
-    // Populate tz_offset on load so the backend can interpret YYYY-MM-DD
-    // dates in the user's local TZ. Beijing (UTC+8) → -480.
-    document.getElementById('tz-offset-input').value =
-      new Date().getTimezoneOffset();
-
-    // Convert all <time data-utc> elements to user-local format.
-    // Runs once on load and again after every HTMX swap so newly-rendered
-    // rows (after add/edit) are converted too.
-    function formatLocalTime(isoUtc) {
-      const d = new Date(isoUtc);
-      const y = d.getFullYear();
-      const m = String(d.getMonth() + 1).padStart(2, '0');
-      const day = String(d.getDate()).padStart(2, '0');
-      const hh = String(d.getHours()).padStart(2, '0');
-      const mm = String(d.getMinutes()).padStart(2, '0');
-      return `${y}-${m}-${day} ${hh}:${mm}`;
-    }
-    function applyLocalTime(root) {
-      (root || document).querySelectorAll('time[data-utc]').forEach(el => {
-        el.textContent = formatLocalTime(el.dataset.utc);
-      });
-    }
-    applyLocalTime();
-    document.body.addEventListener('htmx:afterSwap', e => applyLocalTime(e.detail.target));
-
-    function loadTradeIntoForm(data) {
-      const form = document.getElementById('event-form');
-      form.querySelector('[name="ticker"]').value = data.ticker || '';
-      form.querySelector('[name="quantity"]').value = data.quantity ?? '';
-      form.querySelector('[name="price"]').value = data.price ?? '';
-      form.querySelector('[name="fees"]').value = data.fees ?? 0;
-      form.querySelector('[name="notes"]').value = data.notes || '';
-      form.querySelector('[name="executed_at"]').value = data.executed_at_date || '';
-      document.getElementById('original-executed-at-iso').value = data.executed_at_iso || '';
-      document.getElementById('event-kind').value = data.action;
-      onEventKindChange(data.action);
-      document.getElementById('trade-id-input').value = data.id;
-      form.setAttribute('hx-put', '/trades/' + data.id);
-      form.removeAttribute('hx-post');
-      document.getElementById('submit-btn').textContent = '保存修改';
-      document.getElementById('cancel-edit-btn').classList.remove('hidden');
-      form.scrollIntoView({behavior: 'smooth', block: 'start'});
-    }
-
-    function exitEditMode() {
-      const form = document.getElementById('event-form');
-      form.reset();
-      document.getElementById('trade-id-input').value = '';
-      document.getElementById('original-executed-at-iso').value = '';
-      form.removeAttribute('hx-put');
-      form.setAttribute('hx-post', '/trades');
-      document.getElementById('submit-btn').textContent = '记录';
-      document.getElementById('cancel-edit-btn').classList.add('hidden');
-      onEventKindChange(document.getElementById('event-kind').value);
-    }
-  </script>
-
+<!-- Main grid: ledger + right rail -->
+<section class="mp-trades-main">
   <div id="trades-container">
     {% include "partials/trades_table.html" %}
   </div>
+  <aside class="mp-trades-rail">
+    {% include "partials/trades_monthly_pl_card.html" ignore missing %}
+    {% include "partials/trades_dropzone_card.html" ignore missing %}
+    {% include "partials/trades_by_ticker_card.html" ignore missing %}
+  </aside>
 </section>
+
+{% include "partials/trades_form_script.html" ignore missing %}
 {% endblock %}

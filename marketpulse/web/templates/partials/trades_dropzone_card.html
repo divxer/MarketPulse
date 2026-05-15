@@ -1,0 +1,40 @@
+<section class="mp-card">
+  <div class="mp-card__head">
+    <span class="mp-card__title">
+      <span class="material-symbols-outlined">upload_file</span>从 Robinhood 导入
+    </span>
+  </div>
+  <div class="mp-card__body">
+    <form action="/trades/import" method="post" enctype="multipart/form-data" id="dropzone-form">
+      <label class="mp-dropzone" id="dropzone">
+        <input type="file" name="file" accept=".csv" class="mp-dropzone__file"
+               onchange="document.getElementById('dropzone-form').submit();" />
+        <span class="material-symbols-outlined mp-dropzone__icon">cloud_upload</span>
+        <div class="mp-dropzone__title">拖入 Robinhood CSV</div>
+        <div class="mp-dropzone__sub">或 <span class="mp-link">点击选择文件</span></div>
+      </label>
+    </form>
+  </div>
+</section>
+
+<script>
+(function() {
+  const dz = document.getElementById('dropzone');
+  if (!dz) return;
+  const fileInput = dz.querySelector('input[type="file"]');
+  const form = document.getElementById('dropzone-form');
+
+  ['dragenter','dragover'].forEach(ev =>
+    dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.add('is-dragover'); })
+  );
+  ['dragleave','drop'].forEach(ev =>
+    dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.remove('is-dragover'); })
+  );
+  dz.addEventListener('drop', e => {
+    if (e.dataTransfer && e.dataTransfer.files.length) {
+      fileInput.files = e.dataTransfer.files;
+      form.submit();
+    }
+  });
+})();
+</script>

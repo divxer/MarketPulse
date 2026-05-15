@@ -1,0 +1,98 @@
+<div class="mp-card" style="padding: 18px;">
+  <!-- Filter row: chip selector + ticker prefix + date range -->
+  <form method="get" action="/trades" class="mp-trades-filter__row">
+    <span class="mp-eyebrow mp-eyebrow--primary">筛选</span>
+    <div class="mp-filter-chips">
+      <button type="submit" name="event_type" value=""
+              class="mp-chip {% if not filters.event_type %}mp-chip--active{% endif %}">
+        全部 <span class="mp-chip__count">{{ counts.all }}</span>
+      </button>
+      <button type="submit" name="event_type" value="trade"
+              class="mp-chip {% if filters.event_type == 'trade' %}mp-chip--active{% endif %}">
+        买卖 <span class="mp-chip__count">{{ counts.trade }}</span>
+      </button>
+      <button type="submit" name="event_type" value="split"
+              class="mp-chip {% if filters.event_type == 'split' %}mp-chip--active{% endif %}">
+        拆股 <span class="mp-chip__count">{{ counts.split }}</span>
+      </button>
+      <button type="submit" name="event_type" value="dividend"
+              class="mp-chip {% if filters.event_type == 'dividend' %}mp-chip--active{% endif %}">
+        分红 <span class="mp-chip__count">{{ counts.dividend }}</span>
+      </button>
+    </div>
+
+    <span class="mp-divider-v"></span>
+
+    <label class="mp-eyebrow">代码</label>
+    <input name="q" value="{{ filters.q or '' }}"
+           placeholder="代码前缀…"
+           class="mp-input mp-input--mono" style="width:180px;" />
+
+    <label class="mp-eyebrow">区间</label>
+    <input name="from" type="date" value="{{ filters['from'] or '' }}"
+           class="mp-input mp-input--mono" />
+    <span class="mp-divider-arrow">→</span>
+    <input name="to" type="date" value="{{ filters.to or '' }}"
+           class="mp-input mp-input--mono" />
+
+    <button type="submit" class="mp-btn mp-btn--ghost mp-btn--sm">应用</button>
+  </form>
+
+  <hr class="mp-hr" style="margin: 16px -18px;" />
+
+  <!-- Add-record row: type-aware form -->
+  <form id="event-form"
+        data-base-post-url="/trades{% if filters_qs %}?{{ filters_qs }}{% endif %}"
+        hx-post="/trades{% if filters_qs %}?{{ filters_qs }}{% endif %}"
+        hx-target="#trades-container" hx-swap="innerHTML"
+        hx-on::after-request="if(event.detail.successful) exitEditMode();"
+        class="mp-trades-add">
+    <div class="mp-trades-add__kind">
+      <span class="mp-eyebrow mp-eyebrow--primary">添加记录</span>
+      <div class="mp-seg" id="event-kind-seg">
+        <button type="button" onclick="onEventKindChange('buy')"      class="is-active">买入</button>
+        <button type="button" onclick="onEventKindChange('sell')">卖出</button>
+        <button type="button" onclick="onEventKindChange('split')">拆股</button>
+        <button type="button" onclick="onEventKindChange('dividend')">分红</button>
+      </div>
+      <input type="hidden" name="event_kind" id="event-kind" value="buy" />
+    </div>
+
+    <input name="ticker" placeholder="代码" required
+           class="mp-input mp-input--mono" style="width:120px;" />
+
+    <!-- Trade fields -->
+    <input name="quantity" type="number" step="any" min="0" placeholder="数量" required
+           class="mp-input trade-field" style="width:100px;" />
+    <input name="price" type="number" step="any" min="0" placeholder="价格 $" required
+           class="mp-input trade-field" style="width:130px;" />
+    <input name="fees" type="number" step="any" min="0" placeholder="手续费 $" value="0"
+           class="mp-input trade-field" style="width:100px;" />
+    <input name="executed_at" type="date" title="交易日期 (留空=今天)" data-optional="true"
+           class="mp-input trade-field" style="width:140px;" />
+
+    <!-- Split fields -->
+    <input name="ratio" type="number" step="any" min="0.0001" placeholder="比例 (1:2 填 2)"
+           class="mp-input split-field hidden" style="width:140px;" />
+    <input name="ex_date" type="date" placeholder="生效日期"
+           class="mp-input split-field hidden" style="width:140px;" />
+
+    <!-- Dividend fields -->
+    <input name="amount_per_share" type="number" step="any" min="0" placeholder="每股金额 $"
+           class="mp-input dividend-field hidden" style="width:120px;" />
+    <input name="total_amount" type="number" step="any" min="0" placeholder="总金额 $"
+           class="mp-input dividend-field hidden" style="width:120px;" />
+
+    <input name="notes" placeholder="备注(可选)"
+           class="mp-input" style="width:260px;" />
+    <input type="hidden" name="trade_id" id="trade-id-input" value="" />
+    <input type="hidden" name="tz_offset_minutes" id="tz-offset-input" value="0" />
+    <input type="hidden" name="original_executed_at_iso" id="original-executed-at-iso" value="" />
+
+    <button id="submit-btn" type="submit" class="mp-btn mp-btn--primary">
+      <span class="material-symbols-outlined">add</span>记录
+    </button>
+    <button id="cancel-edit-btn" type="button" onclick="exitEditMode()"
+            class="mp-btn mp-btn--ghost hidden">取消编辑</button>
+  </form>
+</div>

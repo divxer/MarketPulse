@@ -1,0 +1,97 @@
+  <script>
+    // Swap the form action AND which fields are required based on event kind.
+    // Trade kinds POST to /trades; split → /splits; dividend → /dividends.
+    function onEventKindChange(kind) {
+      const form = document.getElementById('event-form');
+      const tradeFields = form.querySelectorAll('.trade-field');
+      const splitFields = form.querySelectorAll('.split-field');
+      const dividendFields = form.querySelectorAll('.dividend-field');
+      const all = [tradeFields, splitFields, dividendFields];
+      all.forEach(group => group.forEach(el => {
+        el.classList.add('hidden');
+        el.required = false;
+      }));
+      let action = '/trades';
+      let showGroup = tradeFields;
+      if (kind === 'split') { action = '/splits'; showGroup = splitFields; }
+      else if (kind === 'dividend') { action = '/dividends'; showGroup = dividendFields; }
+      showGroup.forEach(el => {
+        el.classList.remove('hidden');
+        if (!el.dataset.optional) el.required = true;
+      });
+      form.setAttribute('hx-post', action);
+      // For trade kinds we need an `action` form field carrying buy/sell.
+      let actionInput = form.querySelector('input[name="action"]');
+      if (kind === 'buy' || kind === 'sell') {
+        if (!actionInput) {
+          actionInput = document.createElement('input');
+          actionInput.type = 'hidden';
+          actionInput.name = 'action';
+          form.appendChild(actionInput);
+        }
+        actionInput.value = kind;
+      } else if (actionInput) {
+        actionInput.remove();
+      }
+    }
+    // Initialize on load (default kind is "buy").
+    onEventKindChange(document.getElementById('event-kind').value);
+    // Populate tz_offset on load so the backend can interpret YYYY-MM-DD
+    // dates in the user's local TZ. Beijing (UTC+8) → -480.
+    document.getElementById('tz-offset-input').value =
+      new Date().getTimezoneOffset();
+
+    // Convert all <time data-utc> elements to user-local format.
+    // Runs once on load and again after every HTMX swap so newly-rendered
+    // rows (after add/edit) are converted too.
+    function formatLocalTime(isoUtc) {
+      const d = new Date(isoUtc);
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      return `${y}-${m}-${day} ${hh}:${mm}`;
+    }
+    function applyLocalTime(root) {
+      (root || document).querySelectorAll('time[data-utc]').forEach(el => {
+        el.textContent = formatLocalTime(el.dataset.utc);
+      });
+    }
+    applyLocalTime();
+    document.body.addEventListener('htmx:afterSwap', e => applyLocalTime(e.detail.target));
+
+    function loadTradeIntoForm(data) {
+      const form = document.getElementById('event-form');
+      form.querySelector('[name="ticker"]').value = data.ticker || '';
+      form.querySelector('[name="quantity"]').value = data.quantity ?? '';
+      form.querySelector('[name="price"]').value = data.price ?? '';
+      form.querySelector('[name="fees"]').value = data.fees ?? 0;
+      form.querySelector('[name="notes"]').value = data.notes || '';
+      form.querySelector('[name="executed_at"]').value = data.executed_at_date || '';
+      document.getElementById('original-executed-at-iso').value = data.executed_at_iso || '';
+      document.getElementById('event-kind').value = data.action;
+      onEventKindChange(data.action);
+      document.getElementById('trade-id-input').value = data.id;
+      form.setAttribute('hx-put', '/trades/' + data.id);
+      form.removeAttribute('hx-post');
+      document.getElementById('submit-btn').textContent = '保存修改';
+      document.getElementById('cancel-edit-btn').classList.remove('hidden');
+      form.scrollIntoView({behavior: 'smooth', block: 'start'});
+    }
+
+    function exitEditMode() {
+      const form = document.getElementById('event-form');
+      form.reset();
+      document.getElementById('trade-id-input').value = '';
+      document.getElementById('original-executed-at-iso').value = '';
+      form.removeAttribute('hx-put');
+      // Restore the filter-preserving hx-post URL from data-base-post-url
+      // (set by the Jinja template). Falling back to /trades is only for
+      // safety; the attribute should always be present.
+      form.setAttribute('hx-post', form.dataset.basePostUrl || '/trades');
+      document.getElementById('submit-btn').textContent = '记录';
+      document.getElementById('cancel-edit-btn').classList.add('hidden');
+      onEventKindChange(document.getElementById('event-kind').value);
+    }
+  </script>
