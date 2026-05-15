@@ -513,3 +513,79 @@ hr.mp-hr {
   background: var(--ns-outline-variant);
   border-radius: 2px;
 }
+
+/* ============ Watchlist sidebar (Variant A left rail) ============ */
+
+.mp-watchlist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.mp-watchlist__item {
+  border-bottom: 1px solid var(--ns-outline-variant);
+  border-left: 3px solid transparent;
+}
+
+.mp-watchlist__item.is-active {
+  background: var(--ns-surface-container);
+  border-left-color: var(--ns-primary);
+}
+
+.mp-watchlist__link {
+  display: block;
+  padding: 10px 14px;
+  color: inherit;
+  text-decoration: none;
+}
+
+.mp-watchlist__link:hover {
+  background: var(--ns-surface-container-low);
+}
+
+.mp-watchlist__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.mp-watchlist__row--values {
+  margin-top: 4px;
+}
+
+.mp-watchlist__id {
+  min-width: 0;          /* allows ellipsis to kick in */
+  flex: 1 1 auto;
+}
+
+.mp-watchlist__ticker {
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--ns-navy);
+  letter-spacing: -0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mp-watchlist__name {
+  font-size: 10.5px;
+  color: var(--ns-on-surface-variant);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mp-watchlist__spark {
+  flex-shrink: 0;
+}
+
+.mp-watchlist__price {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ns-navy);
+}
+
+.mp-watchlist__chg--up   { color: var(--mp-up);   font-size: 11.5px; font-weight: 600; }
+.mp-watchlist__chg--down { color: var(--mp-down); font-size: 11.5px; font-weight: 600; }
