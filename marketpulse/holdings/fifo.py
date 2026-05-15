@@ -17,6 +17,7 @@ directly, not fold over LotMatch.
 """
 from __future__ import annotations
 
+import math
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime
@@ -88,7 +89,10 @@ def match_lots_fifo(session: Session) -> list[LotMatch]:
                 ))
                 head["qty"] -= take
                 remaining -= take
-                if head["qty"] == 0:
+                # Float-imprecision tolerance: a fractional multi-lot sell can leave
+                # qty at ~2.78e-17 instead of exactly 0. Without this, the residual
+                # "ghost lot" stays in the queue and corrupts the next sell match.
+                if math.isclose(head["qty"], 0.0, abs_tol=1e-9):
                     lots.popleft()
             # Overflow (remaining > 0) is silently dropped.
 

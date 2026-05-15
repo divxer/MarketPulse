@@ -177,3 +177,28 @@ def test_empty_table_returns_empty_list(db_session):
     """No trades at all → empty list (not exception)."""
     from marketpulse.holdings.fifo import match_lots_fifo
     assert match_lots_fifo(db_session) == []
+
+
+def test_fractional_multi_lot_sell_drains_cleanly(db_session):
+    """Three 0.1-share buys + one 0.3-share sell → all lots consumed,
+    no ghost lot left to corrupt the next match.
+    """
+    from marketpulse.holdings.fifo import match_lots_fifo
+
+    _trade(db_session, "AAPL", "buy",  0.1, 100.0, _dt(2026, 1, 1))
+    _trade(db_session, "AAPL", "buy",  0.1, 100.0, _dt(2026, 1, 2))
+    _trade(db_session, "AAPL", "buy",  0.1, 100.0, _dt(2026, 1, 3))
+    _trade(db_session, "AAPL", "sell", 0.3, 120.0, _dt(2026, 6, 1))
+    # Add a follow-up trade that would expose any ghost lot.
+    _trade(db_session, "AAPL", "buy",  10.0, 200.0, _dt(2026, 7, 1))
+    _trade(db_session, "AAPL", "sell", 5.0,  220.0, _dt(2026, 8, 1))
+
+    matches = match_lots_fifo(db_session)
+    # 3 fractional matches + 1 from the 10@200 → 5@220 = 4 total.
+    # If ghost lot persisted, it would match part of the 5@220 sell
+    # at price=100 instead of 200, inflating realized_pl.
+    assert len(matches) == 4
+    # The 5@220 match should be entirely at buy_price=200, not contaminated.
+    fifth_match = matches[-1]  # last by sell_executed_at
+    assert fifth_match.buy_price == 200.0
+    assert fifth_match.realized_pl == pytest.approx(100.0)  # (220-200)*5

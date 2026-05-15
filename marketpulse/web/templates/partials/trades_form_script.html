@@ -86,7 +86,10 @@
       document.getElementById('trade-id-input').value = '';
       document.getElementById('original-executed-at-iso').value = '';
       form.removeAttribute('hx-put');
-      form.setAttribute('hx-post', '/trades');
+      // Restore the filter-preserving hx-post URL from data-base-post-url
+      // (set by the Jinja template). Falling back to /trades is only for
+      // safety; the attribute should always be present.
+      form.setAttribute('hx-post', form.dataset.basePostUrl || '/trades');
       document.getElementById('submit-btn').textContent = '记录';
       document.getElementById('cancel-edit-btn').classList.add('hidden');
       onEventKindChange(document.getElementById('event-kind').value);

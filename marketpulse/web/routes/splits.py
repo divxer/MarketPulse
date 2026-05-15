@@ -85,11 +85,9 @@ def splits_delete(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     recompute_ticker(db, split_ticker)
 
-    from datetime import date as _date
-
-    from marketpulse.web.routes.trades import _build_trades_ctx
-    fd = _date.fromisoformat(from_) if from_ else None
-    td = _date.fromisoformat(to) if to else None
+    from marketpulse.web.routes.trades import _build_trades_ctx, _parse_date_or_422
+    fd = _parse_date_or_422(from_, "from")
+    td = _parse_date_or_422(to, "to")
     q_clean = (q.strip() if q else None) or None
     ctx = _build_trades_ctx(
         db, page=page, limit=limit,

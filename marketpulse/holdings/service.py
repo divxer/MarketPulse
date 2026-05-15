@@ -170,8 +170,10 @@ def trading_stats(
     """High-level stats across trades: count, win rate, total realized P&L.
 
     `ticker` filters to a single symbol (case-insensitive).
-    `from_date`/`to_date` is an inclusive window on the SELL row's
-    executed_at.date() (fallback to created_at).
+    `from_date`/`to_date` is an inclusive window on each row's
+    executed_at.date() (fallback to created_at). Both BUY and SELL
+    rows are filtered — `total_trades` counts BUY+SELL within the
+    window; `wins`/`losses` count only the SELL rows that fell in.
 
     Returns:
       total_trades: BUY+SELL count within filter (NOT just sells)

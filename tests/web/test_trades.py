@@ -893,3 +893,23 @@ def test_delete_last_item_on_page_clamps(client, monkeypatch, db_session):
     assert r.status_code == 200
     # After delete, page=2 would have been empty; response should contain page 1 rows.
     assert "trade-row-" in r.text
+
+
+def test_post_trade_with_invalid_filter_date_returns_422(client, monkeypatch):
+    """Malformed ?from on POST should 422 not 500."""
+    _login(client, monkeypatch)
+    r = client.post(
+        "/trades?from=not-a-date",
+        data={
+            "ticker": "AAPL", "action": "buy",
+            "quantity": "1", "price": "100",
+        },
+    )
+    assert r.status_code == 422
+
+
+def test_delete_trade_with_invalid_filter_date_returns_422(client, monkeypatch):
+    """Malformed ?from on DELETE should 422 not 500."""
+    _login(client, monkeypatch)
+    r = client.delete("/trades/1?from=garbage")
+    assert r.status_code == 422

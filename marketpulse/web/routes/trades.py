@@ -27,6 +27,16 @@ log = get_logger(__name__)
 _TICKER_RE = re.compile(r"^[A-Z\^][A-Z0-9.\-]{0,15}$")
 
 
+def _parse_date_or_422(s: str | None, name: str) -> "date | None":
+    """Parse YYYY-MM-DD or raise 422. Module-level for handler reuse."""
+    if not s:
+        return None
+    try:
+        return date.fromisoformat(s)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=f"invalid {name}: {s}") from e
+
+
 def _parse_executed_at(
     executed_at: str,
     tz_offset_minutes: int,
@@ -307,18 +317,8 @@ def trades_page(
       ticker       — exact ticker match (legacy alias, kept for old links)
       event_type   — trade | split | dividend | None
     """
-    from datetime import date as _date
-
-    def _parse_d(s: str | None, name: str):
-        if not s:
-            return None
-        try:
-            return _date.fromisoformat(s)
-        except ValueError as e:
-            raise HTTPException(status_code=422, detail=f"invalid {name}: {s}") from e
-
-    from_date = _parse_d(from_, "from")
-    to_date = _parse_d(to, "to")
+    from_date = _parse_date_or_422(from_, "from")
+    to_date = _parse_date_or_422(to, "to")
     if from_date and to_date and from_date > to_date:
         raise HTTPException(status_code=422, detail="from must be <= to")
     if page <= 0 or limit <= 0:
@@ -352,20 +352,10 @@ def trades_export_csv(
     _: None = Depends(require_auth),
 ):
     """Streaming Robinhood-format CSV; inherits /trades filters except page/limit."""
-    from datetime import date as _date
-
     from fastapi.responses import StreamingResponse
 
-    def _parse_d(s, name):
-        if not s:
-            return None
-        try:
-            return _date.fromisoformat(s)
-        except ValueError as e:
-            raise HTTPException(status_code=422, detail=f"invalid {name}: {s}") from e
-
-    from_date = _parse_d(from_, "from")
-    to_date = _parse_d(to, "to")
+    from_date = _parse_date_or_422(from_, "from")
+    to_date = _parse_date_or_422(to, "to")
     if from_date and to_date and from_date > to_date:
         raise HTTPException(status_code=422, detail="from must be <= to")
     q = (q or "").strip() or None
@@ -487,9 +477,10 @@ def trades_add(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     # After creating, render partial with page=1 (new row at top).
-    from datetime import date as _date
-    fd = _date.fromisoformat(from_) if from_ else None
-    td = _date.fromisoformat(to) if to else None
+    fd = _parse_date_or_422(from_, "from")
+    td = _parse_date_or_422(to, "to")
+    if fd and td and fd > td:
+        raise HTTPException(status_code=422, detail="from must be <= to")
     q_clean = (q.strip() if q else None) or None
     ctx = _build_trades_ctx(
         db, page=1, limit=limit,
@@ -573,9 +564,10 @@ def trades_update(
         recompute_ticker(db, normalized)
 
     # Re-render the partial, preserving pagination context.
-    from datetime import date as _date
-    fd = _date.fromisoformat(from_) if from_ else None
-    td = _date.fromisoformat(to) if to else None
+    fd = _parse_date_or_422(from_, "from")
+    td = _parse_date_or_422(to, "to")
+    if fd and td and fd > td:
+        raise HTTPException(status_code=422, detail="from must be <= to")
     q_clean = (q.strip() if q else None) or None
     ctx = _build_trades_ctx(
         db, page=page, limit=limit,
@@ -599,6 +591,13 @@ def trades_delete(
     db: Session = Depends(get_db),
     _: None = Depends(require_auth),
 ):
+    # Validate filter dates before touching the DB — return 422 on bad input
+    # regardless of whether the trade_id exists.
+    fd = _parse_date_or_422(from_, "from")
+    td = _parse_date_or_422(to, "to")
+    if fd and td and fd > td:
+        raise HTTPException(status_code=422, detail="from must be <= to")
+
     trade = db.query(Trade).filter(Trade.id == trade_id).one_or_none()
     if not trade:
         raise HTTPException(status_code=404, detail="trade not found")
@@ -610,9 +609,6 @@ def trades_delete(
 
     # Re-render the partial, preserving pagination context.
     # _build_trades_ctx will clamp page if the delete emptied the last page.
-    from datetime import date as _date
-    fd = _date.fromisoformat(from_) if from_ else None
-    td = _date.fromisoformat(to) if to else None
     q_clean = (q.strip() if q else None) or None
     ctx = _build_trades_ctx(
         db, page=page, limit=limit,
