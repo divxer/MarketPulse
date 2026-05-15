@@ -334,3 +334,29 @@ def test_holdings_kpi_strip_5_cards(client, monkeypatch):
     assert r.text.count("mp-kpi__value") == 5
     for label in ("总成本", "市值", "未实现盈亏", "已实现盈亏", "累计分红"):
         assert label in r.text
+
+
+def test_holdings_allocation_card_renders(client, monkeypatch, db_session):
+    from datetime import UTC, datetime
+    from unittest.mock import MagicMock
+
+    from marketpulse.data.types import Quote
+    from marketpulse.db.models import Holding
+    from marketpulse.web.deps import get_data_service
+
+    _login(client, monkeypatch)
+    fake = MagicMock()
+    fake.get_quote.return_value = Quote(
+        ticker="AAPL", price=150.0, change_pct=1.0, volume=1000,
+        avg_volume_20d=2000, fetched_at=datetime.now(UTC), stale=False,
+    )
+    fake.get_history.return_value = []
+    client.app.dependency_overrides[get_data_service] = lambda: fake
+
+    db_session.add(Holding(ticker="AAPL", quantity=10.0, avg_cost=100.0,
+                           sort_order=0))
+    db_session.commit()
+    r = client.get("/holdings")
+    assert "持仓分布 · 按代码" in r.text
+    assert "mp-allocation-row" in r.text
+    client.app.dependency_overrides.clear()

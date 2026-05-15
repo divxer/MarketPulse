@@ -788,3 +788,10 @@ hr.mp-hr {
 .mp-donut__legend        { display:flex; flex-direction:column; gap:6px; flex:1; }
 .mp-donut__legend-row    { display:flex; align-items:center; gap:8px; font-size:12px; }
 .mp-donut__legend-swatch { width:10px; height:10px; border-radius:2px; }
+
+/* ════════ Phase 5d: Allocation / sector / contributor lists ════════ */
+.mp-allocation-list      { list-style:none; margin:0; padding:10px 16px 18px; }
+.mp-allocation-row       { display:flex; align-items:center; gap:10px; padding:7px 0; }
+.mp-allocation-bar       { flex:1; height:8px; background:var(--ns-surface-container);
+                           border-radius:2px; position:relative; overflow:hidden; }
+.mp-allocation-bar > div { position:absolute; left:0; top:0; bottom:0; }
