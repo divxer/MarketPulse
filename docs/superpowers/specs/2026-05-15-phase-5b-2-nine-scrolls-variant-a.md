@@ -1,6 +1,6 @@
 # Phase 5b-2 · Stock Detail · NineScrolls Variant A — Full Visual + Data
 
-**Status:** Draft — awaiting user review
+**Status:** Approved (revised after user review 2026-05-15)
 **Author:** harvey
 **Date:** 2026-05-15
 
@@ -28,10 +28,16 @@ Single PR containing all of:
 Add a watchlist sidebar fetch:
 
 ```python
-# Pull all watchlist tickers (already-sorted by created_at)
+# Cap watchlist render to bound worst-case cold-cache page time. User
+# can manage > MAX_WATCHLIST_RENDER but the rail only shows the first N.
+# A future PR can add pagination / virtual scroll / asyncio.gather.
+MAX_WATCHLIST_RENDER = 20
+
+# Pull watchlist tickers (already-sorted by created_at)
 watchlist_tickers = (
     db.query(WatchlistItem.ticker)
     .order_by(WatchlistItem.created_at.asc())
+    .limit(MAX_WATCHLIST_RENDER)
     .all()
 )
 watchlist_items: list[dict] = []
@@ -118,6 +124,8 @@ Pass `watchlist_items` to the template.
   </ul>
 </aside>
 ```
+
+**Ticker / name overflow** — the `.mp-watchlist__name` and `.mp-watchlist__ticker` get `overflow: hidden; text-overflow: ellipsis; white-space: nowrap` so long names (e.g. "Berkshire Hathaway Class B") don't break layout. These styles go into `app.css` with the other `.mp-watchlist*` rules.
 
 A custom Jinja filter `sparkpoints(width, height)` converts the floats list to SVG `points` attribute. Lives in `marketpulse/web/main.py` alongside the existing `_render_markdown` filter:
 
@@ -303,9 +311,19 @@ This is acceptable. If it becomes painful, future optimization: parallel fetch v
 1. `test_stock_page_renders_watchlist_sidebar` — POST a watchlist item, GET /stock/AAPL, assert watchlist HTML present with ticker + price
 2. `test_stock_page_watchlist_empty_state` — empty watchlist, assert "还没添加自选股" present
 3. `test_stock_page_watchlist_marks_active_ticker` — current ticker in watchlist gets `is-active` class
-4. `test_stock_page_uses_mp_card_classes` — body contains `.mp-card`, `.mp-chip`, `.mp-table`, `.mp-eyebrow`, `.mp-btn` somewhere
-5. `test_stock_page_uses_material_symbols` — body contains `material-symbols-outlined` (icons replaced emoji)
-6. `test_stock_page_loads_chart_theme_js` — `<script src="/static/chart-theme.js">` present BEFORE chart.js
+4. `test_stock_page_watchlist_caps_at_max_render` — POST 25 watchlist items, assert only `MAX_WATCHLIST_RENDER` (20) rendered in sidebar
+5. `test_stock_page_uses_mp_card_classes` — body contains `.mp-card`, `.mp-chip`, `.mp-table`, `.mp-eyebrow`, `.mp-btn` somewhere
+6. `test_stock_page_uses_material_symbols` — body contains `material-symbols-outlined` (icons replaced emoji)
+7. `test_stock_page_loads_chart_theme_js` — `<script src="/static/chart-theme.js">` present BEFORE chart.js
+
+`tests/web/test_sparkpoints.py` (new file) — unit tests for the `_sparkpoints` Jinja filter:
+
+1. `test_empty_returns_empty_string` — `[]` → `""`
+2. `test_single_value_returns_empty_string` — `[5.0]` → `""` (need ≥2 points)
+3. `test_two_values_render_correct_endpoints` — `[1.0, 10.0]` with (56, 20) → first point at (0, 20), last at (56, 0)
+4. `test_flat_line_renders_horizontal_midline` — `[5.0, 5.0, 5.0]` → all y=10 (height/2)
+5. `test_normalizes_to_dimensions` — `[1, 2, 3, 4]` with (56, 20) → 4 evenly-spaced x values; y inverted (higher value → smaller y)
+6. `test_handles_negative_values` — `[-2.0, 0.0, 2.0]` → all in range, lowest at y=height, highest at y=0
 
 ## Risk
 
@@ -332,9 +350,11 @@ Other principles not relevant to this scope.
 
 ## Out of Scope
 
-- Watchlist categories / tabs
+- Watchlist categories / tabs (no DB column)
 - Watchlist drag-reorder
+- Pagination / virtual scroll (capped at `MAX_WATCHLIST_RENDER=20` instead)
+- Parallel watchlist fetch (asyncio.gather) — defer until real-world cold-cache time becomes annoying
 - Mobile responsive layout (<768px)
-- Dark mode toggle
+- Dark mode toggle (multi-theme JSON config) — Variant B is separately designed, no preemptive abstraction
 - Ticker tape / command line / F-keys (Variant B-only features)
 - Side rail (record trade with type-aware fields per Variant C)
