@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Form, HTTPException
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy.orm import Session
 
@@ -9,6 +9,7 @@ from marketpulse.holdings.splits import SplitError, delete_split, record_split
 from marketpulse.holdings.trades import recompute_ticker
 from marketpulse.logging import get_logger
 from marketpulse.web.deps import get_db, require_auth
+from marketpulse.web.main import templates
 
 router = APIRouter()
 log = get_logger(__name__)
@@ -66,13 +67,33 @@ def splits_list(
 
 @router.delete("/splits/{split_id}", response_class=HTMLResponse)
 def splits_delete(
+    request: Request,
     split_id: int,
+    page: int = 1,
+    limit: int = 50,
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = None,
+    q: str | None = None,
+    ticker: str | None = None,
+    event_type: str | None = None,
     db: Session = Depends(get_db),
     _: None = Depends(require_auth),
 ):
     try:
-        ticker = delete_split(db, split_id)
+        split_ticker = delete_split(db, split_id)
     except SplitError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    recompute_ticker(db, ticker)
-    return HTMLResponse("")
+    recompute_ticker(db, split_ticker)
+
+    from datetime import date as _date
+
+    from marketpulse.web.routes.trades import _build_trades_ctx
+    fd = _date.fromisoformat(from_) if from_ else None
+    td = _date.fromisoformat(to) if to else None
+    q_clean = (q.strip() if q else None) or None
+    ctx = _build_trades_ctx(
+        db, page=page, limit=limit,
+        from_date=fd, to_date=td,
+        q=q_clean, ticker_alias=ticker, event_type=event_type,
+    )
+    return templates.TemplateResponse(request, "partials/trades_table.html", ctx)
