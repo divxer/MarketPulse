@@ -251,3 +251,44 @@ def trade_count_this_month(session: Session) -> dict[str, int]:
         "total": buys + sells + dividends,
         "buys": buys, "sells": sells, "dividends": dividends,
     }
+
+
+def realized_pl_by_ticker(
+    session: Session,
+    *,
+    top_n: int = 8,
+) -> list[dict[str, Any]]:
+    """Per-ticker realized P&L leaderboard, sorted by abs(P&L) desc, top_n cap.
+
+    Uses FIFO matcher (LotMatch) to compute both realized_pl and cost basis.
+    Note: LotMatch.realized_pl is GROSS (excludes fees) — see fifo.py docstring.
+    For fee-accurate per-ticker totals, sum Trade.realized_pl directly instead.
+
+    Returns: [{ticker, realized_pl, pct}, ...]
+      pct = realized_pl / cost_basis_of_sold_lots * 100
+      Tickers with zero realized_pl are omitted.
+    """
+    from marketpulse.holdings.fifo import match_lots_fifo
+
+    matches = match_lots_fifo(session)
+    if not matches:
+        return []
+
+    by_ticker: dict[str, dict[str, float]] = defaultdict(
+        lambda: {"realized_pl": 0.0, "cost_basis": 0.0},
+    )
+    for m in matches:
+        by_ticker[m.ticker]["realized_pl"] += m.realized_pl
+        by_ticker[m.ticker]["cost_basis"] += m.quantity * m.buy_price
+
+    rows = [
+        {
+            "ticker": t,
+            "realized_pl": v["realized_pl"],
+            "pct": (v["realized_pl"] / v["cost_basis"] * 100) if v["cost_basis"] else 0.0,
+        }
+        for t, v in by_ticker.items()
+        if v["realized_pl"] != 0.0
+    ]
+    rows.sort(key=lambda r: abs(r["realized_pl"]), reverse=True)
+    return rows[:top_n]

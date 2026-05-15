@@ -176,3 +176,50 @@ def test_trade_count_this_month_empty(db_session):
     assert trade_count_this_month(db_session) == {
         "total": 0, "buys": 0, "sells": 0, "dividends": 0,
     }
+
+
+def test_realized_pl_by_ticker_orders_by_abs(db_session):
+    """A -2000 loss ranks above a +1000 gain in 'biggest movers' view."""
+    from marketpulse.holdings.service import realized_pl_by_ticker
+
+    _trade(db_session, "AAPL", "buy",  10, 100, _dt(2026, 1, 1))
+    _trade(db_session, "AAPL", "sell", 10, 200, _dt(2026, 6, 1), pl=+1000.0)
+    _trade(db_session, "NVDA", "buy",  10, 300, _dt(2026, 1, 1))
+    _trade(db_session, "NVDA", "sell", 10, 100, _dt(2026, 6, 1), pl=-2000.0)
+
+    rows = realized_pl_by_ticker(db_session)
+    assert [r["ticker"] for r in rows] == ["NVDA", "AAPL"]
+    assert rows[0]["realized_pl"] == pytest.approx(-2000.0)
+    assert rows[1]["realized_pl"] == pytest.approx(+1000.0)
+
+
+def test_realized_pl_by_ticker_top_n(db_session):
+    """top_n=2 with 3 tickers → only top 2 by abs(pl)."""
+    from marketpulse.holdings.service import realized_pl_by_ticker
+
+    for sym, pl in [("AAPL", 100), ("NVDA", -200), ("TSLA", 50)]:
+        _trade(db_session, sym, "buy",  10, 10, _dt(2026, 1, 1))
+        _trade(db_session, sym, "sell", 10, 20, _dt(2026, 6, 1), pl=float(pl))
+
+    rows = realized_pl_by_ticker(db_session, top_n=2)
+    assert len(rows) == 2
+    assert {r["ticker"] for r in rows} == {"AAPL", "NVDA"}
+
+
+def test_realized_pl_by_ticker_pct_uses_lot_cost_basis(db_session):
+    """pct = realized_pl / sum(qty*buy_price for matched lots) * 100."""
+    from marketpulse.holdings.service import realized_pl_by_ticker
+
+    _trade(db_session, "AAPL", "buy",  10, 100.0, _dt(2026, 1, 1))
+    _trade(db_session, "AAPL", "sell", 10, 120.0, _dt(2026, 6, 1), pl=200.0)
+    rows = realized_pl_by_ticker(db_session)
+    # cost basis of sold lots = 10 * 100 = 1000; pct = 200/1000 * 100 = 20%
+    # NOTE: this uses LotMatch.realized_pl (gross, no fees), so the displayed
+    # pct may diverge from Trade.realized_pl-based numbers for portfolios
+    # with non-zero fees. This is intentional and documented in fifo.py.
+    assert rows[0]["pct"] == pytest.approx(20.0)
+
+
+def test_realized_pl_by_ticker_empty(db_session):
+    from marketpulse.holdings.service import realized_pl_by_ticker
+    assert realized_pl_by_ticker(db_session) == []
