@@ -8,11 +8,16 @@ from markupsafe import Markup
 
 from marketpulse.config import get_settings
 from marketpulse.logging import configure_logging
+from marketpulse.web.static_versioning import configure as _configure_static_versioning
+from marketpulse.web.static_versioning import static_version
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
 
+_configure_static_versioning(STATIC_DIR)
+
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+templates.env.globals["static_version"] = static_version
 
 
 def _render_markdown(text: str | None) -> Markup:

@@ -9,11 +9,11 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700&family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap" />
   <!-- NineScrolls design tokens (color/type/spacing/radius/shadow/motion) -->
-  <link rel="stylesheet" href="/static/css/ns-tokens.css" />
+  <link rel="stylesheet" href="/static/css/ns-tokens.css?v={{ static_version('css/ns-tokens.css') }}" />
   <!-- NineScrolls app overlay (.mp-card / .mp-chip / .mp-table / .bb-root) -->
-  <link rel="stylesheet" href="/static/css/app.css" />
+  <link rel="stylesheet" href="/static/css/app.css?v={{ static_version('css/app.css') }}" />
   <!-- Tailwind build output — LAST so utility classes win in cascade -->
-  <link rel="stylesheet" href="/static/app.css" />
+  <link rel="stylesheet" href="/static/app.css?v={{ static_version('app.css') }}" />
   <script src="https://unpkg.com/htmx.org@2.0.4"></script>
   <script src="https://unpkg.com/htmx-ext-sse@2.2.2"></script>
   <style>
