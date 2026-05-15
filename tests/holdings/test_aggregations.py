@@ -197,13 +197,16 @@ def test_realized_pl_by_ticker_top_n(db_session):
     """top_n=2 with 3 tickers → only top 2 by abs(pl)."""
     from marketpulse.holdings.service import realized_pl_by_ticker
 
-    for sym, pl in [("AAPL", 100), ("NVDA", -200), ("TSLA", 50)]:
-        _trade(db_session, sym, "buy",  10, 10, _dt(2026, 1, 1))
-        _trade(db_session, sym, "sell", 10, 20, _dt(2026, 6, 1), pl=float(pl))
+    # Use distinct buy/sell prices per ticker so FIFO computes genuinely
+    # different P&Ls. NVDA=+400, AAPL=+100, TSLA=+20.
+    for sym, buy, sell in [("AAPL", 10, 20), ("NVDA", 10, 50), ("TSLA", 10, 12)]:
+        _trade(db_session, sym, "buy",  10, buy,  _dt(2026, 1, 1))
+        _trade(db_session, sym, "sell", 10, sell, _dt(2026, 6, 1))
 
     rows = realized_pl_by_ticker(db_session, top_n=2)
     assert len(rows) == 2
-    assert {r["ticker"] for r in rows} == {"AAPL", "NVDA"}
+    # NVDA has the largest abs(PL), AAPL second; TSLA must be excluded.
+    assert [r["ticker"] for r in rows] == ["NVDA", "AAPL"]
 
 
 def test_realized_pl_by_ticker_pct_uses_lot_cost_basis(db_session):
