@@ -162,7 +162,8 @@ def test_holdings_page_shows_realized_pl(client: TestClient, monkeypatch):
     res = client.get("/holdings")
     assert res.status_code == 200
     assert "已实现盈亏" in res.text
-    assert "+500.00" in res.text  # (150-100)*10
+    # Phase 5d KPI uses {:+,.0f} formatting (no decimals); table tfoot uses same.
+    assert "+500" in res.text  # (150-100)*10
 
 
 def test_trades_timeline_shows_splits_and_dividends(client: TestClient, monkeypatch):
