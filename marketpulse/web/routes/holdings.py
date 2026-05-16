@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -14,12 +14,15 @@ from marketpulse.holdings.dividends import (
     record_dividend,
     total_dividends,
 )
+from marketpulse.holdings.sector import backfill_holding_sectors
 from marketpulse.holdings.service import (
     allocation_breakdown,
     compute_totals,
+    contributors_ranked,
     enrich_holdings,
     monthly_realized_pl,
-    sort_by_pl_impact,
+    sector_breakdown,
+    today_portfolio_change,
     trading_stats,
 )
 from marketpulse.holdings.trades import total_realized_pl
@@ -43,30 +46,24 @@ def holdings_page(
     data: DataService = Depends(get_data_service),
     _: None = Depends(require_auth),
 ):
-    from datetime import date as _date
-
-    from marketpulse.holdings.sector import backfill_holding_sectors
-    from marketpulse.holdings.service import (
-        contributors_ranked,
-        sector_breakdown,
-        today_portfolio_change,
-    )
-
     # Backfill any NULL sectors (bounded to 3 tickers per call).
     backfill_holding_sectors(db)
 
     holdings = db.query(Holding).order_by(Holding.sort_order, Holding.id).all()
     rows = enrich_holdings(holdings, data)
     totals = compute_totals(rows)
-    realized = total_realized_pl(db)
     dividends_by_ticker = per_ticker_dividends(db)
     for r in rows:
         r["dividends_received"] = dividends_by_ticker.get(r["ticker"], 0.0)
 
     # Phase 5d KPI block
-    today_year_start = _date(_date.today().year, 1, 1)
+    today_year_start = date(date.today().year, 1, 1)
     monthly_div_list = monthly_dividends(db)
-    this_month_div = monthly_div_list[-1]["amount"] if monthly_div_list else 0.0
+    current_month_key = date.today().strftime("%Y-%m")
+    this_month_div = next(
+        (m["amount"] for m in monthly_div_list if m["month"] == current_month_key),
+        0.0,
+    )
     kpi = {
         "today_change": today_portfolio_change(rows),
         "ytd_realized": total_realized_pl(db, from_date=today_year_start),
@@ -78,9 +75,7 @@ def holdings_page(
         "holdings.html",
         {
             "rows": rows,
-            "ranked_rows": sort_by_pl_impact(rows),
             "totals": totals,
-            "realized_pl": realized,
             "total_dividends": total_dividends(db),
             "allocation": allocation_breakdown(rows),
             "monthly_pl": monthly_realized_pl(db),

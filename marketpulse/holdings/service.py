@@ -328,7 +328,10 @@ def today_portfolio_change(rows: list[dict[str, Any]]) -> dict[str, Any]:
       up_count: rows with today_change_pct > 0
       down_count: rows with today_change_pct < 0
     """
-    eligible = [r for r in rows if r.get("today_change_pct") is not None]
+    eligible = [
+        r for r in rows
+        if r.get("today_change_pct") is not None and r.get("market_value") is not None
+    ]
     if not eligible:
         return {"dollars": 0.0, "pct": 0.0, "up_count": 0, "down_count": 0}
 

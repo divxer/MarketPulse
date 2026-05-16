@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -53,7 +54,8 @@ def test_holdings_built_from_trades(client: TestClient, monkeypatch):
         client.post("/trades", data={
             "ticker": "NVDA", "action": "buy", "quantity": 10, "price": 200,
         })
-        page = client.get("/holdings")
+        with patch("marketpulse.web.routes.holdings.backfill_holding_sectors", return_value=0):
+            page = client.get("/holdings")
         assert page.status_code == 200
         assert "NVDA" in page.text
         assert "300.00" in page.text       # current price
@@ -81,7 +83,8 @@ def test_delete_holding_for_cleanup(client: TestClient, monkeypatch):
             row_id = conn.execute(text("SELECT id FROM holdings WHERE ticker='GOOG'")).scalar_one()
         res = client.delete(f"/holdings/{row_id}")
         assert res.status_code == 200
-        assert "GOOG" not in client.get("/holdings").text
+        with patch("marketpulse.web.routes.holdings.backfill_holding_sectors", return_value=0):
+            assert "GOOG" not in client.get("/holdings").text
     finally:
         client.app.dependency_overrides.clear()
 
@@ -136,7 +139,8 @@ def test_holdings_dashboard_shows_kpis_and_allocation(client: TestClient, monkey
         client.post("/trades", data={
             "ticker": "AAA", "action": "buy", "quantity": 10, "price": 200,
         })
-        page = client.get("/holdings")
+        with patch("marketpulse.web.routes.holdings.backfill_holding_sectors", return_value=0):
+            page = client.get("/holdings")
         assert page.status_code == 200
         # KPI labels
         assert "总成本" in page.text
@@ -408,7 +412,7 @@ def test_holdings_sector_card_shows_unclassified(client, monkeypatch, db_session
                            sort_order=0, sector=None))
     db_session.commit()
     # Prevent backfill from calling yfinance so sector stays None → "未分类"
-    with patch("marketpulse.holdings.sector.backfill_holding_sectors"):
+    with patch("marketpulse.web.routes.holdings.backfill_holding_sectors"):
         r = client.get("/holdings")
     assert "未分类" in r.text
     client.app.dependency_overrides.clear()
@@ -459,7 +463,7 @@ def test_holdings_table_14_columns(client, monkeypatch, db_session):
     db_session.add(Holding(ticker="AAPL", quantity=10.0, avg_cost=100.0,
                            sort_order=0))
     db_session.commit()
-    with patch("marketpulse.holdings.sector.backfill_holding_sectors", return_value=0):
+    with patch("marketpulse.web.routes.holdings.backfill_holding_sectors", return_value=0):
         r = client.get("/holdings")
     th_count = r.text.count("<th")
     assert th_count >= 14, f"expected >= 14 <th>, got {th_count}"
@@ -488,7 +492,7 @@ def test_holdings_table_delete_uses_int_id(client, monkeypatch, db_session):
     db_session.add(Holding(ticker="AAPL", quantity=10.0, avg_cost=100.0,
                            sort_order=0))
     db_session.commit()
-    with patch("marketpulse.holdings.sector.backfill_holding_sectors", return_value=0):
+    with patch("marketpulse.web.routes.holdings.backfill_holding_sectors", return_value=0):
         r = client.get("/holdings")
     assert "/holdings/AAPL\"" not in r.text
     assert re.search(r'hx-delete="/holdings/\d+"', r.text)
@@ -515,7 +519,7 @@ def test_holdings_table_tfoot_totals(client, monkeypatch, db_session):
     db_session.add(Holding(ticker="AAPL", quantity=10.0, avg_cost=100.0,
                            sort_order=0))
     db_session.commit()
-    with patch("marketpulse.holdings.sector.backfill_holding_sectors", return_value=0):
+    with patch("marketpulse.web.routes.holdings.backfill_holding_sectors", return_value=0):
         r = client.get("/holdings")
     assert "<tfoot>" in r.text
     assert "合计" in r.text
@@ -527,3 +531,38 @@ def test_holdings_monthly_card_renders(client, monkeypatch):
     r = client.get("/holdings")
     assert "月度已实现盈亏" in r.text
     assert "mp-monthly-bars" in r.text or "暂无已实现盈亏数据" in r.text
+
+
+def test_this_month_dividends_zero_when_no_current_month_data(client, monkeypatch, db_session):
+    """KPI 含本月 must show 0.00 when current month has NO dividends,
+    even if prior months have data."""
+    from datetime import UTC, date, datetime
+    from unittest.mock import MagicMock, patch
+
+    from marketpulse.data.types import Quote
+    from marketpulse.db.models import Dividend, Holding
+    from marketpulse.web.deps import get_data_service
+
+    _login(client, monkeypatch)
+    fake = MagicMock()
+    fake.get_quote.return_value = Quote(
+        ticker="AAPL", price=150.0, change_pct=1.0, volume=1000,
+        avg_volume_20d=2000, fetched_at=datetime.now(UTC), stale=False,
+    )
+    fake.get_history.return_value = []
+    client.app.dependency_overrides[get_data_service] = lambda: fake
+
+    db_session.add(Holding(ticker="AAPL", quantity=10.0, avg_cost=100.0,
+                           sort_order=0, sector="Technology"))
+    # Dividend in a PAST month (Jan 2020) — current month has none.
+    db_session.add(Dividend(
+        ticker="AAPL", ex_date=date(2020, 1, 15),
+        amount_per_share=1.0, total_amount=10.0,
+    ))
+    db_session.commit()
+
+    with patch("marketpulse.web.routes.holdings.backfill_holding_sectors", return_value=0):
+        r = client.get("/holdings")
+    # Must show 含本月 $0.00, NOT 含本月 $10.00
+    assert "含本月 $0.00" in r.text
+    client.app.dependency_overrides.clear()
