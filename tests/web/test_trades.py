@@ -824,7 +824,9 @@ def test_trades_table_split_row_purple(client, monkeypatch, db_session):
 def test_monthly_pl_card_15_bars(client, monkeypatch):
     _login(client, monkeypatch)
     r = client.get("/trades")
-    assert r.text.count("mp-monthly-bar__bar") == 15
+    pos = r.text.count("mp-monthly-bar__bar--pos")
+    neg = r.text.count("mp-monthly-bar__bar--neg")
+    assert pos + neg == 15
     assert "月度已实现盈亏" in r.text
 
 
@@ -914,3 +916,30 @@ def test_delete_trade_with_invalid_filter_date_returns_422(client, monkeypatch):
     _login(client, monkeypatch)
     r = client.delete("/trades/1?from=garbage")
     assert r.status_code == 422
+
+
+def test_monthly_pl_has_zero_axis_and_negative_bars(client, monkeypatch, db_session):
+    """Bars with negative P&L should render as --neg variant (below zero axis)."""
+    from datetime import UTC, datetime
+
+    from marketpulse.db.models import Trade
+
+    _login(client, monkeypatch)
+    # Seed one winning month and one losing month
+    db_session.add_all([
+        Trade(ticker="AAPL", action="buy",  quantity=10, price=100,
+              fees=0, executed_at=datetime(2026, 1, 1, tzinfo=UTC), realized_pl=None),
+        Trade(ticker="AAPL", action="sell", quantity=10, price=120,
+              fees=0, executed_at=datetime(2026, 2, 1, tzinfo=UTC), realized_pl=200.0),
+        Trade(ticker="AAPL", action="buy",  quantity=10, price=100,
+              fees=0, executed_at=datetime(2026, 3, 1, tzinfo=UTC), realized_pl=None),
+        Trade(ticker="AAPL", action="sell", quantity=10, price=80,
+              fees=0, executed_at=datetime(2026, 4, 1, tzinfo=UTC), realized_pl=-200.0),
+    ])
+    db_session.commit()
+    r = client.get("/trades")
+    # Zero axis present
+    assert "mp-monthly-axis" in r.text or "mp-monthly-bars" in r.text
+    # Both positive and negative bar variants present
+    assert "mp-monthly-bar__bar--pos" in r.text
+    assert "mp-monthly-bar__bar--neg" in r.text

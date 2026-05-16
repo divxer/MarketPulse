@@ -15,13 +15,21 @@
       {% set max_abs_list = monthly_pl | map(attribute='pl') | map('abs') | list %}
       {% set max_v = max_abs_list | max if max_abs_list else 0 %}
       {% for m in monthly_pl %}
-        {% set pct = (m.pl|abs / max_v * 100) if max_v else 0 %}
+        {% set h = (m.pl|abs / max_v * 50) if max_v else 0 %}
         <div class="mp-monthly-bar" title="{{ m.month }}: {{ '{:+,.0f}'.format(m.pl) }}">
-          <div class="mp-monthly-bar__bar"
-               style="height: {{ pct }}%;
-                      background: {% if m.pl >= 0 %}var(--mp-up){% else %}var(--mp-down){% endif %};"></div>
-          <div class="mp-monthly-bar__label">{{ m.month[5:] }}</div>
+          {% if m.pl >= 0 %}
+            <div class="mp-monthly-bar__bar mp-monthly-bar__bar--pos"
+                 style="height: {{ h }}%; background: var(--mp-up);"></div>
+          {% else %}
+            <div class="mp-monthly-bar__bar mp-monthly-bar__bar--neg"
+                 style="height: {{ h }}%; background: var(--mp-down);"></div>
+          {% endif %}
         </div>
+      {% endfor %}
+    </div>
+    <div class="mp-monthly-labels">
+      {% for m in monthly_pl %}
+        <div class="mp-monthly-label">{{ m.month[5:] }}</div>
       {% endfor %}
     </div>
     {% set nonzero = monthly_pl | selectattr('pl', 'ne', 0) | list %}
