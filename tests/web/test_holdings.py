@@ -57,8 +57,8 @@ def test_holdings_built_from_trades(client: TestClient, monkeypatch):
         assert page.status_code == 200
         assert "NVDA" in page.text
         assert "300.00" in page.text       # current price
-        assert "3000.00" in page.text      # market value
-        assert "+1000.00" in page.text     # pl dollars
+        assert "3,000.00" in page.text     # market value (comma-formatted)
+        assert "+1,000.00" in page.text    # pl dollars (comma-formatted)
         assert "+50.00" in page.text       # pl pct
     finally:
         client.app.dependency_overrides.clear()
@@ -436,4 +436,87 @@ def test_holdings_contributors_card_renders(client, monkeypatch, db_session):
     db_session.commit()
     r = client.get("/holdings")
     assert "盈亏贡献" in r.text or "贡献排行" in r.text
+    client.app.dependency_overrides.clear()
+
+
+def test_holdings_table_14_columns(client, monkeypatch, db_session):
+    from datetime import UTC, datetime
+    from unittest.mock import MagicMock, patch
+
+    from marketpulse.data.types import Quote
+    from marketpulse.db.models import Holding
+    from marketpulse.web.deps import get_data_service
+
+    _login(client, monkeypatch)
+    fake = MagicMock()
+    fake.get_quote.return_value = Quote(
+        ticker="AAPL", price=150.0, change_pct=1.0, volume=1000,
+        avg_volume_20d=2000, fetched_at=datetime.now(UTC), stale=False,
+    )
+    fake.get_history.return_value = []
+    client.app.dependency_overrides[get_data_service] = lambda: fake
+
+    db_session.add(Holding(ticker="AAPL", quantity=10.0, avg_cost=100.0,
+                           sort_order=0))
+    db_session.commit()
+    with patch("marketpulse.holdings.sector.backfill_holding_sectors", return_value=0):
+        r = client.get("/holdings")
+    th_count = r.text.count("<th")
+    assert th_count >= 14, f"expected >= 14 <th>, got {th_count}"
+    client.app.dependency_overrides.clear()
+
+
+def test_holdings_table_delete_uses_int_id(client, monkeypatch, db_session):
+    """DELETE URL must use r.id (int), not r.ticker (string)."""
+    import re
+    from datetime import UTC, datetime
+    from unittest.mock import MagicMock, patch
+
+    from marketpulse.data.types import Quote
+    from marketpulse.db.models import Holding
+    from marketpulse.web.deps import get_data_service
+
+    _login(client, monkeypatch)
+    fake = MagicMock()
+    fake.get_quote.return_value = Quote(
+        ticker="AAPL", price=150.0, change_pct=1.0, volume=1000,
+        avg_volume_20d=2000, fetched_at=datetime.now(UTC), stale=False,
+    )
+    fake.get_history.return_value = []
+    client.app.dependency_overrides[get_data_service] = lambda: fake
+
+    db_session.add(Holding(ticker="AAPL", quantity=10.0, avg_cost=100.0,
+                           sort_order=0))
+    db_session.commit()
+    with patch("marketpulse.holdings.sector.backfill_holding_sectors", return_value=0):
+        r = client.get("/holdings")
+    assert "/holdings/AAPL\"" not in r.text
+    assert re.search(r'hx-delete="/holdings/\d+"', r.text)
+    client.app.dependency_overrides.clear()
+
+
+def test_holdings_table_tfoot_totals(client, monkeypatch, db_session):
+    from datetime import UTC, datetime
+    from unittest.mock import MagicMock, patch
+
+    from marketpulse.data.types import Quote
+    from marketpulse.db.models import Holding
+    from marketpulse.web.deps import get_data_service
+
+    _login(client, monkeypatch)
+    fake = MagicMock()
+    fake.get_quote.return_value = Quote(
+        ticker="AAPL", price=150.0, change_pct=1.0, volume=1000,
+        avg_volume_20d=2000, fetched_at=datetime.now(UTC), stale=False,
+    )
+    fake.get_history.return_value = []
+    client.app.dependency_overrides[get_data_service] = lambda: fake
+
+    db_session.add(Holding(ticker="AAPL", quantity=10.0, avg_cost=100.0,
+                           sort_order=0))
+    db_session.commit()
+    with patch("marketpulse.holdings.sector.backfill_holding_sectors", return_value=0):
+        r = client.get("/holdings")
+    assert "<tfoot>" in r.text
+    assert "合计" in r.text
     client.app.dependency_overrides.clear()
