@@ -72,6 +72,7 @@ class Holding(Base):
     avg_cost: Mapped[float] = mapped_column(Float, nullable=False)
     opened_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sector: Mapped[str | None] = mapped_column(Text, nullable=True)
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow, nullable=False)
 

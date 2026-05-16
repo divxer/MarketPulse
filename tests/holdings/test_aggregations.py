@@ -268,3 +268,227 @@ def test_avg_hold_days_window_filters_by_sell_date(db_session):
         from_date=date(2026, 1, 1), to_date=date(2026, 3, 31),
     )
     assert val == pytest.approx(59.0)
+
+
+def test_enrich_holdings_adds_sector_today_change_sparkline(db_session):
+    """enrich_holdings preserves existing fields and adds 3 new ones."""
+    from datetime import date
+    from unittest.mock import MagicMock
+
+    from marketpulse.data.types import Bar, Quote
+    from marketpulse.db.models import Holding
+    from marketpulse.holdings.service import enrich_holdings
+
+    h = Holding(ticker="AAPL", quantity=10.0, avg_cost=100.0, sort_order=0,
+                sector="Technology")
+    db_session.add(h)
+    db_session.commit()
+
+    fake_data = MagicMock()
+    fake_data.get_quote.return_value = Quote(
+        ticker="AAPL", price=150.0, change_pct=1.5, volume=1000,
+        avg_volume_20d=2000, fetched_at=_dt(2026, 5, 15), stale=False,
+    )
+    fake_data.get_history.return_value = [
+        Bar(date=date(2026, 5, d), open=140.0, high=151.0, low=139.0,
+            close=140.0 + d, volume=1000)
+        for d in range(1, 16)
+    ]
+
+    rows = enrich_holdings([h], fake_data)
+    assert len(rows) == 1
+    r = rows[0]
+    # Existing fields still present
+    assert r["ticker"] == "AAPL"
+    assert r["market_value"] == pytest.approx(1500.0)
+    # New Phase 5d fields
+    assert r["sector"] == "Technology"
+    assert r["today_change_pct"] == pytest.approx(1.5)
+    assert r["sparkline"] == [141.0, 142.0, 143.0, 144.0, 145.0,
+                              146.0, 147.0, 148.0, 149.0, 150.0,
+                              151.0, 152.0, 153.0, 154.0, 155.0]
+
+
+def test_enrich_holdings_null_sector_falls_back_unclassified(db_session):
+    from unittest.mock import MagicMock
+
+    from marketpulse.data.types import Quote
+    from marketpulse.db.models import Holding
+    from marketpulse.holdings.service import enrich_holdings
+
+    h = Holding(ticker="AAPL", quantity=10.0, avg_cost=100.0, sort_order=0,
+                sector=None)
+    db_session.add(h)
+    db_session.commit()
+
+    fake_data = MagicMock()
+    fake_data.get_quote.return_value = Quote(
+        ticker="AAPL", price=150.0, change_pct=0.5, volume=1000,
+        avg_volume_20d=2000, fetched_at=_dt(2026, 5, 15), stale=False,
+    )
+    fake_data.get_history.return_value = []
+
+    rows = enrich_holdings([h], fake_data)
+    assert rows[0]["sector"] == "未分类"
+    assert rows[0]["sparkline"] == []
+
+
+def test_enrich_holdings_quote_failure_today_change_none(db_session):
+    """Pre-existing tolerance: quote fetch fails → today_change_pct=None."""
+    from unittest.mock import MagicMock
+
+    from marketpulse.db.models import Holding
+    from marketpulse.holdings.service import enrich_holdings
+
+    h = Holding(ticker="ZZZ", quantity=10.0, avg_cost=100.0, sort_order=0)
+    db_session.add(h)
+    db_session.commit()
+
+    fake_data = MagicMock()
+    fake_data.get_quote.side_effect = RuntimeError("yfinance down")
+    fake_data.get_history.side_effect = RuntimeError("yfinance down")
+
+    rows = enrich_holdings([h], fake_data)
+    assert rows[0]["today_change_pct"] is None
+    assert rows[0]["sparkline"] == []
+
+
+def test_today_portfolio_change_up_down_counts():
+    from marketpulse.holdings.service import today_portfolio_change
+    rows = [
+        {"market_value": 1000.0, "today_change_pct": 2.0},
+        {"market_value": 500.0, "today_change_pct": -1.0},
+        {"market_value": 200.0, "today_change_pct": 0.5},
+    ]
+    result = today_portfolio_change(rows)
+    assert result["up_count"] == 2
+    assert result["down_count"] == 1
+
+
+def test_today_portfolio_change_dollars_sum():
+    from marketpulse.holdings.service import today_portfolio_change
+    rows = [
+        {"market_value": 1000.0, "today_change_pct": 2.0},
+        {"market_value": 500.0, "today_change_pct": -1.0},
+    ]
+    result = today_portfolio_change(rows)
+    assert result["dollars"] == pytest.approx(15.0)
+
+
+def test_today_portfolio_change_pct_weighted_by_mv():
+    from marketpulse.holdings.service import today_portfolio_change
+    rows = [
+        {"market_value": 1000.0, "today_change_pct": 1.0},
+        {"market_value": 100.0, "today_change_pct": 10.0},
+    ]
+    result = today_portfolio_change(rows)
+    assert result["pct"] == pytest.approx(1.818, rel=1e-2)
+
+
+def test_today_portfolio_change_excludes_none_pct():
+    from marketpulse.holdings.service import today_portfolio_change
+    rows = [
+        {"market_value": 1000.0, "today_change_pct": None},
+        {"market_value": 500.0, "today_change_pct": 2.0},
+    ]
+    result = today_portfolio_change(rows)
+    assert result["up_count"] == 1
+    assert result["down_count"] == 0
+    assert result["dollars"] == pytest.approx(10.0)
+
+
+def test_today_portfolio_change_empty_returns_zero():
+    from marketpulse.holdings.service import today_portfolio_change
+    assert today_portfolio_change([]) == {
+        "dollars": 0.0, "pct": 0.0, "up_count": 0, "down_count": 0,
+    }
+
+
+def test_today_portfolio_change_all_none_returns_zero():
+    from marketpulse.holdings.service import today_portfolio_change
+    rows = [{"market_value": 1000.0, "today_change_pct": None}]
+    assert today_portfolio_change(rows) == {
+        "dollars": 0.0, "pct": 0.0, "up_count": 0, "down_count": 0,
+    }
+
+
+def test_contributors_ranked_top_n_slice():
+    from marketpulse.holdings.service import contributors_ranked
+    rows = [
+        {"ticker": "A", "pl_dollars": +1000.0, "market_value": 5000.0},
+        {"ticker": "B", "pl_dollars": -2000.0, "market_value": 3000.0},
+        {"ticker": "C", "pl_dollars": +500.0, "market_value": 2000.0},
+        {"ticker": "D", "pl_dollars": +100.0, "market_value": 1000.0},
+        {"ticker": "E", "pl_dollars": -50.0, "market_value": 500.0},
+        {"ticker": "F", "pl_dollars": +10.0, "market_value": 100.0},
+    ]
+    result = contributors_ranked(rows, top_n=3)
+    assert len(result) == 3
+    assert [r["ticker"] for r in result] == ["B", "A", "C"]
+
+
+def test_contributors_ranked_default_top_n_5():
+    from marketpulse.holdings.service import contributors_ranked
+    rows = [{"ticker": str(i), "pl_dollars": float(i),
+             "market_value": 100.0} for i in range(10)]
+    result = contributors_ranked(rows)
+    assert len(result) == 5
+
+
+def test_contributors_ranked_fewer_than_top_n():
+    from marketpulse.holdings.service import contributors_ranked
+    rows = [
+        {"ticker": "A", "pl_dollars": +1000.0, "market_value": 5000.0},
+        {"ticker": "B", "pl_dollars": -500.0, "market_value": 3000.0},
+    ]
+    result = contributors_ranked(rows, top_n=10)
+    assert len(result) == 2
+
+
+def test_contributors_ranked_empty():
+    from marketpulse.holdings.service import contributors_ranked
+    assert contributors_ranked([]) == []
+
+
+def test_sector_breakdown_groups_by_sector():
+    from marketpulse.holdings.service import sector_breakdown
+    rows = [
+        {"sector": "Technology", "market_value": 1000.0},
+        {"sector": "Technology", "market_value": 500.0},
+        {"sector": "Healthcare", "market_value": 300.0},
+    ]
+    result = sector_breakdown(rows)
+    assert len(result) == 2
+    assert result[0]["sector"] == "Technology"
+    assert result[0]["market_value"] == pytest.approx(1500.0)
+    assert result[0]["holding_count"] == 2
+    assert result[1]["sector"] == "Healthcare"
+    assert result[1]["holding_count"] == 1
+
+
+def test_sector_breakdown_pct_sums_to_100():
+    from marketpulse.holdings.service import sector_breakdown
+    rows = [
+        {"sector": "A", "market_value": 600.0},
+        {"sector": "B", "market_value": 400.0},
+    ]
+    result = sector_breakdown(rows)
+    assert sum(r["pct"] for r in result) == pytest.approx(100.0)
+    assert result[0]["pct"] == pytest.approx(60.0)
+    assert result[1]["pct"] == pytest.approx(40.0)
+
+
+def test_sector_breakdown_unclassified_separate_bucket():
+    from marketpulse.holdings.service import sector_breakdown
+    rows = [
+        {"sector": "Technology", "market_value": 1000.0},
+        {"sector": "未分类", "market_value": 200.0},
+    ]
+    result = sector_breakdown(rows)
+    sectors = [r["sector"] for r in result]
+    assert "未分类" in sectors
+
+
+def test_sector_breakdown_empty():
+    from marketpulse.holdings.service import sector_breakdown
+    assert sector_breakdown([]) == []

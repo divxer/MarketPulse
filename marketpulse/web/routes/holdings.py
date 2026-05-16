@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -14,12 +14,15 @@ from marketpulse.holdings.dividends import (
     record_dividend,
     total_dividends,
 )
+from marketpulse.holdings.sector import backfill_holding_sectors
 from marketpulse.holdings.service import (
     allocation_breakdown,
     compute_totals,
+    contributors_ranked,
     enrich_holdings,
     monthly_realized_pl,
-    sort_by_pl_impact,
+    sector_breakdown,
+    today_portfolio_change,
     trading_stats,
 )
 from marketpulse.holdings.trades import total_realized_pl
@@ -43,28 +46,45 @@ def holdings_page(
     data: DataService = Depends(get_data_service),
     _: None = Depends(require_auth),
 ):
+    # Backfill any NULL sectors (bounded to 3 tickers per call).
+    backfill_holding_sectors(db)
+
     holdings = db.query(Holding).order_by(Holding.sort_order, Holding.id).all()
     rows = enrich_holdings(holdings, data)
     totals = compute_totals(rows)
-    realized = total_realized_pl(db)
     dividends_by_ticker = per_ticker_dividends(db)
-    # Attach per-ticker dividend total to each enriched row so the table can
-    # show it inline without a second query loop.
     for r in rows:
         r["dividends_received"] = dividends_by_ticker.get(r["ticker"], 0.0)
+
+    # Phase 5d KPI block
+    today_year_start = date(date.today().year, 1, 1)
+    monthly_div_list = monthly_dividends(db)
+    current_month_key = date.today().strftime("%Y-%m")
+    this_month_div = next(
+        (m["amount"] for m in monthly_div_list if m["month"] == current_month_key),
+        0.0,
+    )
+    kpi = {
+        "today_change": today_portfolio_change(rows),
+        "ytd_realized": total_realized_pl(db, from_date=today_year_start),
+        "this_month_dividends": this_month_div,
+    }
+
     return templates.TemplateResponse(
         request,
         "holdings.html",
         {
             "rows": rows,
-            "ranked_rows": sort_by_pl_impact(rows),
             "totals": totals,
-            "realized_pl": realized,
             "total_dividends": total_dividends(db),
             "allocation": allocation_breakdown(rows),
             "monthly_pl": monthly_realized_pl(db),
-            "monthly_dividends": monthly_dividends(db),
+            "monthly_dividends": monthly_div_list,
             "trade_stats": trading_stats(db),
+            # Phase 5d additions
+            "kpi": kpi,
+            "contributors": contributors_ranked(rows, top_n=5),
+            "sectors": sector_breakdown(rows),
         },
     )
 
@@ -156,7 +176,7 @@ def dividends_delete(
     return templates.TemplateResponse(request, "partials/trades_table.html", ctx)
 
 
-@router.post("/holdings/risk-analysis", response_class=HTMLResponse)
+@router.get("/holdings/risk-analysis", response_class=HTMLResponse)
 def holdings_risk_analysis(
     request: Request,
     db: Session = Depends(get_db),
@@ -164,13 +184,19 @@ def holdings_risk_analysis(
     ai: AiService = Depends(get_ai_service),
     _: None = Depends(require_auth),
 ):
-    """On-demand AI portfolio risk analysis. Returns rendered Markdown HTML."""
+    """HTMX endpoint: AI risk analysis card.
+
+    Called by hx-trigger='load' on the placeholder in /holdings.
+    Always returns 200 — even on Anthropic failure, renders a fallback
+    card so HTMX swaps cleanly.
+    """
     holdings = db.query(Holding).order_by(Holding.sort_order, Holding.id).all()
     if not holdings:
         return templates.TemplateResponse(
-            request, "partials/risk_analysis.html",
-            {"markdown": "暂无持仓,无需风险分析。", "error": None},
+            request, "partials/holdings_risk_card.html",
+            {"analysis_markdown": "暂无持仓,无需风险分析。", "generated_at": None},
         )
+
     rows = enrich_holdings(holdings, data)
     totals = compute_totals(rows)
     allocation = allocation_breakdown(rows)
@@ -184,7 +210,7 @@ def holdings_risk_analysis(
         for r in rows
     ]
     try:
-        result = ai.portfolio_risk(
+        analysis_markdown = ai.portfolio_risk(
             holdings=holdings_payload,
             totals=totals,
             allocation=allocation,
@@ -193,13 +219,70 @@ def holdings_risk_analysis(
         )
     except Exception as exc:  # noqa: BLE001 — surface any failure as recoverable UI error
         log.warning("portfolio_risk_failed", error=str(exc))
-        return templates.TemplateResponse(
-            request, "partials/risk_analysis.html",
-            {"markdown": None, "error": str(exc)},
-        )
+        analysis_markdown = "**AI 服务暂时不可用,请稍后重试。**"
+
     return templates.TemplateResponse(
-        request, "partials/risk_analysis.html",
-        {"markdown": result, "error": None},
+        request, "partials/holdings_risk_card.html",
+        {"analysis_markdown": analysis_markdown, "generated_at": None},
+    )
+
+
+@router.get("/holdings/export.csv")
+def holdings_export_csv(
+    db: Session = Depends(get_db),
+    data: DataService = Depends(get_data_service),
+    _: None = Depends(require_auth),
+):
+    """Streaming CSV export of current holdings.
+
+    Format columns: ticker, name, sector, quantity, avg_cost,
+    current_price, market_value, cost_basis, unrealized_pl,
+    unrealized_pl_pct, dividends_received
+
+    Uses StreamingResponse to avoid buffering large portfolios in memory.
+    """
+    from datetime import UTC, datetime
+
+    from fastapi.responses import StreamingResponse
+
+    HEADER = [
+        "ticker", "name", "sector", "quantity", "avg_cost",
+        "current_price", "market_value", "cost_basis",
+        "unrealized_pl", "unrealized_pl_pct", "dividends_received",
+    ]
+
+    def _gen():
+        yield ",".join(HEADER) + "\n"
+        holdings = db.query(Holding).order_by(Holding.sort_order, Holding.id).all()
+        if not holdings:
+            return
+        rows = enrich_holdings(holdings, data)
+        divs_by_ticker = per_ticker_dividends(db)
+        for r in rows:
+            divs = divs_by_ticker.get(r["ticker"], 0.0)
+            current_price = r.get("current_price")
+            market_value = r.get("market_value")
+            pl_dollars = r.get("pl_dollars") or 0
+            pl_pct = r.get("pl_pct") or 0
+            yield (
+                f'{r["ticker"]},'
+                f'{r["ticker"]},'  # name = ticker placeholder (Quote has no name field)
+                f'{r["sector"]},'
+                f'{r["quantity"]:g},'
+                f'{r["avg_cost"]:.4f},'
+                f'{current_price if current_price is not None else ""},'
+                f'{market_value if market_value is not None else ""},'
+                f'{r["cost_basis"]:.2f},'
+                f'{pl_dollars:.2f},'
+                f'{pl_pct:.4f},'
+                f'{divs:.2f}\n'
+            )
+
+    filename = f"holdings-{datetime.now(UTC).date().isoformat()}.csv"
+    return StreamingResponse(
+        _gen(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

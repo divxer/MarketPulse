@@ -1,0 +1,24 @@
+<section class="mp-card">
+  <div class="mp-card__head">
+    <span class="mp-card__title">
+      <span class="material-symbols-outlined">donut_small</span>持仓分布 · 按代码
+    </span>
+  </div>
+  <ul class="mp-allocation-list">
+    {% set max_val = allocation | map(attribute='market_value') | max if allocation else 0 %}
+    {% for r in allocation %}
+      <li class="mp-allocation-row">
+        <span class="grotesk" style="font-weight:700; font-size:13px; color:var(--ns-navy); width:60px;">{{ r.ticker }}</span>
+        <div class="mp-allocation-bar">
+          <div style="width: {{ (r.market_value / max_val * 100) if max_val else 0 }}%; background:var(--ns-navy);"></div>
+        </div>
+        <span class="mono tnum muted" style="font-size:11.5px; margin-left:auto;">
+          {{ "%.1f%%"|format(r.pct) }} · ${{ "{:,.0f}".format(r.market_value) }}
+        </span>
+      </li>
+    {% endfor %}
+    {% if not allocation %}
+      <li class="muted" style="padding: 16px;">暂无持仓数据</li>
+    {% endif %}
+  </ul>
+</section>

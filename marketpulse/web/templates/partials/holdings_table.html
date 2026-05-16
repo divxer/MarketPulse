@@ -1,0 +1,90 @@
+<table class="mp-table mp-table--holdings">
+  <thead>
+    <tr>
+      <th class="col-ticker">代码</th>
+      <th class="col-name">名称</th>
+      <th class="col-sector">板块</th>
+      <th class="col-qty">数量</th>
+      <th class="col-avg">均价</th>
+      <th class="col-price">现价</th>
+      <th class="col-today">今日%</th>
+      <th class="col-cost">总成本</th>
+      <th class="col-mv">市值</th>
+      <th class="col-pl">未实现盈亏</th>
+      <th class="col-plpct">盈亏 %</th>
+      <th class="col-spark">30日</th>
+      <th class="col-alloc">占组合</th>
+      <th class="col-actions"></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in rows %}
+      <tr id="holding-row-{{ r.ticker }}">
+        <td class="col-ticker"><a href="/stock/{{ r.ticker }}" class="mp-ticker-link">{{ r.ticker }}</a></td>
+        <td class="col-name muted">{{ r.ticker }}</td>
+        <td class="col-sector"><span class="mp-chip">{{ r.sector }}</span></td>
+        <td class="col-qty mono tnum">{{ "%g"|format(r.quantity) }}</td>
+        <td class="col-avg mono tnum">${{ "%.2f"|format(r.avg_cost) }}</td>
+        <td class="col-price mono tnum">
+          {% if r.current_price is not none %}${{ "%.2f"|format(r.current_price) }}{% else %}—{% endif %}
+        </td>
+        <td class="col-today mono tnum {% if r.today_change_pct is not none and r.today_change_pct >= 0 %}up{% elif r.today_change_pct is not none %}down{% endif %}">
+          {% if r.today_change_pct is not none %}{{ "{:+.2f}%".format(r.today_change_pct) }}{% else %}—{% endif %}
+        </td>
+        <td class="col-cost mono tnum">${{ "{:,.2f}".format(r.cost_basis) }}</td>
+        <td class="col-mv mono tnum">
+          {% if r.market_value is not none %}${{ "{:,.2f}".format(r.market_value) }}{% else %}—{% endif %}
+        </td>
+        <td class="col-pl mono tnum {% if r.pl_dollars is not none and r.pl_dollars >= 0 %}up{% elif r.pl_dollars is not none %}down{% endif %}">
+          {% if r.pl_dollars is not none %}{{ "{:+,.2f}".format(r.pl_dollars) }}{% else %}—{% endif %}
+        </td>
+        <td class="col-plpct mono tnum {% if r.pl_dollars is not none and r.pl_dollars >= 0 %}up{% elif r.pl_dollars is not none %}down{% endif %}">
+          {% if r.pl_pct is not none %}{{ "{:+.2f}%".format(r.pl_pct) }}{% else %}—{% endif %}
+        </td>
+        <td class="col-spark">
+          {% if r.sparkline and r.sparkline|length >= 2 %}
+            <svg class="mp-holdings__spark" width="64" height="22" viewBox="0 0 64 22" preserveAspectRatio="none">
+              <polyline points="{{ r.sparkline | sparkpoints(64, 22) }}"
+                        fill="none"
+                        stroke="{% if r.pl_dollars is not none and r.pl_dollars >= 0 %}var(--mp-up){% else %}var(--mp-down){% endif %}"
+                        stroke-width="1.5" />
+            </svg>
+          {% else %}<span class="muted">—</span>{% endif %}
+        </td>
+        <td class="col-alloc">
+          {% set allo_pct = (r.market_value / totals.market_value * 100) if (r.market_value and totals.market_value) else 0 %}
+          <div class="mp-holdings__allo-bar">
+            <div style="width: {{ allo_pct }}%; background: var(--ns-navy);"></div>
+          </div>
+          <span class="mono tnum muted" style="font-size:11px; margin-left:8px;">{{ "%.1f%%"|format(allo_pct) }}</span>
+        </td>
+        <td class="col-actions">
+          <button class="mp-icon-btn"
+                  hx-delete="/holdings/{{ r.id }}"
+                  hx-target="#holding-row-{{ r.ticker }}"
+                  hx-swap="outerHTML"
+                  hx-confirm="删除 {{ r.ticker }} 的所有交易和持仓?">
+            <span class="material-symbols-outlined">delete_outline</span>
+          </button>
+        </td>
+      </tr>
+    {% endfor %}
+    {% if not rows %}
+      <tr><td colspan="14" class="mp-empty-row">暂无持仓。先在 <a href="/trades">/trades</a> 添加交易。</td></tr>
+    {% endif %}
+  </tbody>
+  {% if rows %}
+  <tfoot>
+    <tr class="mp-table__totals">
+      <td colspan="7"><span class="grotesk" style="font-weight:700; font-size:12px; letter-spacing:0.04em; color:var(--ns-navy);">合计 · {{ rows|length }} 个标的</span></td>
+      <td class="mono tnum" style="font-weight:700; color:var(--ns-navy);">${{ "{:,.0f}".format(totals.cost or 0) }}</td>
+      <td class="mono tnum" style="font-weight:700; color:var(--ns-navy);">${{ "{:,.0f}".format(totals.market_value or 0) }}</td>
+      {% set pl = (totals.market_value or 0) - (totals.cost or 0) %}
+      {% set pl_pct = (pl / totals.cost * 100) if totals.cost else 0 %}
+      <td class="mono tnum {% if pl >= 0 %}up{% else %}down{% endif %}" style="font-weight:700;">{{ "{:+,.0f}".format(pl) }}</td>
+      <td class="mono tnum {% if pl >= 0 %}up{% else %}down{% endif %}" style="font-weight:700;">{{ "{:+.2f}%".format(pl_pct) }}</td>
+      <td colspan="3"></td>
+    </tr>
+  </tfoot>
+  {% endif %}
+</table>

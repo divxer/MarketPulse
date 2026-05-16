@@ -19,6 +19,20 @@ log = get_logger(__name__)
 
 class _DataLike(Protocol):
     def get_quote(self, ticker: str) -> Quote: ...
+    def get_history(self, ticker: str, period: str = "30d") -> list[Any]: ...
+
+
+def _fetch_sparkline(data: "_DataLike", ticker: str) -> list[float]:
+    """Return last 30 daily closes; [] on fetch failure.
+
+    Used by /holdings table 30-day sparkline column. Failures are
+    silenced so a single bad ticker doesn't break the entire table.
+    """
+    try:
+        bars = data.get_history(ticker, period="30d")
+        return [b.close for b in bars[-30:]]
+    except Exception:
+        return []
 
 
 def enrich_holdings(
@@ -42,8 +56,10 @@ def enrich_holdings(
             "pl_pct": None,
             "stale": False,
         }
+        quote = None
         try:
             q = data.get_quote(h.ticker)
+            quote = q
             row["current_price"] = q.price
             row["market_value"] = h.quantity * q.price
             row["pl_dollars"] = row["market_value"] - cost_basis
@@ -51,6 +67,9 @@ def enrich_holdings(
             row["stale"] = q.stale
         except Exception as exc:
             log.warning("holding_quote_failed", ticker=h.ticker, error=str(exc))
+        row["sector"] = h.sector or "未分类"
+        row["today_change_pct"] = quote.change_pct if quote is not None else None
+        row["sparkline"] = _fetch_sparkline(data, h.ticker)
         rows.append(row)
     return rows
 
@@ -294,6 +313,82 @@ def realized_pl_by_ticker(
     ]
     rows.sort(key=lambda r: abs(r["realized_pl"]), reverse=True)
     return rows[:top_n]
+
+
+def today_portfolio_change(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate today's portfolio change.
+
+    Rows without today_change_pct (e.g., quote fetch failed) are excluded
+    from up/down counts and the dollars sum. Percentage is weighted by
+    market value across eligible rows only.
+
+    Returns:
+      dollars: sum of (market_value * today_change_pct/100) for eligible rows
+      pct: weighted by market_value of eligible rows
+      up_count: rows with today_change_pct > 0
+      down_count: rows with today_change_pct < 0
+    """
+    eligible = [
+        r for r in rows
+        if r.get("today_change_pct") is not None and r.get("market_value") is not None
+    ]
+    if not eligible:
+        return {"dollars": 0.0, "pct": 0.0, "up_count": 0, "down_count": 0}
+
+    dollars = sum(r["market_value"] * r["today_change_pct"] / 100 for r in eligible)
+    total_mv = sum(r["market_value"] for r in eligible)
+    pct = (dollars / total_mv * 100) if total_mv else 0.0
+    up_count = sum(1 for r in eligible if r["today_change_pct"] > 0)
+    down_count = sum(1 for r in eligible if r["today_change_pct"] < 0)
+    return {
+        "dollars": dollars,
+        "pct": pct,
+        "up_count": up_count,
+        "down_count": down_count,
+    }
+
+
+def sector_breakdown(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group rows by sector.
+
+    Returns: [{sector, market_value, pct, holding_count}, ...]
+    sorted by market_value desc. '未分类' falls naturally to its own bucket.
+    """
+    buckets: dict[str, dict[str, float]] = defaultdict(
+        lambda: {"market_value": 0.0, "holding_count": 0},
+    )
+    for r in rows:
+        s = r["sector"]
+        buckets[s]["market_value"] += r["market_value"] or 0.0
+        buckets[s]["holding_count"] += 1
+    total = sum(b["market_value"] for b in buckets.values())
+    out = [
+        {
+            "sector": sector,
+            "market_value": v["market_value"],
+            "pct": (v["market_value"] / total * 100) if total else 0.0,
+            "holding_count": v["holding_count"],
+        }
+        for sector, v in buckets.items()
+    ]
+    out.sort(key=lambda x: x["market_value"], reverse=True)
+    return out
+
+
+def contributors_ranked(
+    rows: list[dict[str, Any]],
+    *,
+    top_n: int = 5,
+) -> list[dict[str, Any]]:
+    """Top N rows by |pl_dollars| — the biggest movers in absolute terms.
+
+    NOTE: 'biggest by |pl|' does NOT guarantee a mix of positive and
+    negative. If a portfolio has 5 large winners and 1 small loser,
+    all 5 returned rows will be winners — that's correct behavior
+    (the question is 'who moved the needle most').
+    """
+    ranked = sort_by_pl_impact(rows)
+    return ranked[:top_n]
 
 
 def avg_hold_days(
