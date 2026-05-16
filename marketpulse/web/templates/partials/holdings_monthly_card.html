@@ -1,0 +1,32 @@
+<section class="mp-card">
+  <div class="mp-card__head">
+    <span class="mp-card__title">
+      <span class="material-symbols-outlined">insights</span>月度已实现盈亏
+    </span>
+    {% set monthly_total = monthly_pl | sum(attribute='pl') %}
+    <span class="mp-card__sub">
+      {{ monthly_pl|length }} 个月 · 累计
+      <span class="{% if monthly_total >= 0 %}up{% else %}down{% endif %} mono"
+            style="font-weight:700;">{{ "{:+,.0f}".format(monthly_total) }}</span>
+    </span>
+  </div>
+  <div class="mp-card__body">
+    {% if monthly_pl %}
+      {% set max_abs_list = monthly_pl | map(attribute='pl') | map('abs') | list %}
+      {% set max_v = max_abs_list | max if max_abs_list else 0 %}
+      <div class="mp-monthly-bars">
+        {% for m in monthly_pl %}
+          {% set pct = (m.pl|abs / max_v * 100) if max_v else 0 %}
+          <div class="mp-monthly-bar" title="{{ m.month }}: {{ '{:+,.0f}'.format(m.pl) }}">
+            <div class="mp-monthly-bar__bar"
+                 style="height: {{ pct }}%;
+                        background: {% if m.pl >= 0 %}var(--mp-up){% else %}var(--mp-down){% endif %};"></div>
+            <div class="mp-monthly-bar__label">{{ m.month[5:] }}</div>
+          </div>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="muted" style="padding:32px; text-align:center;">暂无已实现盈亏数据</div>
+    {% endif %}
+  </div>
+</section>

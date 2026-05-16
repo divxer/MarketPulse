@@ -520,3 +520,10 @@ def test_holdings_table_tfoot_totals(client, monkeypatch, db_session):
     assert "<tfoot>" in r.text
     assert "合计" in r.text
     client.app.dependency_overrides.clear()
+
+
+def test_holdings_monthly_card_renders(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/holdings")
+    assert "月度已实现盈亏" in r.text
+    assert "mp-monthly-bars" in r.text or "暂无已实现盈亏数据" in r.text
