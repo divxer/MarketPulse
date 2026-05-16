@@ -716,19 +716,26 @@ hr.mp-hr {
 .mp-link                    { color:var(--ns-primary); text-decoration:underline;
                               cursor:pointer; }
 
-/* ════════ Phase 5c: Monthly bar chart ════════ */
-.mp-monthly-bars            { display:flex; gap:4px; align-items:flex-end; height:140px; }
-.mp-monthly-bar             { flex:1; display:flex; flex-direction:column;
-                              justify-content:flex-end; height:100%; }
-.mp-monthly-bar__bar        { border-radius:2px 2px 0 0;
-                              min-height:2px; margin-bottom:4px; }
-.mp-monthly-bar__label      { font:9px/1 var(--ns-font-mono);
-                              color:var(--ns-slate-400);
-                              text-align:center; letter-spacing:0.02em; }
+/* ════════ Phase 5c+5d: Monthly P&L bars (zero-axis split) ════════ */
+.mp-monthly-bars            { display:flex; gap:4px; align-items:stretch;
+                              height:140px; position:relative; }
+.mp-monthly-bars::before    { content:""; position:absolute; left:0; right:0;
+                              top:50%; height:0;
+                              border-top:1px dashed var(--ns-outline-variant);
+                              pointer-events:none; }
+.mp-monthly-bar             { flex:1; position:relative; height:100%; }
+.mp-monthly-bar__bar        { position:absolute; left:0; right:0; min-height:2px; }
+.mp-monthly-bar__bar--pos   { bottom:50%; border-radius:2px 2px 0 0; }
+.mp-monthly-bar__bar--neg   { top:50%;    border-radius:0 0 2px 2px; }
+
+.mp-monthly-labels          { display:flex; gap:4px; margin-top:6px; }
+.mp-monthly-label           { flex:1; font:9px/1 var(--ns-font-mono);
+                              color:var(--ns-slate-400); text-align:center;
+                              letter-spacing:0.02em; }
+
 .mp-monthly-footer          { display:flex; justify-content:space-between;
                               font-size:11px;
-                              color:var(--ns-on-surface-variant);
-                              margin-top:12px; }
+                              color:var(--ns-on-surface-variant); margin-top:12px; }
 
 /* ════════ Phase 5c: By-ticker leaderboard ════════ */
 .mp-ticker-list             { list-style:none; margin:0; padding:10px 16px 18px; }

@@ -566,3 +566,39 @@ def test_this_month_dividends_zero_when_no_current_month_data(client, monkeypatc
     # Must show 含本月 $0.00, NOT 含本月 $10.00
     assert "含本月 $0.00" in r.text
     client.app.dependency_overrides.clear()
+
+
+def test_holdings_monthly_card_zero_axis_split(client, monkeypatch, db_session):
+    """Holdings monthly card uses same zero-axis split pattern."""
+    from datetime import UTC, datetime
+    from unittest.mock import MagicMock, patch
+
+    from marketpulse.data.types import Quote
+    from marketpulse.db.models import Trade
+    from marketpulse.web.deps import get_data_service
+
+    _login(client, monkeypatch)
+    fake = MagicMock()
+    fake.get_quote.return_value = Quote(
+        ticker="AAPL", price=150.0, change_pct=1.0, volume=1000,
+        avg_volume_20d=2000, fetched_at=datetime.now(UTC), stale=False,
+    )
+    fake.get_history.return_value = []
+    client.app.dependency_overrides[get_data_service] = lambda: fake
+
+    db_session.add_all([
+        Trade(ticker="AAPL", action="buy",  quantity=10, price=100,
+              fees=0, executed_at=datetime(2026, 1, 1, tzinfo=UTC), realized_pl=None),
+        Trade(ticker="AAPL", action="sell", quantity=10, price=120,
+              fees=0, executed_at=datetime(2026, 2, 1, tzinfo=UTC), realized_pl=200.0),
+        Trade(ticker="AAPL", action="buy",  quantity=10, price=100,
+              fees=0, executed_at=datetime(2026, 3, 1, tzinfo=UTC), realized_pl=None),
+        Trade(ticker="AAPL", action="sell", quantity=10, price=80,
+              fees=0, executed_at=datetime(2026, 4, 1, tzinfo=UTC), realized_pl=-200.0),
+    ])
+    db_session.commit()
+    with patch("marketpulse.web.routes.holdings.backfill_holding_sectors", return_value=0):
+        r = client.get("/holdings")
+    assert "mp-monthly-bar__bar--pos" in r.text
+    assert "mp-monthly-bar__bar--neg" in r.text
+    client.app.dependency_overrides.clear()
