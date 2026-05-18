@@ -16,17 +16,20 @@ log = get_logger(__name__)
 def _parse_ai_output(raw: str) -> tuple[str, str | None]:
     """Split AI output into (commentary_markdown, key_events_json_str).
 
-    Looks for the `KEY_EVENTS_JSON:` marker. Everything before is the
-    commentary (Markdown). Everything after (parsed as JSON) is events.
+    Looks for the LAST occurrence of the `KEY_EVENTS_JSON:` marker (rfind,
+    not index) — the structured separator is always the final occurrence;
+    earlier occurrences are AI quoting/referring to the marker in commentary.
+    Everything before the last marker is the commentary (Markdown).
+    Everything after (parsed as JSON) is events.
 
     Failures (no marker, malformed JSON, JSON not a list) silently fall
     back to (entire raw output as commentary, events_json = None).
     """
     marker = "KEY_EVENTS_JSON:"
-    if marker not in raw:
+    idx = raw.rfind(marker)
+    if idx == -1:
         return raw, None
 
-    idx = raw.index(marker)
     commentary = raw[:idx].rstrip()
     events_part = raw[idx + len(marker):].strip()
 
@@ -71,6 +74,7 @@ class RecapService:
                 "qqq": market.qqq.change_pct,
                 "dia": market.dia.change_pct,
                 "vix": market.vix.price,
+                "vix_change_pct": market.vix.change_pct,
             }
             watch = self.session.query(WatchlistItem).order_by(WatchlistItem.sort_order).all()
             perf: list[dict[str, Any]] = []

@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
+from marketpulse.ai.prompts import COMMENTARY_PROMPT_VERSION
 from marketpulse.config import get_settings
 from marketpulse.db.models import DailyRecap
 from marketpulse.recap.service import RecapService
@@ -27,10 +28,12 @@ def _safe_json_parse(text: str | None, default):
 def _normalize_market_snap(raw: dict | list | None) -> list[dict]:
     """Reshape stored market_summary_json into template-friendly list.
 
-    Service dumps flat dict {"spy": pct, "qqq": pct, "dia": pct, "vix": price}.
-    Template expects [{label, value, pct, up}, ...].
+    Stored shape: {"spy": pct, "qqq": pct, "dia": pct, "vix": price,
+                   "vix_change_pct": pct (optional, added in Phase 5e)}
 
-    For VIX, "down is good" → up=(pct <= 0). For others, up=(pct >= 0).
+    For VIX, "down is good" — direction uses vix_change_pct (which is
+    stored separately, since the v[vix] value is the index level itself).
+    For SPY/QQQ/DIA the stored value IS the change_pct.
     """
     if not raw:
         return []
@@ -44,16 +47,25 @@ def _normalize_market_snap(raw: dict | list | None) -> list[dict]:
         ("dia", "道指"),
         ("vix", "VIX 恐慌指数"),
     ]
+    vix_pct = raw.get("vix_change_pct")  # may be None for legacy recaps
+
     for key, label in INDICES:
         v = raw.get(key)
         if v is None:
             continue
-        is_vix = key == "vix"
+        is_vix = (key == "vix")
+        # Direction: VIX uses change_pct (down = good); others use stored value (= pct already)
+        if is_vix:
+            up = (vix_pct <= 0) if vix_pct is not None else None
+            pct_display = f"{vix_pct:+.2f}%" if vix_pct is not None else None
+        else:
+            up = (v >= 0)
+            pct_display = f"{v:+.2f}%"
         out.append({
             "label": label,
             "value": f"{v:.2f}",
-            "pct": None if is_vix else f"{v:+.2f}%",
-            "up": (v <= 0) if is_vix else (v >= 0),
+            "pct": pct_display,
+            "up": up if up is not None else False,
         })
     return out
 
@@ -124,7 +136,7 @@ def recap_detail(
             "watchlist_perf": _safe_json_parse(row.watchlist_performance_json, []),
             "key_events": _safe_json_parse(row.key_events_json, []),
             "prev_recaps": prev_recaps,
-            "model_version": f"commentary-v4-zh-markdown · {settings.ai_model}",
+            "model_version": f"{COMMENTARY_PROMPT_VERSION} · {settings.ai_model}",
         },
     )
 

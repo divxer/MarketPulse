@@ -70,3 +70,24 @@ def test_parse_empty_events_array():
     raw = "正文\n\nKEY_EVENTS_JSON: []"
     commentary, events_json = _parse_ai_output(raw)
     assert events_json == "[]"
+
+
+def test_parse_with_marker_quoted_in_commentary():
+    """AI quoting 'KEY_EVENTS_JSON:' in body — rfind ensures we split at
+    the last (real) occurrence, not the first (quoted) one."""
+    from marketpulse.recap.service import _parse_ai_output
+
+    raw = (
+        "## 大盘\n\n"
+        "正文里提到了 KEY_EVENTS_JSON: 这个标记作为格式说明,但这并非真正的事件分隔符。\n\n"
+        "KEY_EVENTS_JSON: ["
+        "{\"time\": \"10:00\", \"title\": \"真正的事件\", \"kind\": \"deal\"}"
+        "]"
+    )
+    commentary, events_json = _parse_ai_output(raw)
+    # Commentary should preserve the quoted KEY_EVENTS_JSON: mention
+    assert "正文里提到了 KEY_EVENTS_JSON:" in commentary
+    # And events should be the JSON after the LAST occurrence
+    assert events_json is not None
+    events = json.loads(events_json)
+    assert events[0]["title"] == "真正的事件"

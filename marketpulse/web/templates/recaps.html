@@ -27,7 +27,9 @@
       {% else %}
         <div class="muted" style="font-size:11px; margin-top:4px;">无盈亏数据</div>
       {% endif %}
-      <p class="mp-recaps-card__summary muted">{{ r.summary or '无摘要' }}…</p>
+      <p class="mp-recaps-card__summary muted">
+        {% if r.summary %}{{ r.summary }}…{% else %}无摘要{% endif %}
+      </p>
       <span class="mp-recaps-card__status mp-chip mp-chip--{{ r.generation_status }}">
         {{ r.generation_status }}
       </span>

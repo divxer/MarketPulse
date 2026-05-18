@@ -858,7 +858,7 @@ hr.mp-hr {
 }
 
 .mp-recap-snap        { padding:20px 48px 24px;
-                        display:grid; grid-template-columns:repeat(5,1fr); gap:16px; }
+                        display:grid; grid-template-columns:repeat(4,1fr); gap:16px; }
 .mp-recap-snap__card  { padding:16px 18px; }
 .mp-recap-snap__value { font:600 26px/1 var(--ns-font-mono);
                         letter-spacing:-0.01em; color:var(--ns-navy); margin-top:4px; }
