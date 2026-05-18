@@ -1,0 +1,32 @@
+<section class="mp-card">
+  <div class="mp-card__head">
+    <span class="mp-card__title">
+      <span class="material-symbols-outlined">account_balance_wallet</span>组合今日
+    </span>
+    {% set pl = portfolio_today.get('pl_dollars') if portfolio_today else None %}
+    {% if pl is not none %}
+      <span class="mono tnum {% if pl >= 0 %}up{% else %}down{% endif %}" style="font-weight:700;">
+        {{ "{:+,.2f}".format(pl) }}
+        {% if portfolio_today.get('pl_pct') is not none %}
+          · {{ "{:+.2f}%".format(portfolio_today.pl_pct) }}
+        {% endif %}
+      </span>
+    {% endif %}
+  </div>
+  <div class="mp-card__body">
+    {% if portfolio_today %}
+      <dl class="mp-recap-stats">
+        <div><dt>市值</dt><dd class="mono tnum">${{ "{:,.0f}".format(portfolio_today.get('market_value') or 0) }}</dd></div>
+        <div><dt>总成本</dt><dd class="mono tnum">${{ "{:,.0f}".format(portfolio_today.get('cost') or 0) }}</dd></div>
+        <div><dt>未实现盈亏</dt>
+          {% set upl = (portfolio_today.get('market_value') or 0) - (portfolio_today.get('cost') or 0) %}
+          <dd class="mono tnum {% if upl >= 0 %}up{% else %}down{% endif %}">
+            {{ "{:+,.0f}".format(upl) }}
+          </dd>
+        </div>
+      </dl>
+    {% else %}
+      <p class="muted" style="text-align:center; padding:16px;">暂无组合数据</p>
+    {% endif %}
+  </div>
+</section>

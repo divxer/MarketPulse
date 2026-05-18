@@ -250,3 +250,25 @@ def test_recap_article_has_editor_eyebrow(client, monkeypatch, db_session):
     _seed_recap_full(db_session, date(2026, 5, 12))
     r = client.get("/recap/2026-05-12")
     assert "编辑分析" in r.text
+
+
+# ---------------------------------------------------------------------------
+# Phase 5e Task 9 — portfolio today card
+# ---------------------------------------------------------------------------
+
+def test_recap_portfolio_today_card_renders_pl(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    _seed_recap_full(db_session, date(2026, 5, 12), holdings_totals={
+        "cost": 10000.0, "market_value": 10500.0,
+        "pl_dollars": 500.0, "pl_pct": 5.0,
+    })
+    r = client.get("/recap/2026-05-12")
+    assert "组合今日" in r.text
+    assert "+500" in r.text
+
+
+def test_recap_portfolio_today_card_empty_state(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    _seed_recap_full(db_session, date(2026, 5, 12), holdings_totals=None)
+    r = client.get("/recap/2026-05-12")
+    assert "暂无组合数据" in r.text

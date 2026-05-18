@@ -896,3 +896,12 @@ hr.mp-hr {
   .mp-recap-hero      { flex-direction:column; align-items:flex-start; gap:24px; }
 }
 .mp-holdings__allo-bar > div { position:absolute; left:0; top:0; bottom:0; }
+
+/* ════════ Phase 5e: Side rail cards ════════ */
+.mp-recap-stats              { display:grid; grid-template-columns: 1fr 1fr 1fr; gap:16px;
+                               padding:16px; margin:0; }
+.mp-recap-stats > div        { display:flex; flex-direction:column; gap:4px; }
+.mp-recap-stats dt           { font:600 10px/1 var(--ns-font-headline);
+                               letter-spacing:0.08em; text-transform:uppercase;
+                               color:var(--ns-on-surface-variant); }
+.mp-recap-stats dd           { font:600 16px/1 var(--ns-font-mono); margin:0; }
