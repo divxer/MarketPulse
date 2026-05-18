@@ -193,3 +193,33 @@ def test_recap_hero_failed_status_shows_red(client, monkeypatch, db_session):
     _seed_recap_full(db_session, date(2026, 5, 12), status="failed")
     r = client.get("/recap/2026-05-12")
     assert "生成失败" in r.text
+
+
+# ---------------------------------------------------------------------------
+# Phase 5e Task 7 — market snap partial
+# ---------------------------------------------------------------------------
+
+def test_recap_market_snap_renders_4_cards_with_data(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    _seed_recap_full(db_session, date(2026, 5, 12), market_summary={
+        "spy": 0.24, "qqq": 0.44, "dia": 0.51, "vix": 14.18,
+    })
+    r = client.get("/recap/2026-05-12")
+    assert r.text.count("mp-recap-snap__card") == 4
+
+
+def test_recap_market_snap_renders_all_4_labels(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    _seed_recap_full(db_session, date(2026, 5, 12), market_summary={
+        "spy": 0.24, "qqq": 0.44, "dia": 0.51, "vix": 14.18,
+    })
+    r = client.get("/recap/2026-05-12")
+    for label in ("标普 500", "纳指 100", "道指", "VIX"):
+        assert label in r.text
+
+
+def test_recap_market_snap_empty_state_when_no_data(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    _seed_recap_full(db_session, date(2026, 5, 12), market_summary=None)
+    r = client.get("/recap/2026-05-12")
+    assert "暂无大盘数据" in r.text
