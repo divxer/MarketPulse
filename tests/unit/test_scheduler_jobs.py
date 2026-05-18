@@ -13,7 +13,7 @@ def fake_recap():
         recap_date=date.today(),
         market_summary_json='{"spy": 0.5, "qqq": 0.3, "dia": 0.1, "vix": 15}',
         ai_commentary_text="今日小幅上涨。",
-        generation_status="ok",
+        generation_status="success",
         generated_at=datetime.now(UTC),
     )
 
@@ -100,7 +100,7 @@ def test_recap_push_failure_does_not_propagate(monkeypatch, fake_recap) -> None:
 
 
 def test_recap_push_skipped_when_generation_failed(monkeypatch, fake_recap) -> None:
-    """No point pushing an empty/error summary — skip when status != 'ok'."""
+    """No point pushing an empty/error summary — skip when status != 'success'."""
     fake_recap.generation_status = "failed"
     monkeypatch.setenv("APP_PASSWORD_HASH", "x")
     monkeypatch.setenv("SESSION_SECRET", "y" * 32)

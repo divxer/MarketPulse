@@ -20,7 +20,7 @@ def _recap(**overrides) -> DailyRecap:
         ]),
         holdings_totals_json=json.dumps({"pl_dollars": -2064.41, "pl_pct": -2.64}),
         ai_commentary_text="今日大盘震荡。持仓中 TQQQ 表现突出,QUBT 续跌需注意止损。" * 10,
-        generation_status="ok",
+        generation_status="success",
         generated_at=datetime.now(UTC),
     )
     for k, v in overrides.items():
