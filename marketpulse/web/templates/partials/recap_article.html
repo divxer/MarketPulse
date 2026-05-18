@@ -11,3 +11,32 @@
     <p class="muted">AI commentary 暂未生成。</p>
   {% endif %}
 </div>
+
+<footer class="mp-recap-article__footer">
+  <hr class="mp-rule" style="margin: 32px 0 16px;" />
+  <div class="mp-recap-article__meta">
+    <div>
+      <span class="mp-eyebrow">模型</span>
+      <div class="mono">{{ model_version }}</div>
+    </div>
+    {% if row.generated_at %}
+    <div>
+      <span class="mp-eyebrow">生成时间</span>
+      <div class="mono">
+        <time data-utc="{{ row.generated_at.isoformat() }}">
+          {{ row.generated_at.strftime('%Y-%m-%d %H:%M') }}
+        </time>
+        UTC
+      </div>
+    </div>
+    {% endif %}
+    <div>
+      <span class="mp-eyebrow">数据来源</span>
+      <div class="mono">自选股 · 持仓 · 大盘指数</div>
+    </div>
+  </div>
+  <p class="mp-recap-article__disclaimer">
+    本复盘由 AI 自动生成,可能包含错误或遗漏。投资决策请独立判断,
+    AI 输出不构成投资建议。如发现内容错误,可点击「重新生成」更新。
+  </p>
+</footer>
