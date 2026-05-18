@@ -13,6 +13,35 @@ from marketpulse.recap.signals import detect_signals
 log = get_logger(__name__)
 
 
+def _parse_ai_output(raw: str) -> tuple[str, str | None]:
+    """Split AI output into (commentary_markdown, key_events_json_str).
+
+    Looks for the LAST occurrence of the `KEY_EVENTS_JSON:` marker (rfind,
+    not index) — the structured separator is always the final occurrence;
+    earlier occurrences are AI quoting/referring to the marker in commentary.
+    Everything before the last marker is the commentary (Markdown).
+    Everything after (parsed as JSON) is events.
+
+    Failures (no marker, malformed JSON, JSON not a list) silently fall
+    back to (entire raw output as commentary, events_json = None).
+    """
+    marker = "KEY_EVENTS_JSON:"
+    idx = raw.rfind(marker)
+    if idx == -1:
+        return raw, None
+
+    commentary = raw[:idx].rstrip()
+    events_part = raw[idx + len(marker):].strip()
+
+    try:
+        events = json.loads(events_part)
+        if not isinstance(events, list):
+            return commentary, None
+        return commentary, json.dumps(events, ensure_ascii=False)
+    except json.JSONDecodeError:
+        return commentary, None
+
+
 class _DataLike(Protocol):
     def get_market_overview(self) -> MarketOverview: ...
     def get_quote(self, ticker: str) -> Quote: ...
@@ -45,6 +74,7 @@ class RecapService:
                 "qqq": market.qqq.change_pct,
                 "dia": market.dia.change_pct,
                 "vix": market.vix.price,
+                "vix_change_pct": market.vix.change_pct,
             }
             watch = self.session.query(WatchlistItem).order_by(WatchlistItem.sort_order).all()
             perf: list[dict[str, Any]] = []
@@ -83,7 +113,9 @@ class RecapService:
                 json.dumps(holdings_totals) if holdings_totals else None
             )
             recap.news_summary_json = json.dumps(news_summary)
-            recap.ai_commentary_text = commentary
+            commentary_md, events_json = _parse_ai_output(commentary)
+            recap.ai_commentary_text = commentary_md
+            recap.key_events_json = events_json
             recap.generation_status = "success"
             recap.error_message = None
             recap.generated_at = datetime.now(UTC)
@@ -108,6 +140,7 @@ class RecapService:
             existing.holdings_totals_json = None
             existing.news_summary_json = None
             existing.ai_commentary_text = None
+            existing.key_events_json = None
             existing.generated_at = None
             self.session.commit()
             return existing

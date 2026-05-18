@@ -1,0 +1,17 @@
+{% for item in market_snap %}
+<div class="mp-card mp-recap-snap__card">
+  <span class="mp-eyebrow mp-eyebrow--primary">{{ item.label }}</span>
+  <div class="mono tnum mp-recap-snap__value">{{ item.value }}</div>
+  <div class="mono tnum mp-recap-snap__pct {% if item.up %}up{% else %}down{% endif %}">
+    <span class="material-symbols-outlined" style="font-size:14px;">
+      {% if item.up %}trending_up{% else %}trending_down{% endif %}
+    </span>
+    {% if item.pct %}{{ item.pct }}{% endif %}
+  </div>
+</div>
+{% endfor %}
+{% if not market_snap %}
+  <div class="muted" style="grid-column: 1 / -1; padding: 16px; text-align:center;">
+    暂无大盘数据
+  </div>
+{% endif %}

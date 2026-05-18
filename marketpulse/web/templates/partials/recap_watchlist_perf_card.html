@@ -1,0 +1,21 @@
+<section class="mp-card">
+  <div class="mp-card__head">
+    <span class="mp-card__title">
+      <span class="material-symbols-outlined">monitoring</span>自选股表现
+    </span>
+  </div>
+  <ul class="mp-recap-perf-list">
+    {% for w in watchlist_perf[:10] %}
+      <li>
+        <a href="/stock/{{ w.ticker }}" class="mp-ticker-link">{{ w.ticker }}</a>
+        <span class="mono tnum">{% if w.price %}${{ "{:.2f}".format(w.price) }}{% else %}—{% endif %}</span>
+        <span class="mono tnum {% if w.change_pct is not none and w.change_pct >= 0 %}up{% elif w.change_pct is not none %}down{% endif %}">
+          {% if w.change_pct is not none %}{{ "{:+.2f}%".format(w.change_pct) }}{% else %}—{% endif %}
+        </span>
+      </li>
+    {% endfor %}
+    {% if not watchlist_perf %}
+      <li class="muted" style="padding:16px; text-align:center;">暂无自选股</li>
+    {% endif %}
+  </ul>
+</section>

@@ -1,0 +1,47 @@
+<section class="mp-recap-hero">
+  <div class="mp-recap-hero__main">
+    <span class="mp-eyebrow mp-eyebrow--primary">盘后复盘 · 美股</span>
+    <h1 class="grotesk mp-recap-hero__title">
+      {{ recap_date.strftime('%Y · %-m 月 %-d 日') }}
+    </h1>
+    <span class="mp-rule"></span>
+    <p class="mp-recap-hero__desc">
+      由 Claude 在收盘后基于您的自选股、当日持仓和大盘数据自动生成。
+      客观、冷静、具体,提及具体的 ticker 和数字。
+    </p>
+  </div>
+
+  <div class="mp-recap-hero__meta">
+    <div class="mp-recap-hero__status">
+      {% if row.generation_status == "success" %}
+        <span class="mp-pulse"></span>
+        已生成 ·
+        <time data-utc="{{ row.generated_at.isoformat() if row.generated_at else '' }}">
+          {{ row.generated_at.strftime('%H:%M') if row.generated_at else '' }}
+        </time>
+      {% elif row.generation_status == "pending" %}
+        <span class="muted">生成中…</span>
+      {% else %}
+        <span class="down">生成失败</span>
+      {% endif %}
+      <span class="mp-recap-hero__model">{{ model_version }}</span>
+    </div>
+    <div class="mp-recap-hero__actions">
+      <button class="mp-btn mp-btn--ghost"
+              hx-post="/recap/{{ recap_date }}/retry"
+              hx-target="body" hx-swap="outerHTML"
+              hx-confirm="重新生成 {{ recap_date }} 的复盘?">
+        <span class="material-symbols-outlined">refresh</span>重新生成
+      </button>
+      <button class="mp-btn mp-btn--ghost" onclick="recapToast('分享功能暂未启用')">
+        <span class="material-symbols-outlined">share</span>分享
+      </button>
+      <button class="mp-btn mp-btn--ghost" onclick="recapToast('置顶功能暂未启用')">
+        <span class="material-symbols-outlined">push_pin</span>置顶
+      </button>
+      <button class="mp-btn mp-btn--navy" onclick="recapToast('推送功能暂未启用')">
+        <span class="material-symbols-outlined">notifications_active</span>推送至订阅者
+      </button>
+    </div>
+  </div>
+</section>

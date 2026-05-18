@@ -1,0 +1,25 @@
+<section class="mp-card">
+  <div class="mp-card__head">
+    <span class="mp-card__title">
+      <span class="material-symbols-outlined">history</span>历史复盘
+    </span>
+    <a href="/recaps" class="mp-card__sub" style="color:var(--ns-primary);">全部 →</a>
+  </div>
+  <ul class="mp-recap-prev-list">
+    {% for p in prev_recaps %}
+      <li>
+        <a href="/recap/{{ p.recap_date }}" class="mp-recap-prev__date mono">
+          {{ p.recap_date.strftime('%m-%d') }}
+        </a>
+        {% if p.ai_commentary_text %}
+          <span class="muted mp-recap-prev__excerpt">{{ p.ai_commentary_text[:60] }}…</span>
+        {% else %}
+          <span class="muted mp-recap-prev__excerpt">无摘要</span>
+        {% endif %}
+      </li>
+    {% endfor %}
+    {% if not prev_recaps %}
+      <li class="muted" style="padding:16px; text-align:center;">暂无历史复盘</li>
+    {% endif %}
+  </ul>
+</section>

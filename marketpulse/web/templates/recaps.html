@@ -1,14 +1,44 @@
 {% extends "base.html" %}
+{% block main_width %}max-w-[2400px]{% endblock %}
+{% block nav_width %}max-w-[2400px]{% endblock %}
 {% block content %}
-<section class="bg-white rounded-md shadow-sm p-4">
-  <h1 class="font-semibold mb-3">历史复盘</h1>
-  <ul class="text-sm divide-y">
-    {% for r in rows %}
-    <li class="py-2 flex justify-between">
-      <a href="/recap/{{ r.recap_date }}" class="text-blue-600">{{ r.recap_date }}</a>
-      <span class="text-slate-500">{{ r.generation_status }}</span>
-    </li>
-    {% endfor %}
-  </ul>
+
+<section class="mp-hero">
+  <div>
+    <span class="mp-eyebrow mp-eyebrow--primary">复盘档案</span>
+    <h1 class="grotesk mp-hero__title">Recap History</h1>
+    <span class="mp-rule"></span>
+    <p class="mp-hero__desc">每日盘后由 AI 自动生成的市场点评。点击进入完整复盘。</p>
+  </div>
+</section>
+
+<section class="mp-recaps-grid">
+  {% for r in rows %}
+    <a class="mp-card mp-recaps-card" href="/recap/{{ r.recap_date }}">
+      <div class="mp-recaps-card__date grotesk">{{ r.recap_date.strftime('%m-%d') }}</div>
+      <div class="muted" style="font-size:11px;">{{ r.recap_date.strftime('%Y') }}</div>
+      {% if r.today_pl_dollars is not none %}
+        <div class="mono tnum mp-recaps-card__pl {% if r.today_pl_dollars >= 0 %}up{% else %}down{% endif %}">
+          {{ "{:+,.0f}".format(r.today_pl_dollars) }}
+          {% if r.today_pl_pct is not none %}
+            <small>{{ "{:+.2f}%".format(r.today_pl_pct) }}</small>
+          {% endif %}
+        </div>
+      {% else %}
+        <div class="muted" style="font-size:11px; margin-top:4px;">无盈亏数据</div>
+      {% endif %}
+      <p class="mp-recaps-card__summary muted">
+        {% if r.summary %}{{ r.summary }}…{% else %}无摘要{% endif %}
+      </p>
+      <span class="mp-recaps-card__status mp-chip mp-chip--{{ r.generation_status }}">
+        {{ r.generation_status }}
+      </span>
+    </a>
+  {% endfor %}
+  {% if not rows %}
+    <div class="muted" style="grid-column:1/-1; padding:32px; text-align:center;">
+      暂无复盘记录
+    </div>
+  {% endif %}
 </section>
 {% endblock %}

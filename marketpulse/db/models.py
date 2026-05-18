@@ -178,6 +178,7 @@ class DailyRecap(Base):
     holdings_totals_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     news_summary_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     ai_commentary_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    key_events_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     generated_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
     generation_status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
