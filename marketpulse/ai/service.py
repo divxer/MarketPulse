@@ -167,6 +167,89 @@ class AiService:
         system, data = _split_prompt(prompt_text)
         return self.ai.complete(system=system, user=data)
 
+    def portfolio_risk_cached(
+        self, *,
+        holdings: list[dict[str, Any]],
+        totals: dict[str, float],
+        allocation: list[dict[str, Any]],
+        realized_pl: float,
+        trading_stats: dict[str, Any],
+    ) -> str:
+        """portfolio_risk() with content-fingerprint cache.
+
+        Cache key fingerprint covers sorted (ticker, quantity, avg_cost) tuples.
+        Same portfolio state → cache hit (no API call). Holdings change →
+        fingerprint differs → cache miss → fresh call. TTL self.ttl_hours
+        ensures daily refresh even when state is identical.
+        """
+        fp = self._portfolio_fingerprint(holdings)
+        cache_key = f"{prompts.RISK_PROMPT_VERSION}::{fp}"
+        cached = self._lookup_portfolio_risk_cache(cache_key)
+        if cached is not None:
+            return cached
+
+        response = self.portfolio_risk(
+            holdings=holdings,
+            totals=totals,
+            allocation=allocation,
+            realized_pl=realized_pl,
+            trading_stats=trading_stats,
+        )
+        self._save_portfolio_risk_cache(cache_key, holdings, totals, response)
+        return response
+
+    @staticmethod
+    def _portfolio_fingerprint(holdings: list[dict[str, Any]]) -> str:
+        """12-char hex SHA-256 of sorted (ticker, quantity, avg_cost) tuples.
+        Intraday price changes do NOT invalidate (TTL covers daily refresh)."""
+        import hashlib
+        state = sorted(
+            (h["ticker"], float(h["quantity"]), float(h["avg_cost"]))
+            for h in holdings
+        )
+        payload = json.dumps(state, default=str, sort_keys=True)
+        return hashlib.sha256(payload.encode()).hexdigest()[:12]
+
+    def _lookup_portfolio_risk_cache(self, cache_key: str) -> str | None:
+        """Look up a non-expired portfolio risk cache row by prompt_version key.
+
+        Reuses the AiAnalysis table with ticker='__portfolio__'.
+        """
+        stmt = (
+            select(AiAnalysis)
+            .where(AiAnalysis.ticker == "__portfolio__")
+            .where(AiAnalysis.model == self.model)
+            .where(AiAnalysis.prompt_version == cache_key)
+            .where(AiAnalysis.expires_at > datetime.now(UTC))
+            .order_by(AiAnalysis.requested_at.desc())
+            .limit(1)
+        )
+        row = self.session.execute(stmt).scalar_one_or_none()
+        return row.response_markdown if row else None
+
+    def _save_portfolio_risk_cache(
+        self,
+        cache_key: str,
+        holdings: list[dict[str, Any]],
+        totals: dict[str, float],
+        response: str,
+    ) -> None:
+        now = datetime.now(UTC)
+        record = AiAnalysis(
+            ticker="__portfolio__",
+            model=self.model,
+            prompt_version=cache_key,
+            input_data_json=json.dumps({
+                "holdings_count": len(holdings),
+                "totals": totals,
+            }, default=str),
+            response_markdown=response,
+            requested_at=now,
+            expires_at=now + timedelta(hours=self.ttl_hours),
+        )
+        self.session.add(record)
+        self.session.commit()
+
     def _lookup_cache(self, ticker: str, version: str) -> AiAnalysis | None:
         # Cache scoped to (ticker, model, prompt_version) so switching either
         # the model or the prompt template invalidates and forces a fresh call.
