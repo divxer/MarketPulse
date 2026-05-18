@@ -210,7 +210,7 @@ def holdings_risk_analysis(
         for r in rows
     ]
     try:
-        analysis_markdown = ai.portfolio_risk(
+        analysis_markdown = ai.portfolio_risk_cached(
             holdings=holdings_payload,
             totals=totals,
             allocation=allocation,

@@ -164,6 +164,8 @@ def test_holdings_risk_analysis_endpoint(client: TestClient, monkeypatch):
     class _FakeAi:
         def portfolio_risk(self, **kwargs):
             return "**集中度风险**:测试输出\n\n仅占位用于单测。"
+        def portfolio_risk_cached(self, **kwargs):
+            return self.portfolio_risk(**kwargs)
     from marketpulse.web.deps import get_ai_service, get_data_service
     client.app.dependency_overrides[get_data_service] = lambda: fake
     client.app.dependency_overrides[get_ai_service] = lambda: _FakeAi()
@@ -185,6 +187,8 @@ def test_holdings_risk_analysis_empty_portfolio(client: TestClient, monkeypatch)
     class _FakeAi:
         def portfolio_risk(self, **kwargs):
             raise AssertionError("should not be called when no holdings")
+        def portfolio_risk_cached(self, **kwargs):
+            raise AssertionError("should not be called when no holdings")
     from marketpulse.web.deps import get_ai_service, get_data_service
     client.app.dependency_overrides[get_data_service] = lambda: fake
     client.app.dependency_overrides[get_ai_service] = lambda: _FakeAi()
@@ -203,6 +207,8 @@ def test_risk_analysis_renders_markdown_to_html(client: TestClient, monkeypatch)
     class _MdAi:
         def portfolio_risk(self, **kwargs):
             return "## 风险\n\n这是一段 **粗体** 文字。\n\n- 第一项\n- 第二项"
+        def portfolio_risk_cached(self, **kwargs):
+            return self.portfolio_risk(**kwargs)
     from marketpulse.web.deps import get_ai_service, get_data_service
     client.app.dependency_overrides[get_data_service] = lambda: fake
     client.app.dependency_overrides[get_ai_service] = lambda: _MdAi()

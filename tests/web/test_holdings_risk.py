@@ -99,3 +99,81 @@ def test_risk_analysis_empty_holdings(client: TestClient, monkeypatch):
     assert r.status_code == 200
     # Either renders empty card or friendly message
     assert "mp-card" in r.text
+
+
+def test_risk_analysis_caches_response(client: TestClient, monkeypatch, db_session):
+    """Second call with same portfolio state returns cached response (no AI call)."""
+    from unittest.mock import MagicMock
+
+    from marketpulse.data.types import Quote
+    from marketpulse.db.models import Holding
+    from marketpulse.web.deps import get_data_service
+
+    _login(client, monkeypatch)
+    db_session.add(Holding(ticker="AAPL", quantity=10.0, avg_cost=150.0,
+                           sort_order=0))
+    db_session.commit()
+
+    fake_data = MagicMock()
+    fake_data.get_quote.return_value = Quote(
+        ticker="AAPL", price=180.0, change_pct=1.0, volume=1000,
+        avg_volume_20d=2000, fetched_at=datetime.now(UTC), stale=False,
+    )
+    fake_data.get_history.return_value = []
+    client.app.dependency_overrides[get_data_service] = lambda: fake_data
+
+    call_count = [0]
+    def fake_portfolio_risk(*args, **kwargs):
+        call_count[0] += 1
+        return f"## 测试风险分析\n\n第 {call_count[0]} 次"
+
+    with patch("marketpulse.ai.service.AiService.portfolio_risk", side_effect=fake_portfolio_risk):
+        r1 = client.get("/holdings/risk-analysis")
+        r2 = client.get("/holdings/risk-analysis")
+
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+    # AI called exactly once for the first request; second is a cache hit
+    assert call_count[0] == 1
+    # Both responses contain the SAME content (first AI call's output)
+    assert "第 1 次" in r1.text
+    assert "第 1 次" in r2.text
+    client.app.dependency_overrides.clear()
+
+
+def test_risk_analysis_recomputes_when_holdings_change(client: TestClient, monkeypatch, db_session):
+    """Adding a new holding invalidates the cache (different fingerprint)."""
+    from unittest.mock import MagicMock
+
+    from marketpulse.data.types import Quote
+    from marketpulse.db.models import Holding
+    from marketpulse.web.deps import get_data_service
+
+    _login(client, monkeypatch)
+    db_session.add(Holding(ticker="AAPL", quantity=10.0, avg_cost=150.0,
+                           sort_order=0))
+    db_session.commit()
+
+    fake_data = MagicMock()
+    fake_data.get_quote.return_value = Quote(
+        ticker="AAPL", price=180.0, change_pct=1.0, volume=1000,
+        avg_volume_20d=2000, fetched_at=datetime.now(UTC), stale=False,
+    )
+    fake_data.get_history.return_value = []
+    client.app.dependency_overrides[get_data_service] = lambda: fake_data
+
+    call_count = [0]
+    def fake_portfolio_risk(*args, **kwargs):
+        call_count[0] += 1
+        return f"分析 #{call_count[0]}"
+
+    with patch("marketpulse.ai.service.AiService.portfolio_risk", side_effect=fake_portfolio_risk):
+        client.get("/holdings/risk-analysis")  # call 1: AI hit (fingerprint A)
+        # Add a holding → fingerprint changes
+        db_session.add(Holding(ticker="NVDA", quantity=5.0, avg_cost=400.0,
+                               sort_order=1))
+        db_session.commit()
+        client.get("/holdings/risk-analysis")  # call 2: cache miss, AI hit
+
+    assert call_count[0] == 2  # AI called twice, not 1 (cache invalidated)
+    client.app.dependency_overrides.clear()
