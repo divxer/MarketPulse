@@ -231,6 +231,12 @@ recap.key_events_json = events_json
 
 (其中 `commentary_raw` 是 AI 调用返回的原始字符串。)
 
+**同时改 `_upsert_pending`**(`marketpulse/recap/service.py:98-115`): 现有 retry 路径清空了其它 JSON 列(`market_summary_json` 等)但没清 `key_events_json` (因为字段刚加)。retry 时若新 AI 输出解析失败,旧 events 会残留。在 reset block 加一行:
+
+```python
+existing.key_events_json = None  # 与其它 *_json 列对齐
+```
+
 ## 路由 implementation
 
 ### `marketpulse/web/routes/recap.py`
@@ -261,6 +267,45 @@ def _safe_json_parse(text: str | None, default):
         return default
 
 
+def _normalize_market_snap(raw: dict | list | None) -> list[dict]:
+    """Reshape the stored market_summary_json into the template-friendly
+    list shape [{label, value, pct, up}, ...].
+
+    The service currently dumps a flat dict:
+      {"spy": change_pct, "qqq": change_pct, "dia": change_pct, "vix": price}
+
+    For VIX, "down is good" — so up=(pct <= 0). For the others, up=(pct >= 0).
+    """
+    if not raw:
+        return []
+    # Already-list shape (forward-compatible if service is updated later)
+    if isinstance(raw, list):
+        return raw
+
+    out = []
+    INDICES = [
+        ("spy", "标普 500"),
+        ("qqq", "纳指 100"),
+        ("dia", "道指"),
+        ("vix", "VIX 恐慌指数"),
+    ]
+    for key, label in INDICES:
+        v = raw.get(key)
+        if v is None:
+            continue
+        # For SPY/QQQ/DIA the stored value is change_pct; for VIX it's price.
+        # We don't have the underlying price stored separately, so we display
+        # what we have. Template handles None gracefully.
+        is_vix = (key == "vix")
+        out.append({
+            "label": label,
+            "value": f"{v:.2f}" if v is not None else "—",
+            "pct": None if is_vix else (f"{v:+.2f}%" if v is not None else "—"),
+            "up": (v <= 0) if is_vix else (v >= 0),
+        })
+    return out
+
+
 @router.get("/recaps", response_class=HTMLResponse)
 def recap_list(
     request: Request,
@@ -281,8 +326,10 @@ def recap_list(
             "generation_status": r.generation_status,
             "generated_at": r.generated_at,
             "summary": (r.ai_commentary_text or "")[:200],
-            "today_pl_dollars": totals.get("today_pl_dollars"),
-            "today_pl_pct": totals.get("today_pl_pct"),
+            # holdings_totals_json from compute_totals():
+            # {cost, market_value, pl_dollars, pl_pct}
+            "today_pl_dollars": totals.get("pl_dollars"),
+            "today_pl_pct": totals.get("pl_pct"),
         })
     return templates.TemplateResponse(request, "recaps.html", {"rows": enriched})
 
@@ -304,11 +351,14 @@ def recap_detail(
 
     prev_recaps = (
         db.query(DailyRecap)
-        .filter(DailyRecap.recap_date != recap_date)
+        .filter(DailyRecap.recap_date < recap_date)   # strictly past, not just !=
         .order_by(DailyRecap.recap_date.desc())
         .limit(6)
         .all()
     )
+
+    from marketpulse.config import get_settings
+    settings = get_settings()
 
     return templates.TemplateResponse(
         request, "recap.html",
@@ -316,12 +366,13 @@ def recap_detail(
             "row": row,
             "recap_date": recap_date,
             "commentary_md": row.ai_commentary_text or "",
-            "market_snap": _safe_json_parse(row.market_summary_json, []),
+            # Reshape flat dict → template-friendly list (see helper above).
+            "market_snap": _normalize_market_snap(_safe_json_parse(row.market_summary_json, {})),
             "portfolio_today": _safe_json_parse(row.holdings_totals_json, {}),
             "watchlist_perf": _safe_json_parse(row.watchlist_performance_json, []),
             "key_events": _safe_json_parse(row.key_events_json, []),
             "prev_recaps": prev_recaps,
-            "model_version": "commentary-v4-zh-markdown · claude-sonnet-4-5",
+            "model_version": f"commentary-v4-zh-markdown · {settings.ai_model}",
         },
     )
 
@@ -392,6 +443,19 @@ function recapToast(msg) {
   document.body.appendChild(t);
   setTimeout(() => t.remove(), 2200);
 }
+
+// Convert <time data-utc="..."> to user-local HH:MM.
+// (Same logic as trades_form_script.html — extracted to avoid coupling.)
+(function localizeTimes() {
+  const fmt = (iso) => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  };
+  document.querySelectorAll('time[data-utc]').forEach(el => {
+    el.textContent = fmt(el.dataset.utc);
+  });
+})();
 </script>
 {% endblock %}
 ```
@@ -403,6 +467,8 @@ function recapToast(msg) {
   <div class="mp-recap-hero__main">
     <span class="mp-eyebrow mp-eyebrow--primary">盘后复盘 · 美股</span>
     <h1 class="grotesk mp-recap-hero__title">
+      {# %-m / %-d 是 glibc 特有,Windows 上抛 ValueError。Docker 部署用 glibc,
+         本地 macOS 也兼容,但写代码时若有跨平台需求改成 month/day int 即可。 #}
       {{ recap_date.strftime('%Y · %-m 月 %-d 日') }}
     </h1>
     <span class="mp-rule"></span>
@@ -414,7 +480,7 @@ function recapToast(msg) {
 
   <div class="mp-recap-hero__meta">
     <div class="mp-recap-hero__status">
-      {% if row.generation_status == "ok" %}
+      {% if row.generation_status == "success" %}
         <span class="mp-pulse"></span>
         已生成 ·
         <time data-utc="{{ row.generated_at.isoformat() if row.generated_at else '' }}">
@@ -471,6 +537,8 @@ function recapToast(msg) {
     暂无大盘数据
   </div>
 {% endif %}
+
+注:实施者请使用 `marketpulse/web/static/css/app.css` (注意 `/css/` 子目录),并复用 `{% include "partials/recap_market_snap.html" %}` 已有的 `_normalize_market_snap` route helper。
 ```
 
 注：实施者需先确认 `market_summary_json` 的实际数据 shape (查 `RecapService.generate` 中 `market_summary_json` 是如何 dump 的)。如果 shape 与上不符,调整模板 attribute 访问方式。
@@ -484,13 +552,16 @@ function recapToast(msg) {
   <span class="mp-rule"></span>
 </header>
 
-<div class="mp-prose mp-recap-prose">
+<div class="mp-recap-prose">
   {% if commentary_md %}
     {{ commentary_md | markdown }}
   {% else %}
     <p class="muted">AI commentary 暂未生成。</p>
   {% endif %}
 </div>
+
+{# 注:不用 mp-prose (Phase 5d 的 14px small prose),mp-recap-prose 是
+   编辑长文专用 (17px, 1.85 line-height)。两者级联会让 padding:20px 残留。 #}
 ```
 
 ### `partials/recap_portfolio_today_card.html`
@@ -598,9 +669,11 @@ function recapToast(msg) {
         <a href="/recap/{{ p.recap_date }}" class="mp-recap-prev__date mono">
           {{ p.recap_date.strftime('%m-%d') }}
         </a>
-        <span class="muted mp-recap-prev__excerpt">
-          {{ (p.ai_commentary_text or "")[:60] }}…
-        </span>
+        {% if p.ai_commentary_text %}
+          <span class="muted mp-recap-prev__excerpt">{{ p.ai_commentary_text[:60] }}…</span>
+        {% else %}
+          <span class="muted mp-recap-prev__excerpt">无摘要</span>
+        {% endif %}
       </li>
     {% endfor %}
     {% if not prev_recaps %}
@@ -657,7 +730,12 @@ function recapToast(msg) {
 {% endblock %}
 ```
 
-## CSS 新增 (`app.css` 追加)
+## CSS 新增 (追加到 `marketpulse/web/static/css/app.css`)
+
+**CRITICAL: Path 是 `static/css/app.css` 不是 `static/app.css`**:
+- `static/app.css` 是 Tailwind 编译输出 (0 bytes 源,每次 build 重写覆盖)
+- `static/css/app.css` 是手写的 NineScrolls CSS (Phase 5b-d 的代码都在这,base.html 优先加载)
+- 5e 必须追加到 `static/css/app.css`,否则下次 Tailwind build 全消失
 
 ```css
 /* ════════ Phase 5e: /recap layout ════════ */
@@ -780,7 +858,7 @@ function recapToast(msg) {
                                display:-webkit-box; -webkit-line-clamp:3;
                                -webkit-box-orient:vertical; }
 .mp-recaps-card__status      { align-self:flex-start; margin-top:auto; padding-top:10px; }
-.mp-chip--ok                 { background:#d1fae5; color:#065f46; }
+.mp-chip--success            { background:#d1fae5; color:#065f46; }
 .mp-chip--pending            { background:#fef3c7; color:#92400e; }
 .mp-chip--failed             { background:#fee2e2; color:#991b1b; }
 ```
@@ -788,14 +866,14 @@ function recapToast(msg) {
 ## 测试
 
 ```
-tests/recap/test_prompt_parsing.py             新
+tests/unit/test_recap_prompt_parsing.py             新
   - test_parse_with_valid_marker_and_json
   - test_parse_without_marker_returns_raw
   - test_parse_malformed_json_falls_back_to_none
   - test_parse_events_not_a_list_falls_back
   - test_parse_strips_trailing_whitespace_in_commentary
 
-tests/recap/test_recap_service_generate.py     扩展
+tests/integration/test_recap_service_generate.py     扩展
   - test_generate_saves_commentary_and_key_events_separately
   - test_generate_falls_back_when_ai_no_marker
 
