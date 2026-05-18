@@ -65,7 +65,7 @@ def run_daily_recap() -> None:
 
         # Optional push — non-blocking, never fails the job.
         # Skip if the recap itself failed: an empty body has no value.
-        if settings.notifier_recap_enabled and result.generation_status == "ok":
+        if settings.notifier_recap_enabled and result.generation_status == "success":
             notifier = build_notifier(settings)
             if not isinstance(notifier, NoopNotifier):
                 try:
@@ -76,7 +76,7 @@ def run_daily_recap() -> None:
                     )
                 except Exception as exc:
                     log.warning("recap_push_skipped", error=str(exc))
-        elif settings.notifier_recap_enabled and result.generation_status != "ok":
+        elif settings.notifier_recap_enabled and result.generation_status != "success":
             log.info("recap_push_skipped_status", status=result.generation_status)
     finally:
         db.close()
