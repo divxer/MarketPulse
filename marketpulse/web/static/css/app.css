@@ -833,4 +833,66 @@ hr.mp-hr {
 .mp-holdings__allo-bar   { display:inline-block; width:80px; height:8px;
                            background:var(--ns-surface-container); border-radius:2px;
                            position:relative; overflow:hidden; vertical-align:middle; }
+
+/* ════════ Phase 5e: /recap layout ════════ */
+.mp-recap-hero        { padding:40px 48px 24px;
+                        display:flex; align-items:flex-end; justify-content:space-between;
+                        gap:48px; border-bottom:1px solid var(--ns-outline-variant); }
+.mp-recap-hero__title { font:700 64px/0.95 var(--ns-font-headline);
+                        letter-spacing:-0.04em; color:var(--ns-navy); margin:8px 0 6px; }
+.mp-recap-hero__desc  { font-size:16px; line-height:1.6; max-width:720px;
+                        color:var(--ns-on-surface-variant); margin:16px 0 0; }
+.mp-recap-hero__meta  { display:flex; flex-direction:column; align-items:flex-end; gap:10px; }
+.mp-recap-hero__status { display:flex; gap:12px; align-items:center;
+                         font-size:12px; color:var(--mp-up); font-weight:600; }
+.mp-recap-hero__model { font:11.5px/1 var(--ns-font-mono); color:var(--ns-on-surface-variant); }
+.mp-recap-hero__actions { display:flex; gap:6px; }
+
+.mp-pulse             { width:8px; height:8px; border-radius:50%; background:var(--mp-up);
+                        box-shadow:0 0 0 0 rgba(14,138,95,0.5);
+                        animation:mp-pulse 2s infinite; }
+@keyframes mp-pulse {
+  0%   { box-shadow:0 0 0 0 rgba(14,138,95,0.5); }
+  70%  { box-shadow:0 0 0 8px rgba(14,138,95,0); }
+  100% { box-shadow:0 0 0 0 rgba(14,138,95,0); }
+}
+
+.mp-recap-snap        { padding:20px 48px 24px;
+                        display:grid; grid-template-columns:repeat(5,1fr); gap:16px; }
+.mp-recap-snap__card  { padding:16px 18px; }
+.mp-recap-snap__value { font:600 26px/1 var(--ns-font-mono);
+                        letter-spacing:-0.01em; color:var(--ns-navy); margin-top:4px; }
+.mp-recap-snap__pct   { font:600 13px/1 var(--ns-font-mono); margin-top:2px;
+                        display:flex; align-items:center; gap:4px; }
+
+.mp-recap-body        { padding:0 48px 32px;
+                        display:grid;
+                        grid-template-columns: minmax(720px, 1.4fr) 720px;
+                        gap:56px; }
+.mp-recap-article     { max-width:760px; }
+.mp-recap-article__head { margin-bottom:24px; }
+.mp-recap-article__title { font:700 32px/1.1 var(--ns-font-headline);
+                           letter-spacing:-0.03em; color:var(--ns-navy); margin:6px 0; }
+.mp-recap-prose       { font-size:17px; line-height:1.85;
+                        color:var(--ns-on-surface); }
+.mp-recap-prose h2    { font:700 22px/1.2 var(--ns-font-headline);
+                        letter-spacing:-0.02em; color:var(--ns-navy);
+                        margin:32px 0 14px;
+                        display:flex; align-items:center; gap:10px; }
+.mp-recap-prose h3    { font:700 18px/1.2 var(--ns-font-headline);
+                        color:var(--ns-navy); margin:24px 0 12px; }
+.mp-recap-prose p     { margin:14px 0; }
+.mp-recap-prose code  { background:var(--ns-surface-container-low);
+                        padding:0 6px; font:600 14px var(--ns-font-mono); }
+.mp-recap-prose strong { color:var(--ns-navy); }
+
+.mp-recap-rail        { display:flex; flex-direction:column; gap:16px; }
+
+@media (max-width: 1600px) {
+  .mp-recap-body      { grid-template-columns: 1fr; }
+}
+@media (max-width: 900px) {
+  .mp-recap-snap      { grid-template-columns: repeat(2, 1fr); }
+  .mp-recap-hero      { flex-direction:column; align-items:flex-start; gap:24px; }
+}
 .mp-holdings__allo-bar > div { position:absolute; left:0; top:0; bottom:0; }

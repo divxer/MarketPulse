@@ -123,3 +123,31 @@ def test_recaps_list_extracts_pl_from_holdings_totals(client, monkeypatch, db_se
     assert r.status_code == 200
     # The +500 dollars should appear (formatted)
     assert "+500" in r.text or "500.00" in r.text
+
+
+# ---------------------------------------------------------------------------
+# Phase 5e Task 5 — recap.html shell + layout CSS
+# ---------------------------------------------------------------------------
+
+def test_recap_page_visual_anchors_present(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    _seed_recap_full(db_session, date(2026, 5, 12))
+    r = client.get("/recap/2026-05-12")
+    for cls in ("mp-recap-hero", "mp-recap-snap", "mp-recap-body",
+                "mp-recap-article", "mp-recap-rail"):
+        assert cls in r.text, f"missing {cls}"
+
+
+def test_recap_page_uses_2400_max_width(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    _seed_recap_full(db_session, date(2026, 5, 12))
+    r = client.get("/recap/2026-05-12")
+    assert "max-w-[2400px]" in r.text
+
+
+def test_recap_page_has_recap_toast_function(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    _seed_recap_full(db_session, date(2026, 5, 12))
+    r = client.get("/recap/2026-05-12")
+    assert "function recapToast" in r.text
+    assert "localizeTimes" in r.text
