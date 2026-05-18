@@ -319,3 +319,34 @@ def test_recap_key_events_empty_with_null_column(client, monkeypatch, db_session
     _seed_recap_full(db_session, date(2026, 5, 12), key_events=None)
     r = client.get("/recap/2026-05-12")
     assert "AI 整理中" in r.text or "暂无关键事件" in r.text
+
+
+# ---------------------------------------------------------------------------
+# Phase 5e Task 12 — previous recaps card
+# ---------------------------------------------------------------------------
+
+def test_recap_prev_recaps_renders_dates(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    _seed_recap_full(db_session, date(2026, 5, 10), commentary="第 1 篇")
+    _seed_recap_full(db_session, date(2026, 5, 11), commentary="第 2 篇")
+    _seed_recap_full(db_session, date(2026, 5, 12), commentary="今日")
+    r = client.get("/recap/2026-05-12")
+    assert "历史复盘" in r.text
+    assert "05-10" in r.text
+    assert "05-11" in r.text
+
+
+def test_recap_prev_recaps_handles_null_commentary(client, monkeypatch, db_session):
+    """A prior recap with NULL commentary shows '无摘要', not bare '…'."""
+    _login(client, monkeypatch)
+    _seed_recap_full(db_session, date(2026, 5, 10), commentary=None)
+    _seed_recap_full(db_session, date(2026, 5, 12))
+    r = client.get("/recap/2026-05-12")
+    assert "无摘要" in r.text
+
+
+def test_recap_prev_recaps_empty_state(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    _seed_recap_full(db_session, date(2026, 5, 12))
+    r = client.get("/recap/2026-05-12")
+    assert "暂无历史复盘" in r.text

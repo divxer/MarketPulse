@@ -926,3 +926,11 @@ hr.mp-hr {
 .mp-chip--merger    { background:#fce7f3; color:#9d174d; }
 .mp-chip--analyst   { background:#d1fae5; color:#065f46; }
 .mp-chip--other     { background:var(--ns-surface-container); color:var(--ns-on-surface-variant); }
+.mp-recap-prev-list li       { display:flex; gap:10px; padding:8px 0;
+                               border-bottom:1px solid var(--ns-outline-variant);
+                               align-items:flex-start; }
+.mp-recap-prev-list li:last-child { border-bottom:0; }
+.mp-recap-prev__date         { font-size:12px; font-weight:600;
+                               color:var(--ns-navy); flex:0 0 50px; }
+.mp-recap-prev__excerpt      { font-size:12px; line-height:1.4;
+                               overflow:hidden; text-overflow:ellipsis; max-height:34px; }
