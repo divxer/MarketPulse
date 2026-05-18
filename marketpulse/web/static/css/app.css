@@ -934,3 +934,25 @@ hr.mp-hr {
                                color:var(--ns-navy); flex:0 0 50px; }
 .mp-recap-prev__excerpt      { font-size:12px; line-height:1.4;
                                overflow:hidden; text-overflow:ellipsis; max-height:34px; }
+
+/* ════════ Phase 5e: /recaps grid ════════ */
+.mp-recaps-grid              { padding:0 48px 32px;
+                               display:grid; grid-template-columns:repeat(auto-fill, minmax(220px, 1fr));
+                               gap:16px; }
+.mp-recaps-card              { padding:18px 20px; text-decoration:none; color:inherit;
+                               display:flex; flex-direction:column;
+                               transition:box-shadow 200ms; }
+.mp-recaps-card:hover        { box-shadow:var(--ns-shadow-hover); }
+.mp-recaps-card__date        { font:700 28px/1 var(--ns-font-headline);
+                               letter-spacing:-0.02em; color:var(--ns-navy); }
+.mp-recaps-card__pl          { font:700 18px/1.1 var(--ns-font-mono); margin-top:10px; }
+.mp-recaps-card__pl small    { font-size:11px; opacity:0.7; margin-left:4px; }
+.mp-recaps-card__summary     { font-size:12px; line-height:1.5; margin:10px 0 0;
+                               overflow:hidden; text-overflow:ellipsis;
+                               display:-webkit-box; -webkit-line-clamp:3;
+                               -webkit-box-orient:vertical; }
+.mp-recaps-card__status      { align-self:flex-start; margin-top:auto; padding-top:10px; }
+
+.mp-chip--success            { background:#d1fae5; color:#065f46; }
+.mp-chip--pending            { background:#fef3c7; color:#92400e; }
+.mp-chip--failed             { background:#fee2e2; color:#991b1b; }
