@@ -272,3 +272,26 @@ def test_recap_portfolio_today_card_empty_state(client, monkeypatch, db_session)
     _seed_recap_full(db_session, date(2026, 5, 12), holdings_totals=None)
     r = client.get("/recap/2026-05-12")
     assert "暂无组合数据" in r.text
+
+
+# ---------------------------------------------------------------------------
+# Phase 5e Task 10 — watchlist performance card
+# ---------------------------------------------------------------------------
+
+def test_recap_watchlist_perf_renders_rows(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    _seed_recap_full(db_session, date(2026, 5, 12), watchlist=[
+        {"ticker": "AAPL", "price": 180.5, "change_pct": 1.5},
+        {"ticker": "NVDA", "price": 132.4, "change_pct": -2.25},
+    ])
+    r = client.get("/recap/2026-05-12")
+    assert "自选股表现" in r.text
+    assert "AAPL" in r.text
+    assert "NVDA" in r.text
+
+
+def test_recap_watchlist_perf_empty(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    _seed_recap_full(db_session, date(2026, 5, 12), watchlist=None)
+    r = client.get("/recap/2026-05-12")
+    assert "暂无自选股" in r.text
