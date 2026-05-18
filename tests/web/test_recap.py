@@ -151,3 +151,45 @@ def test_recap_page_has_recap_toast_function(client, monkeypatch, db_session):
     r = client.get("/recap/2026-05-12")
     assert "function recapToast" in r.text
     assert "localizeTimes" in r.text
+
+
+# ---------------------------------------------------------------------------
+# Phase 5e Task 6 — hero partial + 4-button action bar
+# ---------------------------------------------------------------------------
+
+def test_recap_hero_renders_h1_date(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    _seed_recap_full(db_session, date(2026, 5, 12))
+    r = client.get("/recap/2026-05-12")
+    assert "2026" in r.text
+    assert "5 月" in r.text
+    assert "12 日" in r.text
+
+
+def test_recap_hero_4_action_buttons_present(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    _seed_recap_full(db_session, date(2026, 5, 12))
+    r = client.get("/recap/2026-05-12")
+    for label in ("重新生成", "分享", "置顶", "推送至订阅者"):
+        assert label in r.text
+
+
+def test_recap_hero_toast_buttons_have_onclick(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    _seed_recap_full(db_session, date(2026, 5, 12))
+    r = client.get("/recap/2026-05-12")
+    assert r.text.count("recapToast(") == 3
+
+
+def test_recap_hero_success_status_shows_pulse(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    _seed_recap_full(db_session, date(2026, 5, 12), status="success")
+    r = client.get("/recap/2026-05-12")
+    assert "mp-pulse" in r.text
+
+
+def test_recap_hero_failed_status_shows_red(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    _seed_recap_full(db_session, date(2026, 5, 12), status="failed")
+    r = client.get("/recap/2026-05-12")
+    assert "生成失败" in r.text
