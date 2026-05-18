@@ -223,3 +223,30 @@ def test_recap_market_snap_empty_state_when_no_data(client, monkeypatch, db_sess
     _seed_recap_full(db_session, date(2026, 5, 12), market_summary=None)
     r = client.get("/recap/2026-05-12")
     assert "暂无大盘数据" in r.text
+
+
+# ---------------------------------------------------------------------------
+# Phase 5e Task 8 — article partial (Markdown long-form)
+# ---------------------------------------------------------------------------
+
+def test_recap_article_renders_markdown_h2(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    _seed_recap_full(db_session, date(2026, 5, 12),
+                     commentary="## 大盘\n\n标普 500 收 `5,973.10`。")
+    r = client.get("/recap/2026-05-12")
+    assert "<h2>" in r.text
+    assert "<code>" in r.text
+
+
+def test_recap_article_empty_state_when_no_commentary(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    _seed_recap_full(db_session, date(2026, 5, 12), commentary=None)
+    r = client.get("/recap/2026-05-12")
+    assert "AI commentary 暂未生成" in r.text
+
+
+def test_recap_article_has_editor_eyebrow(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    _seed_recap_full(db_session, date(2026, 5, 12))
+    r = client.get("/recap/2026-05-12")
+    assert "编辑分析" in r.text

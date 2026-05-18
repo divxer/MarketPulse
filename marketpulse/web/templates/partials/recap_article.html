@@ -1,0 +1,13 @@
+<header class="mp-recap-article__head">
+  <span class="mp-eyebrow mp-eyebrow--primary">编辑分析 · AI</span>
+  <h2 class="grotesk mp-recap-article__title">每日盘后</h2>
+  <span class="mp-rule"></span>
+</header>
+
+<div class="mp-recap-prose">
+  {% if commentary_md %}
+    {{ commentary_md | markdown }}
+  {% else %}
+    <p class="muted">AI commentary 暂未生成。</p>
+  {% endif %}
+</div>
