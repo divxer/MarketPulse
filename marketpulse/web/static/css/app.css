@@ -867,8 +867,9 @@ hr.mp-hr {
 
 .mp-recap-body        { padding:0 48px 32px;
                         display:grid;
-                        grid-template-columns: minmax(720px, 1.4fr) 720px;
-                        gap:56px; }
+                        grid-template-columns: 760px 720px;
+                        gap:56px;
+                        justify-content:center; }
 .mp-recap-article     { max-width:760px; }
 .mp-recap-article__head { margin-bottom:24px; }
 .mp-recap-article__title { font:700 32px/1.1 var(--ns-font-headline);
@@ -886,9 +887,28 @@ hr.mp-hr {
                         padding:0 6px; font:600 14px var(--ns-font-mono); }
 .mp-recap-prose strong { color:var(--ns-navy); }
 
+/* Article footer (model meta + disclaimer) — gives short articles
+   natural visual closure so the left column doesn't look stranded
+   beside the taller right rail. */
+.mp-recap-article__footer  { margin-top:40px; }
+.mp-recap-article__meta    { display:grid; grid-template-columns:repeat(3, 1fr);
+                             gap:24px; margin-bottom:16px; }
+.mp-recap-article__meta > div { display:flex; flex-direction:column; gap:4px; }
+.mp-recap-article__meta dt,
+.mp-recap-article__meta .mono { color:var(--ns-on-surface-variant);
+                                font-size:12px; }
+.mp-recap-article__meta .mono { font-family:var(--ns-font-mono);
+                                color:var(--ns-navy); }
+.mp-recap-article__disclaimer { font-size:11.5px; line-height:1.65;
+                                color:var(--ns-on-surface-variant);
+                                background:var(--ns-surface-container-low);
+                                padding:14px 16px; border-radius:2px;
+                                margin:0; }
+
 .mp-recap-rail        { display:flex; flex-direction:column; gap:16px; }
 
-@media (max-width: 1600px) {
+/* 760 + 56 gap + 720 + 96 padding = 1632px minimum; bump to 1640 for safety. */
+@media (max-width: 1640px) {
   .mp-recap-body      { grid-template-columns: 1fr; }
 }
 @media (max-width: 900px) {
