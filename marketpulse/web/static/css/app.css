@@ -867,9 +867,8 @@ hr.mp-hr {
 
 .mp-recap-body        { padding:0 48px 32px;
                         display:grid;
-                        grid-template-columns: 760px 720px;
-                        gap:56px;
-                        justify-content:center; }
+                        grid-template-columns: 760px 1fr;
+                        gap:56px; }
 .mp-recap-article     { max-width:760px; }
 .mp-recap-article__head { margin-bottom:24px; }
 .mp-recap-article__title { font:700 32px/1.1 var(--ns-font-headline);
@@ -905,9 +904,22 @@ hr.mp-hr {
                                 padding:14px 16px; border-radius:2px;
                                 margin:0; }
 
-.mp-recap-rail        { display:flex; flex-direction:column; gap:16px; }
+/* Rail: single column on most screens (cards stretch to rail width),
+   2×2 grid on ultrawide so cards stay closer to design's 720px each. */
+.mp-recap-rail        { display:grid;
+                        grid-template-columns: 1fr;
+                        gap:16px;
+                        align-content:start; }
 
-/* 760 + 56 gap + 720 + 96 padding = 1632px minimum; bump to 1640 for safety. */
+/* Body grid is `760px 1fr` so rail absorbs the leftover width.
+   - At 1900px viewport: rail ~956px wide, single col, cards stretch wide.
+   - At 2400px viewport: rail ~1488px; switch to 2×2 grid below. */
+@media (min-width: 2200px) {
+  .mp-recap-rail      { grid-template-columns: 1fr 1fr;
+                        gap: 16px 24px; }
+}
+
+/* 760 + 56 gap + 720 minimum + 96 padding ≈ 1632px; collapse to single col below. */
 @media (max-width: 1640px) {
   .mp-recap-body      { grid-template-columns: 1fr; }
 }
