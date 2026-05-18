@@ -912,3 +912,17 @@ hr.mp-hr {
                                gap:10px; align-items:center; padding:6px 0;
                                border-bottom:1px solid var(--ns-outline-variant); }
 .mp-recap-perf-list li:last-child { border-bottom:0; }
+.mp-recap-events__item       { display:grid; grid-template-columns: 80px 1fr auto;
+                               gap:10px; align-items:center; padding:8px 0;
+                               border-bottom:1px solid var(--ns-outline-variant); }
+.mp-recap-events__item:last-child { border-bottom:0; }
+.mp-recap-events__time       { font-size:11px; color:var(--ns-on-surface-variant); }
+.mp-recap-events__title      { font-size:13px; color:var(--ns-navy); }
+
+/* Event kind chips */
+.mp-chip--deal      { background:#e0f0ff; color:#0066cc; }
+.mp-chip--earnings  { background:#fef3c7; color:#92400e; }
+.mp-chip--econ      { background:#ede9fe; color:#5e2cb4; }
+.mp-chip--merger    { background:#fce7f3; color:#9d174d; }
+.mp-chip--analyst   { background:#d1fae5; color:#065f46; }
+.mp-chip--other     { background:var(--ns-surface-container); color:var(--ns-on-surface-variant); }

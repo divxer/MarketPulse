@@ -295,3 +295,27 @@ def test_recap_watchlist_perf_empty(client, monkeypatch, db_session):
     _seed_recap_full(db_session, date(2026, 5, 12), watchlist=None)
     r = client.get("/recap/2026-05-12")
     assert "暂无自选股" in r.text
+
+
+# ---------------------------------------------------------------------------
+# Phase 5e Task 11 — key events card + chip CSS
+# ---------------------------------------------------------------------------
+
+def test_recap_key_events_renders_chips(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    _seed_recap_full(db_session, date(2026, 5, 12), key_events=[
+        {"time": "16:00 EDT", "title": "AVGO 与 AAPL 协议", "kind": "deal"},
+        {"time": "14:00 EDT", "title": "CPI 略低于预期", "kind": "econ"},
+    ])
+    r = client.get("/recap/2026-05-12")
+    assert "关键事件" in r.text
+    assert "AVGO 与 AAPL 协议" in r.text
+    assert "mp-chip--deal" in r.text
+    assert "mp-chip--econ" in r.text
+
+
+def test_recap_key_events_empty_with_null_column(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    _seed_recap_full(db_session, date(2026, 5, 12), key_events=None)
+    r = client.get("/recap/2026-05-12")
+    assert "AI 整理中" in r.text or "暂无关键事件" in r.text

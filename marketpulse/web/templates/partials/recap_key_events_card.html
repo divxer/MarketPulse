@@ -1,0 +1,21 @@
+<section class="mp-card">
+  <div class="mp-card__head">
+    <span class="mp-card__title">
+      <span class="material-symbols-outlined">event_note</span>关键事件
+    </span>
+  </div>
+  <ul class="mp-recap-events-list">
+    {% for e in key_events %}
+      <li class="mp-recap-events__item">
+        <span class="mp-recap-events__time mono">{{ e.time or "" }}</span>
+        <span class="mp-recap-events__title">{{ e.title }}</span>
+        <span class="mp-chip mp-chip--{{ e.kind or 'other' }}">{{ e.kind or 'other' }}</span>
+      </li>
+    {% endfor %}
+    {% if not key_events %}
+      <li class="muted" style="padding:16px; text-align:center;">
+        {% if row.key_events_json is none %}AI 整理中…{% else %}暂无关键事件{% endif %}
+      </li>
+    {% endif %}
+  </ul>
+</section>
