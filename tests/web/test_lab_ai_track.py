@@ -102,3 +102,19 @@ def test_lab_renders_4_kpi_strip_when_data_present(client: TestClient, monkeypat
     assert "总 verdicts" in r.text
     assert "Hit Rate" in r.text
     assert "Avg Excess" in r.text
+
+
+def test_lab_trend_chart_renders_svg_polyline_with_enough_data(client: TestClient, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    _seed_events(db_session, count=30)
+    r = client.get("/lab/ai-track")
+    assert "<svg" in r.text
+    assert "<polyline" in r.text
+
+
+def test_lab_recent_events_table_renders_rows(client: TestClient, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    _seed_events(db_session, count=5)
+    r = client.get("/lab/ai-track")
+    assert "<table" in r.text
+    assert "mp-ai-track-recent" in r.text
