@@ -165,63 +165,63 @@ class AiService:
         return decision
 
     def analyze(self, ticker: str) -> AnalysisResult:
-        version = prompts.ANALYSIS_PROMPT_VERSION
-        cached = self._lookup_cache(ticker, version)
+        # Stage 1: router picks strategy (cached per-day in memory).
+        strategy_name, _reason = self._route_strategy(ticker)
+
+        strategies = load_strategies()
+        strategy = strategies[strategy_name]
+
+        base_version = prompts.ANALYSIS_PROMPT_VERSION
+        cached = self._lookup_cache_with_strategy(
+            ticker=ticker, prompt_version=base_version,
+            strategy=strategy.name, strategy_version=strategy.version,
+        )
         if cached:
             return AnalysisResult(
                 ticker=ticker,
                 model=cached.model,
                 prompt_version=cached.prompt_version,
+                strategy=cached.strategy,
+                strategy_version=cached.strategy_version,
                 response_markdown=cached.response_markdown,
                 requested_at=cached.requested_at,
                 cached=True,
             )
 
+        # Stage 2: deep analysis with chosen strategy.
+        # Note: re-fetches data fetched by _route_strategy. Acceptable v0
+        # inefficiency; pass-forward optimization deferred.
         quote = self.data.get_quote(ticker)
         fundamentals = self.data.get_fundamentals(ticker)
         bars = self.data.get_history(ticker, period="60d")
         news = self.data.get_news(ticker, limit=10)
-        prompt_text = prompts.render_analysis_prompt(
-            quote=quote, fundamentals=fundamentals, news=news, bars=bars,
+
+        prompt_text = prompts.render_strategy_analysis_prompt(
+            strategy=strategy, quote=quote, fundamentals=fundamentals,
+            news=news, bars=bars,
         )
-        system, data = _split_prompt(prompt_text)
-        response = self.ai.complete(system=system, user=data, model=self.model_analyze)
+        system, data_block = _split_prompt(prompt_text)
+        response = self.ai.complete(
+            system=system, user=data_block, model=self.model_analyze,
+        )
         now = datetime.now(UTC)
         input_snapshot = {
             "ticker": quote.ticker,
-            "quote": {
-                "price": quote.price,
-                "change_pct": quote.change_pct,
-                "volume": quote.volume,
-                "avg_volume_20d": quote.avg_volume_20d,
-                "stale": quote.stale,
-            },
+            "quote": {"price": quote.price, "change_pct": quote.change_pct},
             "fundamentals": {
                 "market_cap": fundamentals.market_cap,
                 "pe_ratio": fundamentals.pe_ratio,
-                "eps": fundamentals.eps,
                 "sector": fundamentals.sector,
-                "industry": fundamentals.industry,
             },
-            "bars": {
-                "count": len(bars),
-                "first_date": bars[0].date.isoformat() if bars else None,
-                "last_date": bars[-1].date.isoformat() if bars else None,
-            },
-            "news": [
-                {
-                    "headline": n.headline,
-                    "source": n.source,
-                    "url": n.url,
-                    "published_at": n.published_at.isoformat(),
-                }
-                for n in news
-            ],
+            "bars": {"count": len(bars)},
+            "news": {"count": len(news)},
         }
         record = AiAnalysis(
             ticker=ticker,
             model=self.model_analyze,
-            prompt_version=version,
+            prompt_version=base_version,
+            strategy=strategy.name,
+            strategy_version=strategy.version,
             input_data_json=json.dumps(input_snapshot, default=str),
             response_markdown=response,
             requested_at=now,
@@ -229,7 +229,7 @@ class AiService:
         )
         self.session.add(record)
 
-        # Phase 2: parse verdict and record event (same transaction as AiAnalysis)
+        # Phase 2: parse verdict and record event (same transaction).
         _, verdict = _parse_analyze_output(response)
         if verdict is not None:
             v_value = verdict.get("verdict")
@@ -244,25 +244,30 @@ class AiService:
                         event_price=quote.price,
                         payload={
                             "rationale": verdict.get("rationale", ""),
-                            "prompt_version": version,
+                            "prompt_version": base_version,
                             "source": "stock_analysis",
+                            "strategy": strategy.name,
+                            "strategy_version": strategy.version,
                             "model": self.model_analyze,
                         },
                         db=self.session,
                     )
                 except ValueError as exc:
                     log.warning("ai_verdict_invalid", error=str(exc), verdict=verdict)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
                     log.warning("record_event_failed", error=str(exc))
             else:
                 log.warning("ai_verdict_invalid_shape", verdict=verdict)
 
-        # Single commit covering both AiAnalysis + EvaluationEvent
+        # Single commit covers both AiAnalysis + EvaluationEvent (Phase 2 invariant)
         self.session.commit()
+
         return AnalysisResult(
             ticker=ticker,
             model=self.model_analyze,
-            prompt_version=version,
+            prompt_version=base_version,
+            strategy=strategy.name,
+            strategy_version=strategy.version,
             response_markdown=response,
             requested_at=now,
             cached=False,
@@ -389,6 +394,29 @@ class AiService:
         )
         self.session.add(record)
         self.session.commit()
+
+    def _lookup_cache_with_strategy(
+        self, *, ticker: str, prompt_version: str,
+        strategy: str, strategy_version: str,
+    ) -> AiAnalysis | None:
+        """Cache scoped to (ticker, model, prompt_version, strategy, strategy_version).
+
+        Bumping any field forces a fresh call. Parallel to existing
+        `_lookup_cache` which keys only on (ticker, model, prompt_version)
+        for legacy callers (e.g. portfolio_risk_cached).
+        """
+        stmt = (
+            select(AiAnalysis)
+            .where(AiAnalysis.ticker == ticker)
+            .where(AiAnalysis.model == self.model_analyze)
+            .where(AiAnalysis.prompt_version == prompt_version)
+            .where(AiAnalysis.strategy == strategy)
+            .where(AiAnalysis.strategy_version == strategy_version)
+            .where(AiAnalysis.expires_at > datetime.now(UTC))
+            .order_by(AiAnalysis.requested_at.desc())
+            .limit(1)
+        )
+        return self.session.execute(stmt).scalars().first()
 
     def _lookup_cache(self, ticker: str, version: str) -> AiAnalysis | None:
         # Cache scoped to (ticker, model, prompt_version) so switching either

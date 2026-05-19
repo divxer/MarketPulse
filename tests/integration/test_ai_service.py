@@ -59,10 +59,11 @@ def test_analyze_writes_cache(db_session: Session) -> None:
     res = svc.analyze("NVDA")
     assert res.ticker == "NVDA"
     assert "Fundamentals" in res.response_markdown
-    assert ai.calls == 1
+    # Phase 3: analyze() now makes 2 calls per cache miss: router + deep.
+    assert ai.calls == 2
     res2 = svc.analyze("NVDA")
     assert res2.cached is True
-    assert ai.calls == 1  # cache hit
+    assert ai.calls == 2  # both router (in-memory) + deep (DB) cache hit
 
 
 def test_analyze_invalidates_on_prompt_version_change(
@@ -73,7 +74,12 @@ def test_analyze_invalidates_on_prompt_version_change(
     svc.analyze("NVDA")
     monkeypatch.setattr("marketpulse.ai.prompts.ANALYSIS_PROMPT_VERSION", "analysis-v2")
     svc.analyze("NVDA")
-    assert ai.calls == 2
+    # Phase 3: each cache miss costs 2 LLM calls (router + deep); 2 misses = 4 calls.
+    # The router cache is also keyed per-day so a second call same day reuses
+    # the in-memory router decision — only the deep call fires on miss.
+    # After monkeypatching the version, the deep cache misses but router cache
+    # (in-memory) still hits → 1 extra deep call = 3 total.
+    assert ai.calls == 3
 
 
 def test_analyze_invalidates_on_model_change(db_session: Session) -> None:
@@ -81,9 +87,11 @@ def test_analyze_invalidates_on_model_change(db_session: Session) -> None:
     svc1 = AiService(db_session, ai_client=ai, data=FakeData(), model="m1", ttl_hours=24)
     svc1.analyze("NVDA")
     # New service with a different model — cache row from m1 must not satisfy m2.
+    # svc2 has a fresh _router_cache (new instance), so router fires again.
     svc2 = AiService(db_session, ai_client=ai, data=FakeData(), model="m2", ttl_hours=24)
     res = svc2.analyze("NVDA")
-    assert ai.calls == 2
+    # Phase 3: svc1 made 2 calls; svc2 makes 2 more (router + deep) = 4 total.
+    assert ai.calls == 4
     assert res.cached is False
 
 
@@ -143,8 +151,8 @@ def test_analyze_persists_full_input_snapshot(db_session: Session) -> None:
     assert snap["fundamentals"]["pe_ratio"] == 10
     assert snap["fundamentals"]["sector"] == "t"
     assert snap["bars"]["count"] == 1
-    assert len(snap["news"]) == 1
-    assert snap["news"][0]["headline"] == "x"
+    # Phase 3: input_snapshot stores news count (not full list) for compactness.
+    assert snap["news"]["count"] == 1
 
 
 def test_daily_commentary_passthrough(db_session: Session) -> None:

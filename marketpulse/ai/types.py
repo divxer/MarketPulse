@@ -10,3 +10,5 @@ class AnalysisResult:
     response_markdown: str
     requested_at: datetime
     cached: bool = False
+    strategy: str | None = None
+    strategy_version: str | None = None
