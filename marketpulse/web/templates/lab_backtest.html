@@ -2,24 +2,28 @@
 {% block main_width %}max-w-[2400px]{% endblock %}
 {% block nav_width %}max-w-[2400px]{% endblock %}
 {% block content %}
-<div class="mp-warning-banner" style="padding:12px 48px; background:#fef3c7; border-left:4px solid #d97706; margin:0 0 16px;">
-  ⓘ <strong>研究级模拟引擎</strong> · 非真实执行模拟器 ·
+
+<div class="mp-backtest-warning">
+  <span class="material-symbols-outlined">info</span>
+  <span><strong>研究级模拟引擎</strong> · 非真实执行模拟器 ·
   指标基于持仓期间的线性插值 <code>mtm_model=linear_interpolation_v0</code>。
   Max Drawdown 可能被低估,Sharpe 可能被高估。
+  </span>
 </div>
 
-<section class="mp-hero">
-  <span class="mp-eyebrow mp-eyebrow--primary">实验室 · 组合回测</span>
-  <h1 class="grotesk mp-hero__title">Strategy Performance Observatory</h1>
-  <p class="mp-hero__desc">
-    回放 Phase 3 的 6 个策略 + SPY 基准在过去 N 天内的策略级合成 PnL。
-  </p>
+{% include "partials/backtest_hero.html" ignore missing %}
+
+<section class="mp-backtest-kpi">
+  {% include "partials/backtest_kpi_strip.html" ignore missing %}
 </section>
 
-{# Task 11 fills in: KPI strip, equity chart, drawdown chart, filter, table. #}
+<section class="mp-backtest-body">
+  <div class="mp-backtest-main">
+    {# Task 12 fills in equity + drawdown charts #}
+  </div>
+  <aside class="mp-backtest-rail">
+    {# Task 13 fills in filter card + strategy table #}
+  </aside>
+</section>
 
-{% for s in strategies %}
-  <div>{{ s.display_name }}</div>
-{% endfor %}
-{% if spy %}<div>{{ spy.display_name }}</div>{% endif %}
 {% endblock %}

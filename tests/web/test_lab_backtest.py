@@ -76,3 +76,29 @@ def test_lab_backtest_requires_auth(client):
     """Unauthenticated → 303 redirect to login (like other /lab pages)."""
     r = client.get("/lab/backtest", follow_redirects=False)
     assert r.status_code == 303
+
+
+def test_lab_backtest_renders_5_kpi_cards(client, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    for i in range(6):
+        _seed_event(db_session, ticker=f"T{i}", strategy="momentum_breakout",
+                    excess=0.03)
+    db_session.commit()
+    r = client.get("/lab/backtest")
+    assert "Best Strategy" in r.text
+    assert "Best Sharpe" in r.text
+    assert "Best Cum Ret" in r.text or "Best Return" in r.text
+    assert "Worst MaxDD" in r.text or "MaxDD" in r.text
+    assert "vs SPY" in r.text
+
+
+def test_lab_backtest_kpi_shows_dash_when_no_qualifying_strategy(
+    client, monkeypatch, db_session,
+):
+    _login(client, monkeypatch)
+    for i in range(2):
+        _seed_event(db_session, ticker=f"T{i}", strategy="momentum_breakout")
+    db_session.commit()
+    r = client.get("/lab/backtest")
+    assert "Best Strategy" in r.text
+    assert "—" in r.text or "n&lt;5" in r.text or "n<5" in r.text
