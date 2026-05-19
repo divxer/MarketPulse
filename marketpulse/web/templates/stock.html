@@ -54,6 +54,12 @@
       {% endif %}
     </div>
   </header>
+  {% if ai_strategy_display %}
+  <div class="mp-card__sub" style="display:flex; align-items:center; gap:8px; padding: 0 16px 10px;">
+    <span class="mp-chip mp-chip--strategy">{{ ai_strategy_display }}</span>
+    <span class="muted">策略 · 由 router 自动选择</span>
+  </div>
+  {% endif %}
   <div class="mp-rule"></div>
 
   <!-- ============ 3-COLUMN GRID ============ -->
