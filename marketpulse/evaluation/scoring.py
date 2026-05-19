@@ -277,3 +277,72 @@ def get_hit_rate_trend(
         out.append(DailyHitRate(day=cur, n_total=n, hit_rate=rate))
         cur += timedelta(days=1)
     return out
+
+
+@dataclass(frozen=True)
+class EventOutcome:
+    event_id: int
+    event_time: datetime
+    ticker: str
+    verdict: str
+    source: str
+    rationale: str
+    horizon: int
+    event_price: float
+    horizon_price: float
+    forward_return: float
+    excess_return: float
+    hit: bool
+
+
+def get_recent_events_with_outcomes(
+    db: Session,
+    *,
+    horizon: int = 5,
+    ticker: str | None = None,
+    source: str | None = None,
+    subtype: str | None = None,
+    since: date | None = None,
+    limit: int = 20,
+) -> list[EventOutcome]:
+    """Latest events with outcomes at this horizon, newest first."""
+    stmt = (
+        select(EvaluationEvent, EvaluationOutcome)
+        .join(EvaluationOutcome, EvaluationOutcome.event_id == EvaluationEvent.id)
+        .where(EvaluationEvent.event_type == "ai_analysis")
+        .where(EvaluationOutcome.horizon_trading_days == horizon)
+    )
+    if subtype is not None:
+        stmt = stmt.where(EvaluationEvent.subtype == subtype)
+    if ticker is not None:
+        stmt = stmt.where(EvaluationEvent.ticker == ticker)
+    if source is not None:
+        stmt = stmt.where(
+            func.json_extract(EvaluationEvent.payload, "$.source") == source,
+        )
+    if since is not None:
+        stmt = stmt.where(
+            EvaluationEvent.event_time >= datetime.combine(
+                since, datetime.min.time(), tzinfo=UTC,
+            ),
+        )
+    stmt = stmt.order_by(EvaluationEvent.event_time.desc()).limit(limit)
+
+    out: list[EventOutcome] = []
+    for event, outcome in db.execute(stmt).all():
+        payload = event.payload or {}
+        out.append(EventOutcome(
+            event_id=event.id,
+            event_time=event.event_time,
+            ticker=event.ticker,
+            verdict=event.subtype,
+            source=payload.get("source", ""),
+            rationale=payload.get("rationale", ""),
+            horizon=outcome.horizon_trading_days,
+            event_price=outcome.event_price,
+            horizon_price=outcome.horizon_price,
+            forward_return=outcome.forward_return,
+            excess_return=outcome.excess_return,
+            hit=_is_hit(event.subtype, outcome.excess_return),
+        ))
+    return out

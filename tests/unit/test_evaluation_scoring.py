@@ -224,3 +224,18 @@ def test_get_hit_rate_trend_returns_window_days_entries(db_session):
     assert len(trend) == 30
     # Each rolling 10-day window contains all hits → hit_rate = 1.0
     assert all(d.hit_rate == pytest.approx(1.0) for d in trend if d.n_total > 0)
+
+
+def test_get_recent_events_with_outcomes_limit_and_order(db_session):
+    from marketpulse.evaluation.scoring import get_recent_events_with_outcomes
+
+    # 5 events at varying days_ago
+    for d in (1, 5, 10, 20, 30):
+        e = _ev(db_session, days_ago=d, ticker=f"T{d}")
+        _out(db_session, e, excess=0.03)
+    db_session.commit()
+
+    rows = get_recent_events_with_outcomes(db_session, horizon=5, limit=3)
+    assert len(rows) == 3
+    # Newest first: days_ago=1 → T1, days_ago=5 → T5, days_ago=10 → T10
+    assert [r.ticker for r in rows] == ["T1", "T5", "T10"]
