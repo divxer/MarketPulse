@@ -105,7 +105,16 @@ def compute_outcomes_for_pending_events(
 
     for event in events:
         report.events_examined += 1
-        event_date = event.event_time.astimezone(UTC).date()
+        # SQLite + DateTime(timezone=True) can return a naive datetime on
+        # read-back (the +00:00 string suffix may not be restored by every
+        # dialect/driver). A naive datetime's .astimezone() would treat it
+        # as LOCAL time, silently shifting the date by 1 on non-UTC dev
+        # machines (e.g. PDT). All event_time values are stored in UTC by
+        # record_event() — assert that explicitly before .astimezone().
+        et = event.event_time
+        if et.tzinfo is None:
+            et = et.replace(tzinfo=UTC)
+        event_date = et.astimezone(UTC).date()
 
         for horizon in horizons:
             # Skip if outcome row already exists
