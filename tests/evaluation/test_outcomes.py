@@ -181,6 +181,51 @@ def test_excess_return_computed_correctly(db):
     assert abs(outcome.excess_return - 0.08) < 1e-9
 
 
+def test_naive_event_time_from_sqlite_does_not_shift_event_date(db):
+    """Regression: SQLite + DateTime(timezone=True) returns naive datetimes
+    on read-back. A naive datetime's .astimezone(UTC) treats it as LOCAL
+    time, which on non-UTC dev machines (e.g. PDT) shifts the date by 1
+    and silently lookups bars at the wrong index.
+
+    This test simulates the bug by directly inserting an event row with a
+    naive datetime (mimicking what SQLite gives us back after commit on
+    machines where SQLAlchemy doesn't restore tzinfo), then verifying that
+    compute_outcomes_for_pending_events still computes the outcome at the
+    correct bar index instead of shifting by 1.
+    """
+    past = datetime.now(UTC) - timedelta(days=30)
+    record_event(
+        event_type=EventType.SIGNAL_MARKER, subtype=SignalType.EMA_GOLDEN_CROSS,
+        ticker="TST", event_time=past, event_price=100.0, payload={}, db=db,
+    )
+    db.commit()
+
+    # Force the round-trip behavior: clear identity map and re-query so the
+    # row comes back with whatever tzinfo state SQLite returned. On the
+    # affected dev machines this drops tzinfo entirely.
+    db.expire_all()
+
+    # Bars exactly span [past.date(), past.date()+5]. Off-by-1 date shift
+    # would land horizon_idx at 6 (out of range) → no outcome inserted.
+    stock_bars = [
+        FakeBar(date=past.date() + timedelta(days=i), close=100.0 + i * 2)
+        for i in range(6)
+    ]
+    spy_bars = [
+        FakeBar(date=past.date() + timedelta(days=i), close=400 + i * 1.6)
+        for i in range(6)
+    ]
+    data = _mock_data_with_bars(stock_bars, spy_bars)
+
+    compute_outcomes_for_pending_events(db, data, horizons=[5])
+
+    # If the tz fix is in place, exactly one outcome lands at the right
+    # bar (close=110 → forward_return=0.10). If the bug regresses, this
+    # raises NoResultFound.
+    outcome = db.query(EvaluationOutcome).one()
+    assert abs(outcome.forward_return - 0.10) < 1e-9
+
+
 def test_failure_log_includes_ticker_and_horizon(db):
     """When data is unavailable for an old event, failure_log captures details."""
     long_ago = datetime.now(UTC) - timedelta(days=200)
