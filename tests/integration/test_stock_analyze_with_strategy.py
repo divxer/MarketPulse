@@ -109,8 +109,9 @@ def test_analyze_different_strategies_cache_independently(db_session):
         deep_response=_DEEP_RESPONSE_BULLISH,
     )
     svc.analyze("AAPL")
-    # Clear router cache to simulate "next day"
-    svc._router_cache.clear()
+    # Clear module-level router cache to simulate "next day"
+    from marketpulse.ai.service import _router_cache_clear
+    _router_cache_clear()
     # New router response picks a different strategy
     svc.ai.complete.side_effect = [
         'ROUTER_JSON: {"strategy": "oversold_reversal", "reason": "y"}',

@@ -50,7 +50,7 @@ def build_router_context(
         "ticker": quote.ticker,
         "price": quote.price,
         "change_pct": quote.change_pct,
-        "market_cap": fundamentals.market_cap or 0.0,
+        "market_cap": fundamentals.market_cap,  # may be None when fundamentals are unknown
         "sector": f"{fundamentals.sector or '?'} / {fundamentals.industry or '?'}",
         "trend_summary": trend_summary,
         "volume_ratio_20d": round(volume_ratio, 2),
@@ -70,15 +70,22 @@ def render_router_prompt(
     ]
     menu_block = "\n".join(menu_lines)
 
+    mcap = context["market_cap"]
+    mcap_str = f"${mcap:.2e}" if mcap else "N/A"
+    rsi = context["rsi_14"]
+    rsi_str = f"{rsi}" if rsi is not None else "N/A"
+    rs = context["sector_rs_20d_vs_spy"]
+    rs_str = f"{rs}%" if rs is not None else "N/A"
+
     snapshot = "\n".join([
         f"ticker: {context['ticker']}",
         f"price: ${context['price']:.2f} ({context['change_pct']:+.2f}%)",
-        f"market_cap: ${context['market_cap']:.2e}",
+        f"market_cap: {mcap_str}",
         f"sector: {context['sector']}",
         f"60d trend: {context['trend_summary']}",
         f"volume_ratio_20d: {context['volume_ratio_20d']} (今日量 / 20日均量)",
-        f"rsi_14: {context['rsi_14']}",
-        f"sector_rs_20d_vs_spy: {context['sector_rs_20d_vs_spy']}%",
+        f"rsi_14: {rsi_str}",
+        f"sector_rs_20d_vs_spy: {rs_str}",
         f"news_count_7d: {context['news_count_7d']}",
     ])
 

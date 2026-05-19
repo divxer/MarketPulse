@@ -27,13 +27,25 @@ _VALID_HORIZONS = {1, 5, 20, 60}
 
 _DEFAULT_DIR = Path(__file__).parent / "definitions"
 
+# Module-level cache for the packaged default directory only. Custom
+# `definitions_dir` args (tests) bypass the cache so they always see the
+# directory contents they prepared.
+_PACKAGED_CACHE: dict[str, Strategy] | None = None
+
+
+def clear_strategy_cache() -> None:
+    """Test helper — wipe the module-level packaged-dir cache."""
+    global _PACKAGED_CACHE
+    _PACKAGED_CACHE = None
+
 
 def load_strategies(definitions_dir: Path | None = None) -> dict[str, Strategy]:
     """Discover and load all strategy YAMLs from definitions_dir.
 
     Args:
         definitions_dir: directory to scan for *.yaml; defaults to packaged
-            marketpulse/strategies/definitions/
+            marketpulse/strategies/definitions/. Default-dir results are
+            process-cached after first load; custom dirs always re-read.
 
     Returns:
         Dict keyed by strategy `name` field, values are Strategy instances.
@@ -42,6 +54,10 @@ def load_strategies(definitions_dir: Path | None = None) -> dict[str, Strategy]:
         ValueError: invalid YAML (missing field, mismatched name, bad version,
             non-snake-case name, expected_horizons not subset of default).
     """
+    global _PACKAGED_CACHE
+    if definitions_dir is None and _PACKAGED_CACHE is not None:
+        return _PACKAGED_CACHE
+
     dirpath = definitions_dir or _DEFAULT_DIR
     result: dict[str, Strategy] = {}
     for yaml_path in sorted(dirpath.glob("*.yaml")):
@@ -59,6 +75,9 @@ def load_strategies(definitions_dir: Path | None = None) -> dict[str, Strategy]:
             instructions=data["instructions"],
         )
         result[strategy.name] = strategy
+
+    if definitions_dir is None:
+        _PACKAGED_CACHE = result
     return result
 
 

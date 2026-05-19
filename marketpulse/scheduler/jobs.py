@@ -58,6 +58,7 @@ def run_daily_recap() -> None:
             db, ai_client=AnthropicClient(), data=data,
             model=settings.ai_model, ttl_hours=settings.ai_cache_ttl_hours,
             model_analyze=settings.ai_model_analyze or None,
+            model_router=settings.ai_model_router or None,
         )
         svc = RecapService(db, data=data, ai=ai)
         result = svc.generate(target)

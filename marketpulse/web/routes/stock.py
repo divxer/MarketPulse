@@ -5,6 +5,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from marketpulse.ai import prompts
 from marketpulse.ai.service import AiService
 from marketpulse.data.service import DataService
 from marketpulse.data.yfinance_client import YFinanceClient
@@ -139,7 +140,7 @@ def stock_page(
     latest_analysis = db.execute(
         select(AiAnalysis)
         .where(AiAnalysis.ticker == ticker)
-        .where(AiAnalysis.prompt_version == "analysis-v4")
+        .where(AiAnalysis.prompt_version == prompts.ANALYSIS_PROMPT_VERSION)
         .order_by(AiAnalysis.requested_at.desc())
         .limit(1)
     ).scalars().first()

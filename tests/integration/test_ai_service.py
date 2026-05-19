@@ -86,12 +86,14 @@ def test_analyze_invalidates_on_model_change(db_session: Session) -> None:
     ai = FakeAi()
     svc1 = AiService(db_session, ai_client=ai, data=FakeData(), model="m1", ttl_hours=24)
     svc1.analyze("NVDA")
-    # New service with a different model — cache row from m1 must not satisfy m2.
-    # svc2 has a fresh _router_cache (new instance), so router fires again.
+    # New service with a different model — DB cache row from m1 must not satisfy m2.
     svc2 = AiService(db_session, ai_client=ai, data=FakeData(), model="m2", ttl_hours=24)
     res = svc2.analyze("NVDA")
-    # Phase 3: svc1 made 2 calls; svc2 makes 2 more (router + deep) = 4 total.
-    assert ai.calls == 4
+    # Phase 3: svc1 made 2 calls (router + deep). svc2's router stage hits the
+    # module-level _ROUTER_CACHE from svc1 (same NVDA + same general fallback),
+    # so only the deep call fires. Total = 3. The `cached=False` assertion below
+    # is the real invariant — model change invalidates the DB cache.
+    assert ai.calls == 3
     assert res.cached is False
 
 

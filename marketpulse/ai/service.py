@@ -26,6 +26,17 @@ log = get_logger(__name__)
 _DATA_SEPARATOR = "\n\nDATA:\n"
 _US_EASTERN = ZoneInfo("America/New_York")
 
+# Module-level router-decision cache shared across all AiService instances in
+# this process. Key = (ticker_upper, today_us_eastern_iso). Cleared on process
+# restart. Shared because AiService is created per-request via FastAPI Depends
+# — a per-instance dict would be empty on every call.
+_ROUTER_CACHE: dict[tuple[str, str], tuple[str, str]] = {}
+
+
+def _router_cache_clear() -> None:
+    """Test helper — wipe the module-level router cache."""
+    _ROUTER_CACHE.clear()
+
 
 def _split_prompt(rendered: str) -> tuple[str, str]:
     """Split a rendered prompt into (system, user_data).
@@ -95,8 +106,6 @@ class AiService:
         # Router uses a cheap model; falls back to `model` if unset.
         self.model_router = model_router or model
         self.ttl_hours = ttl_hours
-        # In-memory router decision cache: {(ticker, today_us_eastern_iso): (strategy, reason)}
-        self._router_cache: dict[tuple[str, str], tuple[str, str]] = {}
 
     def _route_strategy(self, ticker: str) -> tuple[str, str]:
         """Stage 1 of analyze() — pick a strategy via cheap router LLM.
@@ -105,13 +114,15 @@ class AiService:
         JSON, invalid name, LLM error), falls back to 'general' with a
         structured warning log.
 
-        Cached in-memory per (ticker, today_us_eastern) — same-day re-clicks
-        skip the LLM call. Cache cleared on process restart.
+        Cached at module level per (ticker_upper, today_us_eastern) so the
+        cache survives across the per-request AiService instances created by
+        FastAPI Depends. Cleared on process restart.
         """
+        ticker = ticker.upper()
         today_key = datetime.now(_US_EASTERN).date().isoformat()
         cache_key = (ticker, today_key)
-        if cache_key in self._router_cache:
-            return self._router_cache[cache_key]
+        if cache_key in _ROUTER_CACHE:
+            return _ROUTER_CACHE[cache_key]
 
         # Fetch the data needed for context. Stage 2 (analyze) currently
         # re-fetches — Task 8 may plumb the shared data through. For v0,
@@ -143,7 +154,7 @@ class AiService:
         except Exception as exc:  # noqa: BLE001
             log.warning("router_llm_failed", ticker=ticker, error=str(exc))
             decision = ("general", "router_llm_failed")
-            self._router_cache[cache_key] = decision
+            _ROUTER_CACHE[cache_key] = decision
             return decision
 
         parsed = parse_router_output(raw, valid_names=set(strategies.keys()))
@@ -153,7 +164,7 @@ class AiService:
                 raw_excerpt=raw[:200],
             )
             decision = ("general", "router_parse_or_invalid_name")
-            self._router_cache[cache_key] = decision
+            _ROUTER_CACHE[cache_key] = decision
             return decision
 
         log.info(
@@ -161,10 +172,13 @@ class AiService:
             strategy=parsed["strategy"], reason=parsed["reason"],
         )
         decision = (parsed["strategy"], parsed["reason"])
-        self._router_cache[cache_key] = decision
+        _ROUTER_CACHE[cache_key] = decision
         return decision
 
     def analyze(self, ticker: str) -> AnalysisResult:
+        # Normalize at the entry so cache keys + DB columns + log fields are
+        # consistent regardless of caller case.
+        ticker = ticker.upper()
         # Stage 1: router picks strategy (cached per-day in memory).
         strategy_name, _reason = self._route_strategy(ticker)
 
