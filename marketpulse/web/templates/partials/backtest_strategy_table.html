@@ -1,0 +1,75 @@
+<section class="mp-card">
+  <div class="mp-card__head">
+    <span class="mp-card__title">
+      <span class="material-symbols-outlined">leaderboard</span>策略排行
+    </span>
+    <span class="mp-card__sub">{{ filters.horizon }}d · Sharpe desc</span>
+  </div>
+  <div class="mp-card__body" style="padding:0; overflow-x:auto;">
+    <table class="mp-table mp-backtest-table">
+      <thead>
+        <tr>
+          <th>策略</th>
+          <th class="num">Sharpe</th>
+          <th class="num">MaxDD</th>
+          <th class="num">Cum Ret</th>
+          <th class="num">vs SPY</th>
+          <th class="num">n</th>
+          <th class="num">skipped</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for s in strategies %}
+        <tr>
+          <td>
+            <a href="/lab/ai-track?strategy={{ s.strategy }}"
+               class="mp-strategy-link" title="查看 hit rate">
+              {{ s.display_name }}
+            </a>
+          </td>
+          <td class="num mono tnum">
+            {% if s.sharpe is none %}—{% else %}{{ "{:.2f}".format(s.sharpe) }}{% endif %}
+          </td>
+          <td class="num mono tnum {% if s.max_drawdown < -0.05 %}down{% endif %}">
+            {% if s.n_trades == 0 %}—{% else %}{{ "{:.1f}%".format(s.max_drawdown * 100) }}{% endif %}
+          </td>
+          <td class="num mono tnum {% if s.cumulative_return >= 0 %}up{% else %}down{% endif %}">
+            {% if s.n_trades == 0 %}—{% else %}{{ "{:+.2f}%".format(s.cumulative_return * 100) }}{% endif %}
+          </td>
+          <td class="num mono tnum {% if s.excess_vs_spy >= 0 %}up{% else %}down{% endif %}">
+            {% if s.n_trades == 0 %}—{% else %}{{ "{:+.2f}%".format(s.excess_vs_spy * 100) }}{% endif %}
+          </td>
+          <td class="num mono tnum">
+            {{ s.n_trades }}
+            {% if s.n_trades < 5 and s.n_trades > 0 %}
+              <span class="mp-chip mp-chip--pending" style="margin-left:4px;">积累中</span>
+            {% endif %}
+          </td>
+          <td class="num mono tnum">
+            {% if s.n_capacity_skipped > 0 %}
+              <span class="mp-chip" style="background:#fef3c7; color:#92400e;">
+                {{ s.n_capacity_skipped }}
+              </span>
+            {% else %}—{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+        {% if spy %}
+        <tr style="border-top:2px solid var(--ns-outline-variant);">
+          <td><strong>{{ spy.display_name }}</strong> <small class="muted">(基准)</small></td>
+          <td class="num mono tnum">
+            {% if spy.sharpe is none %}—{% else %}{{ "{:.2f}".format(spy.sharpe) }}{% endif %}
+          </td>
+          <td class="num mono tnum">{{ "{:.1f}%".format(spy.max_drawdown * 100) }}</td>
+          <td class="num mono tnum {% if spy.cumulative_return >= 0 %}up{% else %}down{% endif %}">
+            {{ "{:+.2f}%".format(spy.cumulative_return * 100) }}
+          </td>
+          <td class="num mono tnum">(baseline)</td>
+          <td class="num mono tnum">—</td>
+          <td class="num mono tnum">—</td>
+        </tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</section>

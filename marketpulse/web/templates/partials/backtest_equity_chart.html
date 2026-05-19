@@ -1,0 +1,37 @@
+<section class="mp-card">
+  <div class="mp-card__head">
+    <span class="mp-card__title">
+      <span class="material-symbols-outlined">show_chart</span>组合 Equity Curve
+    </span>
+    <span class="mp-card__sub">{{ filters.horizon }}d horizon · 7 条曲线(6 策略 + SPY)</span>
+  </div>
+  <div class="mp-card__body">
+    {% if chart_data.equity_curves %}
+    <svg viewBox="0 0 800 280" width="100%" height="280">
+      <line x1="0" y1="280" x2="800" y2="280"
+            stroke="var(--ns-outline-variant)" stroke-dasharray="2 4" />
+      {% for c in chart_data.equity_curves %}
+        <polyline
+          points="{{ c.points_str }}"
+          fill="none"
+          stroke="{{ c.color }}"
+          stroke-width="{% if c.is_spy %}1.5{% else %}2{% endif %}"
+          {% if c.is_spy %}stroke-dasharray="4 4"{% endif %}>
+          <title>{{ c.display_name }}</title>
+        </polyline>
+      {% endfor %}
+    </svg>
+    <div class="mp-chart-legend">
+      {% for c in chart_data.equity_curves %}
+        <span class="mp-chart-legend__item">
+          <span class="mp-chart-legend__swatch" style="background:{{ c.color }};
+            {% if c.is_spy %}border:1px dashed {{ c.color }};{% endif %}"></span>
+          {{ c.display_name }}
+        </span>
+      {% endfor %}
+    </div>
+    {% else %}
+      <p class="muted" style="text-align:center; padding:32px;">暂无数据</p>
+    {% endif %}
+  </div>
+</section>

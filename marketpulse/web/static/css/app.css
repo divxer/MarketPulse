@@ -1071,3 +1071,68 @@ hr.mp-hr {
 .mp-ai-track-strategy-list li small.muted:first-of-type { grid-area: hint; font-size: 10px; }
 .mp-strategy-link { color: var(--ns-primary); text-decoration: none; }
 .mp-strategy-link:hover { text-decoration: underline; }
+
+/* ════════ Phase 4: /lab/backtest layout ════════ */
+.mp-backtest-warning {
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 14px 48px;
+  background: #fef3c7; border-left: 4px solid #d97706;
+  font-size: 13px; color: #78350f;
+}
+.mp-backtest-warning code {
+  background: rgba(0,0,0,0.06); padding: 1px 6px; border-radius: 2px;
+  font-family: var(--ns-font-mono); font-size: 12px;
+}
+
+.mp-backtest-kpi {
+  padding: 0 48px 16px;
+  display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px;
+}
+.mp-backtest-body {
+  padding: 0 48px 32px;
+  display: grid; grid-template-columns: 760px 1fr; gap: 56px;
+}
+.mp-backtest-main { display: flex; flex-direction: column; gap: 16px; }
+.mp-backtest-rail { display: flex; flex-direction: column; gap: 16px; }
+
+@media (max-width: 1640px) {
+  .mp-backtest-body { grid-template-columns: 1fr; }
+}
+@media (max-width: 1200px) {
+  .mp-backtest-kpi { grid-template-columns: repeat(3, 1fr); }
+}
+@media (max-width: 900px) {
+  .mp-backtest-kpi { grid-template-columns: repeat(2, 1fr); }
+}
+
+.mp-chart-legend {
+  display: flex; flex-wrap: wrap; gap: 12px 20px;
+  padding: 12px 16px 4px;
+  font-size: 11px; color: var(--ns-on-surface-variant);
+}
+.mp-chart-legend__item {
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.mp-chart-legend__swatch {
+  width: 14px; height: 6px; border-radius: 1px;
+}
+
+.mp-backtest-table { width: 100%; min-width: 480px; font-size: 12px; }
+.mp-backtest-table th,
+.mp-backtest-table td { padding: 8px 10px; }
+.mp-backtest-table th { text-align: left; color: var(--ns-on-surface-variant); }
+.mp-backtest-table td.num,
+.mp-backtest-table th.num { text-align: right; }
+.mp-backtest-table tr:hover { background: var(--ns-surface-container); }
+
+.mp-strategy-backtest-link {
+  display: inline-flex; align-items: center;
+  color: var(--ns-on-surface-variant);
+  text-decoration: none;
+  padding: 2px 4px;
+  border-radius: 2px;
+}
+.mp-strategy-backtest-link:hover {
+  color: var(--ns-primary);
+  background: var(--ns-surface-container);
+}

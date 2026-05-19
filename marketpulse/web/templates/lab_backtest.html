@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block main_width %}max-w-[2400px]{% endblock %}
+{% block nav_width %}max-w-[2400px]{% endblock %}
+{% block content %}
+
+<div class="mp-backtest-warning">
+  <span class="material-symbols-outlined">info</span>
+  <span><strong>研究级模拟引擎</strong> · 非真实执行模拟器 ·
+  指标基于持仓期间的线性插值 <code>mtm_model=linear_interpolation_v0</code>。
+  Max Drawdown 可能被低估,Sharpe 可能被高估。
+  </span>
+</div>
+
+{% include "partials/backtest_hero.html" ignore missing %}
+
+<section class="mp-backtest-kpi">
+  {% include "partials/backtest_kpi_strip.html" ignore missing %}
+</section>
+
+<section class="mp-backtest-body">
+  <div class="mp-backtest-main">
+    {% include "partials/backtest_equity_chart.html" ignore missing %}
+    {% include "partials/backtest_drawdown_chart.html" ignore missing %}
+  </div>
+  <aside class="mp-backtest-rail">
+    {% include "partials/backtest_filter_card.html" ignore missing %}
+    {% include "partials/backtest_strategy_table.html" ignore missing %}
+  </aside>
+</section>
+
+{% endblock %}

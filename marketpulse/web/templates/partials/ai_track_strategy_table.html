@@ -24,6 +24,11 @@
           </span>
           <small class="muted">{{ s.n_hits }}/{{ s.n_total }}</small>
         {% endif %}
+        <a href="/lab/backtest?horizon={{ filters.horizon }}"
+           class="mp-strategy-backtest-link"
+           title="在回测视图中查看">
+          <span class="material-symbols-outlined" style="font-size:14px;">arrow_forward</span>
+        </a>
       </li>
     {% endfor %}
   </ul>

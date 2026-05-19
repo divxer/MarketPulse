@@ -82,3 +82,14 @@ def test_lab_strategy_table_empty_when_no_data(client: TestClient, monkeypatch):
     r = client.get("/lab/ai-track")
     # Render placeholder, no error
     assert r.status_code == 200
+
+
+def test_lab_ai_track_strategy_row_links_to_backtest(
+    client, monkeypatch, db_session,
+):
+    """Each strategy row in /lab/ai-track has a → /lab/backtest arrow."""
+    _login(client, monkeypatch)
+    _seed(db_session, ticker="X", strategy="momentum_breakout", excess=0.03)
+    db_session.commit()
+    r = client.get("/lab/ai-track")
+    assert "/lab/backtest" in r.text

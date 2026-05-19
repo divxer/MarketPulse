@@ -1,0 +1,33 @@
+<section class="mp-card">
+  <div class="mp-card__head">
+    <span class="mp-card__title">
+      <span class="material-symbols-outlined">filter_list</span>筛选
+    </span>
+    <a href="/lab/backtest" class="mp-card__sub" style="color:var(--ns-primary);">重置</a>
+  </div>
+  <form method="get" action="/lab/backtest" class="mp-card__body" style="display:flex; flex-direction:column; gap:14px;">
+    <div>
+      <span class="mp-eyebrow">Horizon</span>
+      <div class="mp-seg" style="margin-top:6px;">
+        {% for h in [1, 5, 20, 60] %}
+          <button type="submit" name="horizon" value="{{ h }}"
+                  class="{% if filters.horizon == h %}is-active{% endif %}">{{ h }}d</button>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div>
+      <span class="mp-eyebrow">Time</span>
+      <div class="mp-seg" style="margin-top:6px;">
+        <button type="submit" name="since_days" value="30"
+                class="{% if filters.since_days == 30 %}is-active{% endif %}">30d</button>
+        <button type="submit" name="since_days" value="90"
+                class="{% if filters.since_days == 90 %}is-active{% endif %}">90d</button>
+        <button type="submit" name="since_days" value="180"
+                class="{% if filters.since_days == 180 %}is-active{% endif %}">180d</button>
+        <button type="submit" name="since_days" value="all"
+                class="{% if filters.since_days == 'all' %}is-active{% endif %}">全部</button>
+      </div>
+    </div>
+  </form>
+</section>

@@ -94,6 +94,7 @@ def create_app() -> FastAPI:
     from marketpulse.web.routes import (  # noqa: WPS433
         alerts,
         auth,
+        backtest,
         health,
         holdings,
         home,
@@ -115,6 +116,7 @@ def create_app() -> FastAPI:
     app.include_router(stock.router)
     app.include_router(recap.router)
     app.include_router(lab.router)
+    app.include_router(backtest.router)
 
     from fastapi import HTTPException
 
