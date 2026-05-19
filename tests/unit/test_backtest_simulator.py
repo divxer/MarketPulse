@@ -140,8 +140,14 @@ def test_losing_trade_decreases_equity():
     assert r.win_rate == 0.0
 
 
-def test_excess_vs_spy_subtracts_benchmark():
-    """Strategy +5%, SPY +2% → excess_vs_spy ≈ +3% (cumulative-return diff)."""
+def test_simulate_strategy_returns_zero_excess_without_spy_context():
+    """simulate_strategy_from_pairs has no SPY to diff against — excess is 0.0.
+
+    The real excess_vs_spy = (strategy.cum_return - spy.cum_return) is
+    populated by run_all_backtests() AFTER both runs complete (see the
+    integration test in test_backtest_queries.py). At the per-strategy
+    unit level the field is meaningless and must be 0.0.
+    """
     from marketpulse.backtest.simulator import simulate_strategy_from_pairs
     pairs = [_pair("X", date(2026, 5, 1), 100.0, date(2026, 5, 8), 110.0,
                     benchmark_return=0.04)]
@@ -151,7 +157,10 @@ def test_excess_vs_spy_subtracts_benchmark():
         initial_capital=10_000.0, position_size=1_000.0,
         max_capital_in_use=10_000.0,
     )
-    assert r.excess_vs_spy > 0
+    assert r.excess_vs_spy == 0.0
+    # Strategy itself returned a real cumulative return (+1% on $10k
+    # portfolio with one $1k @ +10% trade).
+    assert r.cumulative_return > 0
 
 
 def test_spy_buyhold_single_outcome():

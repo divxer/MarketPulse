@@ -7,7 +7,7 @@ horizon_price; surfaced as mtm_model='linear_interpolation_v0'.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
 
 from marketpulse.backtest.metrics import compute_metrics
@@ -90,7 +90,6 @@ def simulate_strategy_from_pairs(
     n_capacity_skipped = 0
     trade_returns: list[float] = []
     equity_curve: list[tuple[date, float]] = []
-    executed_pairs: list[EventOutcomePair] = []
 
     for d in calendar:
         # a) CLOSE
@@ -133,7 +132,6 @@ def simulate_strategy_from_pairs(
             ))
             cash -= position_size
             n_trades += 1
-            executed_pairs.append(p)
 
         # c) MTM
         positions_value = 0.0
@@ -168,16 +166,11 @@ def simulate_strategy_from_pairs(
         trade_returns=trade_returns,
     )
 
-    # Excess vs SPY proxy: avg(forward − benchmark) over executed trades,
-    # scaled by deployed-capital fraction. NOTE this is a v0 proxy; the real
-    # alpha-vs-baseline comparison uses (strategy.cumulative_return -
-    # spy.cumulative_return) as computed by /lab/backtest.
-    excess_terms = [
-        p.forward_return - p.benchmark_forward_return for p in executed_pairs
-    ]
-    excess_vs_spy_proxy = (
-        sum(excess_terms) / len(excess_terms) if excess_terms else 0.0
-    ) * (position_size / initial_capital)
+    # excess_vs_spy is set by the orchestrator (run_all_backtests) AFTER
+    # the SPY baseline is computed — that's the only point at which both
+    # strategy.cumulative_return and spy.cumulative_return are known.
+    # Per-strategy callers (tests / ad-hoc replay) get 0.0 here; the field
+    # is meaningless without a SPY counterpart in the same window.
 
     return StrategyBacktestResult(
         strategy=strategy,
@@ -195,7 +188,7 @@ def simulate_strategy_from_pairs(
         avg_win_pct=metrics.avg_win_pct,
         avg_loss_pct=metrics.avg_loss_pct,
         daily_equity_curve=downsampled,
-        excess_vs_spy=excess_vs_spy_proxy,
+        excess_vs_spy=0.0,
     )
 
 
@@ -379,5 +372,17 @@ def run_all_backtests(
         )
 
     spy = simulate_spy_buyhold(pairs=all_pairs, initial_capital=initial_capital)
+
+    # Now that SPY's cumulative_return is known, populate excess_vs_spy on
+    # each strategy as the actual cum-return diff. This replaces the v0
+    # per-trade proxy (which under-reported by position_size/initial_capital)
+    # with the same comparison the leaderboard displays elsewhere — i.e.
+    #   excess_vs_spy = strategy.cumulative_return - spy.cumulative_return.
+    # SPY's own excess_vs_spy stays 0.0 (baseline vs itself).
+    results = [
+        replace(r, excess_vs_spy=r.cumulative_return - spy.cumulative_return)
+        for r in results
+    ]
+
     results.append(spy)
     return results

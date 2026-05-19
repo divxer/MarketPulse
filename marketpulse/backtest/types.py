@@ -42,7 +42,12 @@ class StrategyBacktestResult:
     # Equity curve (downsampled to ~120 points before return)
     daily_equity_curve: list[tuple[date, float]]
 
-    # Benchmark
+    # Benchmark: strategy.cumulative_return - spy.cumulative_return.
+    # Populated by run_all_backtests() after the SPY baseline is computed —
+    # direct callers of simulate_strategy_from_pairs() receive 0.0 here
+    # (no SPY context available). SPY's own row reports 0.0 (baseline vs
+    # itself). Units: decimal fraction (e.g. 0.03 = strategy beat SPY by
+    # 3 percentage points of cumulative return over the window).
     excess_vs_spy: float
 
     # Defaulted (always-default in v0)

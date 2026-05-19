@@ -1,6 +1,8 @@
 """Backtest DB queries — pull events+outcomes for a strategy/horizon."""
 from datetime import UTC, date, datetime, timedelta
 
+import pytest
+
 from marketpulse.db.models import EvaluationEvent, EvaluationOutcome
 
 
@@ -204,3 +206,37 @@ def test_run_all_backtests_applies_since_filter(db_session):
     results = run_all_backtests(db_session, horizon=5, since=cutoff)
     momentum = next(r for r in results if r.strategy == "momentum_breakout")
     assert momentum.n_trades == 1
+
+
+def test_run_all_backtests_sets_excess_vs_spy_as_cum_return_diff(db_session):
+    """excess_vs_spy should equal strategy.cum_return - spy.cum_return exactly.
+
+    Replaces the v0 per-trade proxy (which was off by a factor of
+    position_size/initial_capital). The number shown in the leaderboard's
+    "vs SPY" column should be the same comparison a human would do
+    looking at the Cum Ret column for the strategy and the SPY row.
+    """
+    from marketpulse.backtest.simulator import run_all_backtests
+
+    # 6 events on one strategy with positive excess
+    for i in range(6):
+        _seed(db_session, ticker=f"M{i}", strategy="momentum_breakout",
+              excess=0.04)
+    db_session.commit()
+
+    results = run_all_backtests(db_session, horizon=5)
+    spy = next(r for r in results if r.strategy == "__spy_buyhold__")
+    momentum = next(r for r in results if r.strategy == "momentum_breakout")
+
+    # Exact diff — no proxy scaling, no per-trade averaging.
+    assert momentum.excess_vs_spy == pytest.approx(
+        momentum.cumulative_return - spy.cumulative_return, abs=1e-12,
+    )
+    # SPY's own row is the baseline — excess vs itself = 0.0.
+    assert spy.excess_vs_spy == 0.0
+    # Strategies with no events still get a (0 - spy.cum) diff, which is
+    # negative whenever SPY had any return in the window. Sanity check
+    # one of the empty strategies.
+    empty = next(r for r in results if r.strategy == "fundamental_value")
+    assert empty.n_trades == 0
+    assert empty.excess_vs_spy == pytest.approx(-spy.cumulative_return, abs=1e-12)
