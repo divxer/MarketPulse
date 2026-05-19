@@ -97,20 +97,24 @@ _ANALYSIS_SYSTEM = (
 
 ```python
 COMMENTARY_PROMPT_VERSION = "commentary-v5-zh-verdicts"  # 从 v4 升
-
-# (_COMMENTARY_SYSTEM 在 v4 基础上加 VERDICTS_JSON 要求)
-_COMMENTARY_SYSTEM = (
-    ... # v4 现有内容 (## 大盘 / ## 板块与个股 / ## 持仓与启示)
-    "KEY_EVENTS_JSON: [...]\n\n"
-    "在 KEY_EVENTS_JSON 之后**再单独一行**输出 VERDICTS_JSON (可选):\n\n"
-    "VERDICTS_JSON: [\n"
-    "  {\"ticker\": \"AAPL\", \"verdict\": \"bullish\", \"rationale\": \"...\"},\n"
-    "  {\"ticker\": \"NVDA\", \"verdict\": \"bearish\", \"rationale\": \"...\"}\n"
-    "]\n\n"
-    "只对今日复盘里你有**明确方向判断**的 ticker 输出 verdict。"
-    "不必每个自选股都给(避免强行表态)。数组可以为空 []。"
-)
 ```
+
+`_COMMENTARY_SYSTEM` extension: **preserve the entire existing v4 string verbatim** (the `## 大盘 / ## 板块与个股 / ## 持仓与启示` Markdown instructions + `KEY_EVENTS_JSON:` block), then **append** the following block of additional instruction strings at the end of the tuple:
+
+```python
+# Append these string segments to the existing _COMMENTARY_SYSTEM tuple,
+# BEFORE the closing ")":
+"\n\n在 KEY_EVENTS_JSON 之后**再单独一行**输出 VERDICTS_JSON (可选):\n\n"
+"VERDICTS_JSON: [\n"
+"  {\"ticker\": \"AAPL\", \"verdict\": \"bullish\", \"rationale\": \"...\"},\n"
+"  {\"ticker\": \"NVDA\", \"verdict\": \"bearish\", \"rationale\": \"...\"}\n"
+"]\n\n"
+"verdict 取值: bullish | neutral | bearish。"
+"只对今日复盘里你有**明确方向判断**的 ticker 输出 verdict。"
+"不必每个自选股都给(避免强行表态)。数组可以为空 []。"
+```
+
+**Do NOT replace** the v4 prompt — the verdict instruction is purely additive. The implementer should keep all existing prose intact.
 
 ### `marketpulse/recap/service.py:_parse_ai_output`
 
@@ -152,43 +156,110 @@ def _parse_analyze_output(raw: str) -> tuple[str, dict | None]:
 
 ### 单 ticker 分析 (stock 路径)
 
+**Refactor `AiService.analyze()` in `marketpulse/ai/service.py`**. Current code at line 121 has `self.session.commit()` after adding `AiAnalysis`. **Move that commit to AFTER the record_event block** so both write in one transaction (atomicity: if verdict record fails, AiAnalysis cache also rolls back — keeping consistency).
+
 ```python
-# In AiService.analyze() after AI call returns response_markdown
-analysis_md, verdict = _parse_analyze_output(response_markdown)
-if verdict is not None:
-    try:
-        record_event(
-            event_type="ai_analysis",
-            subtype=verdict["verdict"],         # bullish/neutral/bearish
-            ticker=verdict["ticker"],
-            event_time=datetime.now(UTC),
-            event_price=quote.price,            # quote already fetched
-            payload={
-                "rationale": verdict.get("rationale", ""),
-                "prompt_version": prompts.ANALYSIS_PROMPT_VERSION,
-                "source": "stock_analysis",
-                "model": self.model_analyze,
-            },
-            db=self.session,
-        )
-        self.session.commit()
-    except ValueError as exc:
-        log.warning("ai_verdict_invalid", error=str(exc), verdict=verdict)
-    except Exception as exc:
-        log.warning("record_event_failed", error=str(exc))
+# Cache miss path of AiService.analyze() — full rewritten flow:
+def analyze(self, ticker: str) -> AnalysisResult:
+    version = prompts.ANALYSIS_PROMPT_VERSION
+    cached = self._lookup_cache(ticker, version)
+    if cached:
+        # Cache hit: same prediction within TTL. Do NOT record a new event.
+        return AnalysisResult(... cached ...)
+
+    quote = self.data.get_quote(ticker)
+    fundamentals = self.data.get_fundamentals(ticker)
+    bars = self.data.get_history(ticker, period="60d")
+    news = self.data.get_news(ticker, limit=10)
+    prompt_text = prompts.render_analysis_prompt(...)
+    system, data = _split_prompt(prompt_text)
+    response = self.ai.complete(system=system, user=data, model=self.model_analyze)
+    now = datetime.now(UTC)
+
+    # Phase 2: parse verdict from response
+    analysis_md, verdict = _parse_analyze_output(response)
+    # NB: AiAnalysis stores the FULL response (with VERDICTS_JSON suffix).
+    # The split is for record_event only; analysis card display can use
+    # either response (which renders VERDICTS_JSON as plain text, fine)
+    # or analysis_md (cleaner). We default to keeping full response in DB
+    # for audit purposes.
+
+    record = AiAnalysis(
+        ticker=ticker,
+        model=self.model_analyze,
+        prompt_version=version,
+        input_data_json=json.dumps(input_snapshot, default=str),
+        response_markdown=response,    # full text, includes VERDICTS_JSON
+        requested_at=now,
+        expires_at=now + timedelta(hours=self.ttl_hours),
+    )
+    self.session.add(record)
+
+    # Phase 2: record verdict event (same transaction as AiAnalysis)
+    if verdict is not None:
+        v_value = verdict.get("verdict")
+        v_ticker = (verdict.get("ticker") or "").strip().upper()
+        if v_value in AIVerdict.all() and v_ticker:
+            try:
+                record_event(
+                    event_type="ai_analysis",
+                    subtype=v_value,
+                    ticker=v_ticker,
+                    event_time=now,
+                    event_price=quote.price,
+                    payload={
+                        "rationale": verdict.get("rationale", ""),
+                        "prompt_version": version,
+                        "source": "stock_analysis",
+                        "model": self.model_analyze,
+                    },
+                    db=self.session,
+                )
+            except ValueError as exc:
+                log.warning("ai_verdict_invalid", error=str(exc), verdict=verdict)
+            except Exception as exc:
+                log.warning("record_event_failed", error=str(exc))
+        else:
+            log.warning("ai_verdict_invalid_shape", verdict=verdict)
+
+    # Single commit covers AiAnalysis + EvaluationEvent atomically.
+    self.session.commit()
+
+    return AnalysisResult(...)
 ```
 
-**Critical**: cache hit path does NOT call `record_event` (same prediction within 24h must not double-count).
+**Critical contract points**:
+1. **Cache hit path does NOT call `record_event`** — same prediction within 24h must not double-count.
+2. **Replace existing `self.session.commit()` at the old position** (currently around line 121 of service.py) — do not add a second commit. Single transaction.
+3. `_parse_analyze_output` is silent-fail: returns `(response, None)` when no VERDICTS_JSON marker. AiAnalysis still cached normally.
 
 ### Recap 路径
 
+**Existing call site to update**: `marketpulse/recap/service.py` line 116 currently is:
 ```python
-# In RecapService.generate() after parse
-commentary_md, events_json, verdicts_json = _parse_ai_output(raw)
-recap.ai_commentary_text = commentary_md
-recap.key_events_json = events_json
-# verdicts NOT stored on DailyRecap — they go straight to EvaluationEvent
+commentary_md, events_json = _parse_ai_output(commentary)
+```
+Change to 3-tuple unpack:
+```python
+commentary_md, events_json, verdicts_json = _parse_ai_output(commentary)
+```
+
+**Then in `RecapService.generate()` after the existing `recap.key_events_json = events_json` assignment**, but **before** the existing `self.session.commit()` block, add:
+
+```python
+# Phase 2: record verdicts as EvaluationEvent (if AI emitted any).
+# NOTE: do NOT call self.session.commit() here — let the existing
+# generate() commit at end cover both DailyRecap write + verdict events.
 if verdicts_json:
+    # First: delete any prior events from a previous generation of this recap_date
+    # (recap retry should not double-count). Phase 1 EvaluationOutcome rows
+    # cascade-delete via ON DELETE CASCADE on event_id FK.
+    self.session.query(EvaluationEvent).filter(
+        EvaluationEvent.event_type == "ai_analysis",
+        func.json_extract(EvaluationEvent.payload, "$.source") == "recap",
+        func.json_extract(EvaluationEvent.payload, "$.recap_date") == target.isoformat(),
+    ).delete(synchronize_session=False)
+
     try:
         verdicts = json.loads(verdicts_json)
         if isinstance(verdicts, list):
@@ -198,10 +269,11 @@ if verdicts_json:
                 ticker = v.get("ticker", "").strip().upper()
                 verdict = v.get("verdict", "")
                 if not ticker or verdict not in AIVerdict.all():
+                    log.warning("recap_verdict_invalid_shape",
+                                ticker=ticker, verdict=verdict)
                     continue
                 try:
-                    # Fetch quote at recap generation time
-                    quote = self.data.get_quote(ticker)
+                    quote = self.data.get_quote(ticker)  # may raise
                     record_event(
                         event_type="ai_analysis",
                         subtype=verdict,
@@ -213,25 +285,35 @@ if verdicts_json:
                             "prompt_version": prompts.COMMENTARY_PROMPT_VERSION,
                             "source": "recap",
                             "recap_date": target.isoformat(),
-                            "model": self.ai_model,
+                            # Note: model is NOT stored on RecapService
+                            # (only the _AiLike protocol object).
+                            # prompt_version is sufficient to identify the model
+                            # via the version-to-model mapping in prompts.py.
                         },
                         db=self.session,
                     )
                 except Exception as exc:
                     log.warning("recap_verdict_skipped",
                                 ticker=ticker, error=str(exc))
-            self.session.commit()
+            # NOTE: no commit here — generate()'s existing end-of-method
+            # commit covers this. Single transaction for atomicity.
     except json.JSONDecodeError as exc:
         log.warning("verdicts_json_malformed", error=str(exc))
 ```
+
+**Imports needed** at top of `marketpulse/recap/service.py`:
+- `from sqlalchemy import func` (if not already imported)
+- `from marketpulse.db.models import EvaluationEvent`
+- `from marketpulse.evaluation.events import record_event`
+- `from marketpulse.evaluation.constants import AIVerdict`
 
 ### Recap retry 重复处理
 
 When user clicks "重新生成", existing recap is overwritten in `daily_recaps`, but **EvaluationEvents from the prior generation remain in the DB**. To avoid double-counting:
 
-**Strategy**: Add `payload.recap_date` (we already do). Before recording new verdicts for a recap_date, delete any existing events where `event_type="ai_analysis"` AND `payload->>'source' = 'recap'` AND `payload->>'recap_date' = target_date`. PostgreSQL JSON operators work; SQLite JSON1 also supports this.
+**Strategy**: Add `payload.recap_date` (we already do). Before recording new verdicts for a recap_date, delete any existing events where `event_type="ai_analysis"` AND `payload.source = 'recap'` AND `payload.recap_date = target_date`.
 
-(SQLite path: `json_extract(payload, '$.recap_date') = '2026-05-18'`)
+**SQLite-only implementation note**: MarketPulse production runs SQLite (verified via `fly.toml` DATABASE_URL = `sqlite:////data/marketpulse.db`). The query uses SQLite JSON1 extension via SQLAlchemy `func.json_extract`. **This is SQLite-specific syntax — does NOT work on Postgres**. If/when we migrate to Postgres in the future, this and `compute_hit_rate`'s `source` filter both need rewriting to use Postgres JSONB operators (`payload['source'].astext == "recap"`). Add a TODO comment in the code marking these as SQLite-bound.
 
 ```python
 # In RecapService.generate() before recording verdicts
@@ -266,6 +348,9 @@ from marketpulse.db.models import EvaluationEvent, EvaluationOutcome
 
 
 NEUTRAL_THRESHOLD = 0.01   # |excess_return| < 1% counts as "no meaningful move"
+# Boundary convention: directional verdicts (bullish/bearish) use STRICT inequality
+# (`> +threshold` / `< -threshold`), neutral uses INCLUSIVE (`<= threshold`).
+# This makes exactly threshold = neutral hit (not directional).
 
 
 @dataclass(frozen=True)
@@ -279,7 +364,11 @@ class HitRateStats:
     n_bearish_hits: int
     n_neutral_hits: int
     hit_rate: float | None         # None if n_total == 0
-    avg_excess_return: float       # signed by verdict direction; 0 if n_total == 0
+    avg_excess_return: float       # SIMPLE mean of excess_return across all
+                                   # events (no sign flip for bearish). Positive
+                                   # value = portfolio of AI verdicts outperformed
+                                   # SPY on average, regardless of verdict mix.
+                                   # 0 if n_total == 0.
     as_of: datetime
 
 
@@ -317,6 +406,8 @@ def get_per_ticker_hit_rates(
     db: Session,
     *,
     horizon: int = 5,
+    source: str | None = None,
+    subtype: str | None = None,
     since: date | None = None,
 ) -> list[TickerHitRate]:
     """Returns per-ticker rollup, sorted by hit_rate desc.
@@ -333,12 +424,20 @@ def get_hit_rate_trend(
     db: Session,
     *,
     horizon: int = 5,
+    ticker: str | None = None,
+    source: str | None = None,
+    subtype: str | None = None,
+    since: date | None = None,
     window_days: int = 90,
     rolling: int = 30,    # 30-day rolling window
 ) -> list[DailyHitRate]:
     """Returns daily rolling hit rate over the past window_days.
     Each entry is the hit rate computed over events whose event_time
-    falls in the rolling-day window ending on that day."""
+    falls in the rolling-day window ending on that day.
+
+    Implementation note: single query fetches all relevant
+    EvaluationEvent + EvaluationOutcome joins for the window, then
+    Python-side groups into days. Do NOT issue 90 separate queries."""
 
 @dataclass(frozen=True)
 class EventOutcome:
@@ -357,6 +456,10 @@ def get_recent_events_with_outcomes(
     db: Session,
     *,
     horizon: int = 5,
+    ticker: str | None = None,
+    source: str | None = None,
+    subtype: str | None = None,
+    since: date | None = None,
     limit: int = 20,
 ) -> list[EventOutcome]:
     """Latest events with outcomes at this horizon, newest first."""
@@ -410,39 +513,93 @@ def lab_ai_track(
     request: Request,
     ticker: str | None = None,
     horizon: int = 5,
-    source: str | None = None,    # "stock_analysis" | "recap" | None
-    verdict: str | None = None,   # "bullish" | "neutral" | "bearish" | None
-    since_days: int = 90,
+    source: str | None = None,        # "stock_analysis" | "recap" | None
+    verdict: str | None = None,       # "bullish" | "neutral" | "bearish" | None
+    since_days: str | int = 90,       # "all" maps to no date filter
     db: Session = Depends(get_db),
     _: None = Depends(require_auth),
 ):
-    since = date.today() - timedelta(days=since_days)
+    # Validate + normalize since_days. "all" → no filter.
+    if isinstance(since_days, str) and since_days == "all":
+        since = None
+    else:
+        try:
+            sd_int = int(since_days)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail=f"invalid since_days: {since_days}")
+        if sd_int <= 0:
+            raise HTTPException(status_code=422, detail="since_days must be positive or 'all'")
+        since = date.today() - timedelta(days=sd_int)
 
-    overall = scoring.compute_hit_rate(
-        db, horizon=horizon, ticker=ticker.upper() if ticker else None,
-        source=source, subtype=verdict, since=since,
-    )
+    ticker_u = ticker.upper() if ticker else None
+    # Validate horizon against Phase 1 DEFAULT_HORIZONS to give clearer error
+    # than silent zero-result.
+    from marketpulse.evaluation.outcomes import DEFAULT_HORIZONS
+    if horizon not in DEFAULT_HORIZONS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"invalid horizon: must be one of {DEFAULT_HORIZONS}",
+        )
+
+    # Filters propagate to all four query functions for consistency.
+    common = dict(horizon=horizon, ticker=ticker_u, source=source, since=since)
+    overall = scoring.compute_hit_rate(db, subtype=verdict, **common)
     trend = scoring.get_hit_rate_trend(
-        db, horizon=horizon, window_days=since_days, rolling=30,
+        db, window_days=(since_days if isinstance(since_days, int) else 90),
+        rolling=30, subtype=verdict, **common,
     )
     per_ticker = scoring.get_per_ticker_hit_rates(
-        db, horizon=horizon, since=since,
+        db, subtype=verdict, **{k: v for k, v in common.items() if k != "ticker"},
     )
     recent = scoring.get_recent_events_with_outcomes(
-        db, horizon=horizon, limit=20,
+        db, limit=20, subtype=verdict, **common,
     )
 
+    # Best ticker for KPI (top of per_ticker list, which is sorted hit_rate desc).
+    # Pick from rows with n_total >= 5 to avoid showing "best" as a fluke
+    # 1-sample winner. None if no qualified ticker.
+    best = next(
+        (t for t in per_ticker if t.n_total >= 5),
+        None,
+    )
+
+    filters = {
+        "ticker": ticker, "horizon": horizon,
+        "source": source, "verdict": verdict, "since_days": since_days,
+    }
     return templates.TemplateResponse(request, "lab_ai_track.html", {
         "overall": overall,
         "trend": trend,
         "per_ticker": per_ticker,
         "recent": recent,
-        "filters": {
-            "ticker": ticker, "horizon": horizon,
-            "source": source, "verdict": verdict, "since_days": since_days,
-        },
-        "filters_qs": _qs_from_filters(...),
+        "best": best,                           # may be None
+        "filters": filters,
+        "filters_qs": _qs_from_filters(filters),
+        "filters_qs_no_ticker": _qs_from_filters({**filters, "ticker": None}),
     })
+```
+
+**Helper** (place above the route handler in the same file):
+
+```python
+from urllib.parse import urlencode
+
+def _qs_from_filters(filters: dict) -> str:
+    """Build a URL-encoded query string from a filters dict, dropping
+    None / default values. Used for filter-preserving links.
+
+    Example: {ticker: 'AAPL', horizon: 5, source: None, verdict: 'bullish', since_days: 90}
+    → "ticker=AAPL&horizon=5&verdict=bullish&since_days=90"
+    """
+    DEFAULTS = {"horizon": 5, "since_days": 90}   # omit defaults to keep URLs short
+    payload = {}
+    for k, v in filters.items():
+        if v is None or v == "":
+            continue
+        if k in DEFAULTS and v == DEFAULTS[k]:
+            continue
+        payload[k] = str(v)
+    return urlencode(payload)
 ```
 
 Filter form on the page submits as plain GET (no HTMX); URL stays canonical.
@@ -542,10 +699,10 @@ Body grid: `760px 1fr` (same as `/recap` after PR #47).
 
 | label | value | hint |
 |---|---|---|
-| 总 verdicts (90d) | `{{ overall.n_total }}` | `已评分,其中 {{ n_bullish }} 看涨 / {{ n_bearish }} 看跌 / {{ n_neutral }} 中性` |
-| 5d Hit Rate | `{{ "{:.0f}%".format(overall.hit_rate * 100) }}` color-coded | `{{ n_hits }}/{{ n_total }} 命中` |
+| 总 verdicts (90d) | `{{ overall.n_total }}` | `已评分,其中 {{ overall.n_bullish }} 看涨 / {{ overall.n_bearish }} 看跌 / {{ overall.n_neutral }} 中性` |
+| 5d Hit Rate | `{{ "{:.0f}%".format(overall.hit_rate * 100) }}` color-coded; show "—" when `overall.hit_rate is none` | `{{ overall.n_hits }}/{{ overall.n_total }} 命中` |
 | Avg Excess | `{{ "{:+.2f}%".format(overall.avg_excess_return * 100) }}` color-coded | `对 SPY 超额收益均值` |
-| Best Ticker | `{{ best.ticker }} {{ "{:+.0f}%".format(best.avg_excess_return * 100) }}` | `5d horizon · n={{ best.n_total }}` |
+| Best Ticker | `{% if best %}{{ best.ticker }} {{ "{:+.0f}%".format(best.avg_excess_return * 100) }}{% else %}—{% endif %}` | `{% if best %}{{ filters.horizon }}d horizon · n={{ best.n_total }}{% else %}n<5 暂无最佳{% endif %}` |
 
 ### Trend chart (SVG polyline)
 
@@ -560,9 +717,10 @@ Body grid: `760px 1fr` (same as `/recap` after PR #47).
   <div class="mp-card__body">
     {% if trend|length >= 2 %}
       <svg viewBox="0 0 600 200" width="100%" height="200">
-        {# X axis: trend index, Y axis: hit_rate% inverted #}
+        {# X axis: trend index → 0..600; clamp last point to 600 to avoid
+           accumulated float rounding leaving the polyline short. #}
         <polyline
-          points="{% for d in trend %}{{ loop.index0 * (600 / (trend|length - 1)) }},{{ 200 - (d.hit_rate or 0) * 200 }} {% endfor %}"
+          points="{% for d in trend %}{{ 600 if loop.last else loop.index0 * (600 / (trend|length - 1)) }},{{ 200 - (d.hit_rate or 0) * 200 }} {% endfor %}"
           fill="none" stroke="var(--ns-primary)" stroke-width="2" />
         {# 50% baseline #}
         <line x1="0" y1="100" x2="600" y2="100"
@@ -582,7 +740,7 @@ Body grid: `760px 1fr` (same as `/recap` after PR #47).
 ### Filter card
 
 mp-card with 4 sections:
-- Horizon: 1/3/5/10/20 radio chips
+- Horizon: 1/5/20/60 radio chips
 - Source: stock_analysis / recap / 全部
 - Verdict: bullish / neutral / bearish / 全部
 - Time: 30/90/180/all
@@ -602,7 +760,8 @@ Form submits GET. Reset URL on "重置" button.
   <ul class="mp-ai-track-ticker-list">
     {% for t in per_ticker %}
       <li>
-        <a href="?ticker={{ t.ticker }}&horizon=5">{{ t.ticker }}</a>
+        {# Preserve current filters; only swap ticker. #}
+        <a href="?{{ filters_qs_no_ticker }}{% if filters_qs_no_ticker %}&{% endif %}ticker={{ t.ticker }}">{{ t.ticker }}</a>
         {% if t.n_total < 5 %}
           <span class="mp-chip mp-chip--pending">积累中 ({{ t.n_total }})</span>
         {% else %}
@@ -646,6 +805,10 @@ Form submits GET. Reset URL on "重置" button.
 }
 .mp-ai-track-main { display: flex; flex-direction: column; gap: 16px; }
 .mp-ai-track-rail { display: flex; flex-direction: column; gap: 16px; }
+
+/* 10-col recent events table needs horizontal scroll on narrow viewports */
+.mp-ai-track-recent-wrap { overflow-x: auto; }
+.mp-ai-track-recent { min-width: 1100px; width: 100%; }
 
 @media (max-width: 1640px) {
   .mp-ai-track-body { grid-template-columns: 1fr; }
@@ -714,12 +877,14 @@ tests/integration/test_stock_analyze_records_event.py  NEW (5 tests)
   - test_invalid_ai_output_no_verdict_recorded
   - test_analyze_with_invalid_verdict_value_skips_event
 
-tests/integration/test_recap_records_events.py      NEW (5 tests)
+tests/integration/test_recap_records_events.py      NEW (7 tests)
   - test_recap_with_3_verdicts_records_3_events
   - test_recap_without_verdicts_marker_no_events
   - test_recap_retry_deletes_old_events_for_same_date
   - test_recap_with_mixed_valid_invalid_verdicts_skips_invalid
   - test_recap_records_event_per_unique_ticker
+  - test_recap_verdict_skipped_when_quote_fetch_fails  ← I7 cov gap
+  - test_recap_duplicate_ticker_in_verdicts_records_both  ← dedupe behavior
 
 tests/web/test_stock_ai_badge.py                    NEW (5 tests)
   - test_stock_page_renders_badge_when_data_present
@@ -728,13 +893,16 @@ tests/web/test_stock_ai_badge.py                    NEW (5 tests)
   - test_stock_page_good_badge_color_when_hit_rate_above_60
   - test_stock_page_badge_links_to_lab_ai_track_with_ticker
 
-tests/web/test_lab_ai_track.py                      NEW (6 tests)
+tests/web/test_lab_ai_track.py                      NEW (9 tests)
   - test_lab_renders_placeholder_when_no_data
   - test_lab_renders_4_kpi_strip_when_data_present
   - test_lab_filter_horizon_changes_url_via_get
   - test_lab_filter_ticker_via_query_param
   - test_lab_ticker_table_pending_chip_when_n_below_5
   - test_lab_trend_chart_renders_svg_polyline_with_enough_data
+  - test_lab_since_days_all_no_date_filter        ← M3 cov gap
+  - test_lab_invalid_horizon_returns_422          ← I4 reinforce
+  - test_lab_ticker_link_preserves_active_filters ← C6 cov gap
 ```
 
 Total: ~40 new tests.
