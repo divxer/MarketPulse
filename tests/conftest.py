@@ -19,6 +19,27 @@ def _clear_quote_cache() -> None:
     QUOTE_CACHE.clear()
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _ensure_tailwind_output_exists():
+    """Ensure marketpulse/web/static/app.css exists before tests run.
+
+    Tailwind output is .gitignore'd; on a fresh checkout or in CI
+    without node, the file is missing. Tests that assert on
+    static_version('app.css') need *some* file there. We create a
+    minimal stub if the real build hasn't produced one; a real
+    Tailwind run (npm run build:css) will overwrite it.
+    """
+    css_path = (
+        Path(__file__).resolve().parent.parent
+        / "marketpulse" / "web" / "static" / "app.css"
+    )
+    if not css_path.exists():
+        css_path.write_text(
+            "/* tailwind build stub — run `npm run build:css` for the real one */\n"
+        )
+    yield
+
+
 @pytest.fixture()
 def db_url(tmp_path: Path) -> str:
     return f"sqlite:///{tmp_path / 'test.db'}"
