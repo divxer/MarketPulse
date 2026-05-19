@@ -177,3 +177,34 @@ def test_compute_hit_rate_avg_excess_is_simple_mean(db_session):
     stats = compute_hit_rate(db_session, horizon=5)
     # Both hit, but raw mean is (0.03 + -0.04) / 2 = -0.005
     assert stats.avg_excess_return == pytest.approx(-0.005)
+
+
+def test_get_per_ticker_hit_rates_orders_by_hit_rate_desc(db_session):
+    from marketpulse.evaluation.scoring import get_per_ticker_hit_rates
+
+    # AAPL: 2/2 hits
+    for _ in range(2):
+        e = _ev(db_session, ticker="AAPL", subtype="bullish")
+        _out(db_session, e, excess=0.03)
+    # NVDA: 1/2 hits
+    e = _ev(db_session, ticker="NVDA", subtype="bullish")
+    _out(db_session, e, excess=0.03)
+    e = _ev(db_session, ticker="NVDA", subtype="bullish")
+    _out(db_session, e, excess=-0.02)
+    db_session.commit()
+
+    rows = get_per_ticker_hit_rates(db_session, horizon=5)
+    assert [r.ticker for r in rows] == ["AAPL", "NVDA"]
+    assert rows[0].hit_rate == pytest.approx(1.0)
+    assert rows[1].hit_rate == pytest.approx(0.5)
+
+
+def test_get_per_ticker_hit_rates_excludes_zero_n(db_session):
+    """Tickers with no events at this horizon don't appear."""
+    from marketpulse.evaluation.scoring import get_per_ticker_hit_rates
+
+    _ev(db_session, ticker="AAPL")   # no outcome
+    db_session.commit()
+
+    rows = get_per_ticker_hit_rates(db_session, horizon=5)
+    assert rows == []
