@@ -1,6 +1,7 @@
 import json
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -13,10 +14,17 @@ from marketpulse.db.models import AiAnalysis
 from marketpulse.evaluation.constants import AIVerdict
 from marketpulse.evaluation.events import record_event
 from marketpulse.logging import get_logger
+from marketpulse.strategies import load_strategies
+from marketpulse.strategies.router import (
+    build_router_context,
+    parse_router_output,
+    render_router_prompt,
+)
 
 log = get_logger(__name__)
 
 _DATA_SEPARATOR = "\n\nDATA:\n"
+_US_EASTERN = ZoneInfo("America/New_York")
 
 
 def _split_prompt(rendered: str) -> tuple[str, str]:
@@ -75,6 +83,7 @@ class AiService:
         model: str,
         ttl_hours: int,
         model_analyze: str | None = None,
+        model_router: str | None = None,
     ) -> None:
         self.session = session
         self.ai = ai_client
@@ -83,7 +92,77 @@ class AiService:
         # /stock deep-analysis can use a premium model (e.g. Opus). Falls back
         # to `model` when not set. Cheap features (recap, risk) always use `model`.
         self.model_analyze = model_analyze or model
+        # Router uses a cheap model; falls back to `model` if unset.
+        self.model_router = model_router or model
         self.ttl_hours = ttl_hours
+        # In-memory router decision cache: {(ticker, today_us_eastern_iso): (strategy, reason)}
+        self._router_cache: dict[tuple[str, str], tuple[str, str]] = {}
+
+    def _route_strategy(self, ticker: str) -> tuple[str, str]:
+        """Stage 1 of analyze() — pick a strategy via cheap router LLM.
+
+        Returns (strategy_name, reason). On any failure (no marker, bad
+        JSON, invalid name, LLM error), falls back to 'general' with a
+        structured warning log.
+
+        Cached in-memory per (ticker, today_us_eastern) — same-day re-clicks
+        skip the LLM call. Cache cleared on process restart.
+        """
+        today_key = datetime.now(_US_EASTERN).date().isoformat()
+        cache_key = (ticker, today_key)
+        if cache_key in self._router_cache:
+            return self._router_cache[cache_key]
+
+        # Fetch the data needed for context. Stage 2 (analyze) currently
+        # re-fetches — Task 8 may plumb the shared data through. For v0,
+        # the double fetch is acceptable (router context is much smaller
+        # than full deep-analysis input).
+        quote = self.data.get_quote(ticker)
+        fundamentals = self.data.get_fundamentals(ticker)
+        bars = self.data.get_history(ticker, period="60d")
+        try:
+            spy_bars = self.data.get_history("SPY", period="60d")
+        except Exception:  # noqa: BLE001
+            spy_bars = []
+        try:
+            news_count = len(self.data.get_news(ticker, limit=20))
+        except Exception:  # noqa: BLE001
+            news_count = 0
+
+        strategies = load_strategies()
+        ctx = build_router_context(
+            quote=quote, fundamentals=fundamentals,
+            bars=bars, spy_bars=spy_bars, news_count_7d=news_count,
+        )
+        prompt = render_router_prompt(strategies=strategies, context=ctx)
+
+        try:
+            raw = self.ai.complete(
+                system="", user=prompt, model=self.model_router,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("router_llm_failed", ticker=ticker, error=str(exc))
+            decision = ("general", "router_llm_failed")
+            self._router_cache[cache_key] = decision
+            return decision
+
+        parsed = parse_router_output(raw, valid_names=set(strategies.keys()))
+        if parsed is None:
+            log.warning(
+                "router_fallback", ticker=ticker, reason="parse_or_invalid",
+                raw_excerpt=raw[:200],
+            )
+            decision = ("general", "router_parse_or_invalid_name")
+            self._router_cache[cache_key] = decision
+            return decision
+
+        log.info(
+            "router_picked", ticker=ticker,
+            strategy=parsed["strategy"], reason=parsed["reason"],
+        )
+        decision = (parsed["strategy"], parsed["reason"])
+        self._router_cache[cache_key] = decision
+        return decision
 
     def analyze(self, ticker: str) -> AnalysisResult:
         version = prompts.ANALYSIS_PROMPT_VERSION
