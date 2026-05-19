@@ -191,3 +191,43 @@ def test_spy_buyhold_mtm_interpolation_midpoint():
     mid = curve.get(date(2026, 5, 5))
     assert mid is not None
     assert 10_000 <= mid <= curve[date(2026, 5, 7)] + 1
+
+
+def test_downsample_preserves_curve_under_target():
+    """If curve is shorter than target, no downsampling."""
+    from marketpulse.backtest.simulator import downsample_equity_curve
+    from datetime import date as _date
+    curve = [(_date(2026, 5, d), 10_000.0 + d) for d in range(1, 30)]
+    out = downsample_equity_curve(curve, target_points=120)
+    assert out == curve
+
+
+def test_downsample_reduces_long_curve_to_target():
+    from marketpulse.backtest.simulator import downsample_equity_curve
+    from datetime import date as _date, timedelta as _td
+    curve = [(_date(2026, 1, 1) + _td(days=d), 10_000.0 + d) for d in range(500)]
+    out = downsample_equity_curve(curve, target_points=120)
+    assert len(out) <= 122
+    assert out[0] == curve[0]
+    assert out[-1] == curve[-1]
+
+
+def test_downsample_endpoints_always_included():
+    from marketpulse.backtest.simulator import downsample_equity_curve
+    from datetime import date as _date, timedelta as _td
+    curve = [(_date(2026, 1, 1) + _td(days=d), float(d)) for d in range(200)]
+    out = downsample_equity_curve(curve, target_points=50)
+    assert out[0] == curve[0]
+    assert out[-1] == curve[-1]
+
+
+def test_downsample_empty_input_returns_empty():
+    from marketpulse.backtest.simulator import downsample_equity_curve
+    assert downsample_equity_curve([], target_points=120) == []
+
+
+def test_downsample_single_point_returns_unchanged():
+    from marketpulse.backtest.simulator import downsample_equity_curve
+    from datetime import date as _date
+    curve = [(_date(2026, 5, 1), 10_000.0)]
+    assert downsample_equity_curve(curve, target_points=120) == curve

@@ -299,9 +299,24 @@ def simulate_spy_buyhold(
     )
 
 
-# downsample stub — full implementation in Task 8.
 def downsample_equity_curve(
     curve: list[tuple[date, float]], *, target_points: int = 120,
 ) -> list[tuple[date, float]]:
-    """Stub for now; Task 8 implements the algorithm."""
-    return curve
+    """Reduce a daily equity curve to ~target_points evenly-spaced samples.
+
+    Preserves both endpoints. Used by the simulator before returning a
+    StrategyBacktestResult so template contexts stay light.
+
+    Algorithm: take stride = ceil(len/target). Step through the curve at
+    that stride, then explicitly append the last point if not already.
+    Simple and stable; no statistical sampling needed for visualization.
+    """
+    n = len(curve)
+    if n <= target_points or n <= 2:
+        return list(curve)
+
+    stride = max(1, (n + target_points - 1) // target_points)
+    out = [curve[i] for i in range(0, n - 1, stride)]
+    if out[-1] != curve[-1]:
+        out.append(curve[-1])
+    return out
