@@ -4,7 +4,7 @@ from typing import Any
 from marketpulse.data.types import Bar, Fundamentals, NewsItem, Quote
 
 ANALYSIS_PROMPT_VERSION = "analysis-v3-zh-verdict"
-COMMENTARY_PROMPT_VERSION = "commentary-v4-zh-markdown"
+COMMENTARY_PROMPT_VERSION = "commentary-v5-zh-verdicts"
 RISK_PROMPT_VERSION = "risk-v2-zh-data"
 
 _ANALYSIS_SYSTEM = (
@@ -53,6 +53,14 @@ _COMMENTARY_SYSTEM = (
     "kind 取值: deal | earnings | econ | merger | analyst | other\n"
     "请提供 3-5 条今日最关键事件。若数据中无明确事件,输出空数组 []。\n\n"
     "整体要客观、冷静、具体,提及具体的 ticker 和数字。股票代码保留英文原文。"
+    "\n\n在 KEY_EVENTS_JSON 之后**再单独一行**输出 VERDICTS_JSON (可选):\n\n"
+    "VERDICTS_JSON: [\n"
+    "  {\"ticker\": \"AAPL\", \"verdict\": \"bullish\", \"rationale\": \"...\"},\n"
+    "  {\"ticker\": \"NVDA\", \"verdict\": \"bearish\", \"rationale\": \"...\"}\n"
+    "]\n\n"
+    "verdict 取值: bullish | neutral | bearish。"
+    "只对今日复盘里你有**明确方向判断**的 ticker 输出 verdict。"
+    "不必每个自选股都给(避免强行表态)。数组可以为空 []。"
 )
 
 
