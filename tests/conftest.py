@@ -19,6 +19,21 @@ def _clear_quote_cache() -> None:
     QUOTE_CACHE.clear()
 
 
+@pytest.fixture(autouse=True)
+def _clear_phase3_module_caches() -> None:
+    """Phase 3 caches (router decisions + loaded strategies) live at module
+    level so they survive the per-request AiService instances in production.
+    Tests need them cleared between cases.
+    """
+    from marketpulse.ai.service import _router_cache_clear
+    from marketpulse.strategies.loader import clear_strategy_cache
+    _router_cache_clear()
+    clear_strategy_cache()
+    yield
+    _router_cache_clear()
+    clear_strategy_cache()
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _ensure_tailwind_output_exists():
     """Ensure marketpulse/web/static/app.css exists before tests run.

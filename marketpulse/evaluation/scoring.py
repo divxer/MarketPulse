@@ -61,6 +61,7 @@ def compute_hit_rate(
     ticker: str | None = None,
     horizon: int = 5,
     source: str | None = None,
+    strategy: str | None = None,
     since: date | None = None,
 ) -> HitRateStats:
     """Core hit-rate computation.
@@ -85,6 +86,10 @@ def compute_hit_rate(
         # SQLite-only: json_extract on payload
         stmt = stmt.where(
             func.json_extract(EvaluationEvent.payload, "$.source") == source,
+        )
+    if strategy is not None:
+        stmt = stmt.where(
+            func.json_extract(EvaluationEvent.payload, "$.strategy") == strategy,
         )
     if since is not None:
         stmt = stmt.where(
@@ -147,6 +152,7 @@ def get_per_ticker_hit_rates(
     *,
     horizon: int = 5,
     source: str | None = None,
+    strategy: str | None = None,
     subtype: str | None = None,
     since: date | None = None,
 ) -> list[TickerHitRate]:
@@ -171,6 +177,10 @@ def get_per_ticker_hit_rates(
     if source is not None:
         stmt = stmt.where(
             func.json_extract(EvaluationEvent.payload, "$.source") == source,
+        )
+    if strategy is not None:
+        stmt = stmt.where(
+            func.json_extract(EvaluationEvent.payload, "$.strategy") == strategy,
         )
     if since is not None:
         stmt = stmt.where(
@@ -214,6 +224,7 @@ def get_hit_rate_trend(
     horizon: int = 5,
     ticker: str | None = None,
     source: str | None = None,
+    strategy: str | None = None,
     subtype: str | None = None,
     since: date | None = None,
     window_days: int = 90,
@@ -251,6 +262,10 @@ def get_hit_rate_trend(
     if source is not None:
         stmt = stmt.where(
             func.json_extract(EvaluationEvent.payload, "$.source") == source,
+        )
+    if strategy is not None:
+        stmt = stmt.where(
+            func.json_extract(EvaluationEvent.payload, "$.strategy") == strategy,
         )
 
     raw_rows = db.execute(stmt).all()
@@ -301,6 +316,7 @@ def get_recent_events_with_outcomes(
     horizon: int = 5,
     ticker: str | None = None,
     source: str | None = None,
+    strategy: str | None = None,
     subtype: str | None = None,
     since: date | None = None,
     limit: int = 20,
@@ -319,6 +335,10 @@ def get_recent_events_with_outcomes(
     if source is not None:
         stmt = stmt.where(
             func.json_extract(EvaluationEvent.payload, "$.source") == source,
+        )
+    if strategy is not None:
+        stmt = stmt.where(
+            func.json_extract(EvaluationEvent.payload, "$.strategy") == strategy,
         )
     if since is not None:
         stmt = stmt.where(

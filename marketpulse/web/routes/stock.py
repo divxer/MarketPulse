@@ -2,13 +2,14 @@ from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
-from sqlalchemy import func
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from marketpulse.ai import prompts
 from marketpulse.ai.service import AiService
 from marketpulse.data.service import DataService
 from marketpulse.data.yfinance_client import YFinanceClient
-from marketpulse.db.models import Holding, Trade, WatchlistItem
+from marketpulse.db.models import AiAnalysis, Holding, Trade, WatchlistItem
 from marketpulse.evaluation import scoring
 from marketpulse.logging import get_logger
 from marketpulse.recap.signals import (
@@ -19,6 +20,7 @@ from marketpulse.recap.signals import (
     scan_signal_markers,
     sma,
 )
+from marketpulse.strategies import load_strategies
 from marketpulse.web.deps import (
     get_ai_service,
     get_data_service,
@@ -134,6 +136,21 @@ def stock_page(
     )
     ai_badge_color = _ai_badge_color(ai_stats)
 
+    # Phase 3: surface the strategy used by the most recent cached analysis (if any).
+    latest_analysis = db.execute(
+        select(AiAnalysis)
+        .where(AiAnalysis.ticker == ticker)
+        .where(AiAnalysis.prompt_version == prompts.ANALYSIS_PROMPT_VERSION)
+        .order_by(AiAnalysis.requested_at.desc())
+        .limit(1)
+    ).scalars().first()
+
+    ai_strategy_display: str | None = None
+    if latest_analysis and latest_analysis.strategy:
+        strategies = load_strategies()
+        s = strategies.get(latest_analysis.strategy)
+        ai_strategy_display = s.display_name if s else latest_analysis.strategy
+
     return templates.TemplateResponse(
         request, "stock.html",
         {
@@ -149,6 +166,7 @@ def stock_page(
             "ai_n_hits": ai_stats.n_hits,
             "ai_n_total": ai_stats.n_total,
             "ai_badge_color": ai_badge_color,
+            "ai_strategy_display": ai_strategy_display,
         },
     )
 

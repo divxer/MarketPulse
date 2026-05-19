@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     # Optional premium model for /stock AI deep analysis only — daily recap and
     # portfolio risk stay on the cheap default. Empty string = use AI_MODEL.
     ai_model_analyze: str = Field("", alias="AI_MODEL_ANALYZE")
+    # Phase 3: cheap model for the strategy router stage (Haiku-class).
+    # Empty string = use AI_MODEL (which costs ~100x more — don't leave empty
+    # in production).
+    ai_model_router: str = Field("claude-haiku-4-5", alias="AI_MODEL_ROUTER")
     ai_cache_ttl_hours: int = Field(24, alias="AI_CACHE_TTL_HOURS", ge=0)
     news_cache_ttl_days: int = Field(7, alias="NEWS_CACHE_TTL_DAYS", ge=0)
     quote_cache_ttl_seconds: int = Field(300, alias="QUOTE_CACHE_TTL_SECONDS", ge=0)

@@ -191,6 +191,8 @@ class AiAnalysis(Base):
     ticker: Mapped[str] = mapped_column(String(16), nullable=False)
     model: Mapped[str] = mapped_column(String(64), nullable=False)
     prompt_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    strategy: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    strategy_version: Mapped[str | None] = mapped_column(String(16), nullable=True)
     input_data_json: Mapped[str] = mapped_column(Text, nullable=False)
     response_markdown: Mapped[str] = mapped_column(Text, nullable=False)
     requested_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow, nullable=False)

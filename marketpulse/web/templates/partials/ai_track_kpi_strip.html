@@ -47,3 +47,18 @@
     {% if best %}{{ filters.horizon }}d horizon · n={{ best.n_total }}{% else %}n<5 暂无最佳{% endif %}
   </div>
 </div>
+
+<div class="mp-card mp-kpi">
+  <div class="mp-kpi__head">
+    <span class="mp-eyebrow mp-eyebrow--primary">Best Strategy</span>
+    <span class="material-symbols-outlined mp-kpi__icon">analytics</span>
+  </div>
+  <div class="mp-kpi__value grotesk tnum">
+    {% if best_strategy %}{{ best_strategy.display_name }}{% else %}—{% endif %}
+  </div>
+  <div class="mp-kpi__hint">
+    {% if best_strategy %}
+      {{ "{:.0f}%".format(best_strategy.hit_rate * 100) }} hit · n={{ best_strategy.n_total }}
+    {% else %}n<5 暂无最佳{% endif %}
+  </div>
+</div>

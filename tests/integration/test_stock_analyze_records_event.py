@@ -16,7 +16,13 @@ def _build_service(db_session, ai_response: str):
     from marketpulse.data.types import Bar, Fundamentals, Quote
 
     fake_ai = MagicMock()
-    fake_ai.complete.return_value = ai_response
+    # Phase 3: analyze() now calls complete() twice (router + deep).
+    # Provide a valid router response that picks "general", then the
+    # original ai_response as the deep response.
+    fake_ai.complete.side_effect = [
+        'ROUTER_JSON: {"strategy": "general", "reason": "test default"}',
+        ai_response,
+    ]
 
     fake_data = MagicMock()
     fake_data.get_quote.return_value = Quote(
@@ -41,6 +47,7 @@ def _build_service(db_session, ai_response: str):
         model="claude-sonnet-4-6",
         ttl_hours=24,
         model_analyze="claude-sonnet-4-6",
+        model_router="claude-haiku-4-5",
     )
 
 
@@ -63,7 +70,7 @@ def test_first_analyze_records_event_with_verdict(db_session):
     assert e.ticker == "AAPL"
     assert e.event_price == pytest.approx(180.0)
     assert e.payload["source"] == "stock_analysis"
-    assert e.payload["prompt_version"].startswith("analysis-v3")
+    assert e.payload["prompt_version"].startswith("analysis-v4")
 
 
 def test_cached_analyze_does_not_record_duplicate_event(db_session):
@@ -104,5 +111,8 @@ def test_cache_miss_after_ttl_records_new_event(db_session):
     cached = db_session.query(AiAnalysis).filter_by(ticker="AAPL").one()
     cached.expires_at = datetime.now(UTC) - timedelta(hours=1)
     db_session.commit()
+    # Second analyze() call: router hits in-memory cache (no LLM call),
+    # but deep cache is expired → needs one more deep response.
+    svc.ai.complete.side_effect = [_AI_OUTPUT_WITH_VERDICT]
     svc.analyze("AAPL")
     assert db_session.query(EvaluationEvent).count() == 2

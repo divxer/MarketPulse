@@ -1,0 +1,31 @@
+{% if per_strategy %}
+<section class="mp-card">
+  <div class="mp-card__head">
+    <span class="mp-card__title">
+      <span class="material-symbols-outlined">leaderboard</span>按 Strategy
+    </span>
+    <span class="mp-card__sub">{{ filters.horizon }}d hit rate desc</span>
+  </div>
+  <ul class="mp-ai-track-strategy-list">
+    {% for s in per_strategy %}
+      <li>
+        <a href="?{{ filters_qs_no_strategy }}{% if filters_qs_no_strategy %}&{% endif %}strategy={{ s.name }}"
+           class="mp-strategy-link">{{ s.display_name }}</a>
+        <small class="muted">
+          rated for: {% for h in s.expected_horizons %}{{ h }}d{% if not loop.last %} / {% endif %}{% endfor %}
+        </small>
+        {% if s.n_total < 5 %}
+          <span class="mp-chip mp-chip--pending" style="margin-left:auto;">
+            积累中 ({{ s.n_total }})
+          </span>
+        {% else %}
+          <span class="mono tnum" style="margin-left:auto;">
+            {{ "{:.0f}%".format(s.hit_rate * 100) }}
+          </span>
+          <small class="muted">{{ s.n_hits }}/{{ s.n_total }}</small>
+        {% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}

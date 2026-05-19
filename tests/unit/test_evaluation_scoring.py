@@ -239,3 +239,89 @@ def test_get_recent_events_with_outcomes_limit_and_order(db_session):
     assert len(rows) == 3
     # Newest first: days_ago=1 → T1, days_ago=5 → T5, days_ago=10 → T10
     assert [r.ticker for r in rows] == ["T1", "T5", "T10"]
+
+
+def test_compute_hit_rate_filters_by_strategy(db_session):
+    from marketpulse.evaluation.scoring import compute_hit_rate
+
+    # 2 events: one tagged momentum_breakout, one tagged general
+    e1 = _ev(db_session, ticker="AAA", subtype="bullish")
+    e1.payload = {**e1.payload, "strategy": "momentum_breakout"}
+    _out(db_session, e1, excess=0.03)
+
+    e2 = _ev(db_session, ticker="BBB", subtype="bullish")
+    e2.payload = {**e2.payload, "strategy": "general"}
+    _out(db_session, e2, excess=0.03)
+    db_session.commit()
+
+    stats_mb = compute_hit_rate(db_session, horizon=5, strategy="momentum_breakout")
+    assert stats_mb.n_total == 1
+
+    stats_gen = compute_hit_rate(db_session, horizon=5, strategy="general")
+    assert stats_gen.n_total == 1
+
+
+def test_compute_hit_rate_strategy_none_preserves_phase_2_behavior(db_session):
+    """strategy=None (default) does NOT filter — includes events with no strategy field."""
+    from marketpulse.evaluation.scoring import compute_hit_rate
+
+    # One event with strategy, one without (Phase 2 style)
+    e1 = _ev(db_session, ticker="AAA")
+    e1.payload = {**e1.payload, "strategy": "momentum_breakout"}
+    _out(db_session, e1, excess=0.03)
+
+    e2 = _ev(db_session, ticker="BBB")  # no strategy in payload
+    _out(db_session, e2, excess=0.03)
+    db_session.commit()
+
+    stats = compute_hit_rate(db_session, horizon=5)  # strategy default None
+    assert stats.n_total == 2  # both counted
+
+
+def test_get_per_ticker_hit_rates_filters_by_strategy(db_session):
+    from marketpulse.evaluation.scoring import get_per_ticker_hit_rates
+
+    e1 = _ev(db_session, ticker="AAA", subtype="bullish")
+    e1.payload = {**e1.payload, "strategy": "momentum_breakout"}
+    _out(db_session, e1, excess=0.03)
+
+    e2 = _ev(db_session, ticker="BBB", subtype="bullish")
+    e2.payload = {**e2.payload, "strategy": "fundamental_value"}
+    _out(db_session, e2, excess=0.03)
+    db_session.commit()
+
+    rows = get_per_ticker_hit_rates(db_session, horizon=5, strategy="momentum_breakout")
+    assert [r.ticker for r in rows] == ["AAA"]
+
+
+def test_get_hit_rate_trend_filters_by_strategy(db_session):
+    from marketpulse.evaluation.scoring import get_hit_rate_trend
+
+    for d in range(30):
+        e = _ev(db_session, days_ago=d, subtype="bullish")
+        e.payload = {**e.payload, "strategy": "momentum_breakout"}
+        _out(db_session, e, excess=0.03)
+    db_session.commit()
+
+    trend_mb = get_hit_rate_trend(db_session, horizon=5, window_days=30,
+                                   rolling=10, strategy="momentum_breakout")
+    trend_other = get_hit_rate_trend(db_session, horizon=5, window_days=30,
+                                     rolling=10, strategy="fundamental_value")
+    assert any(d.n_total > 0 for d in trend_mb)
+    assert all(d.n_total == 0 for d in trend_other)
+
+
+def test_get_recent_events_with_outcomes_filters_by_strategy(db_session):
+    from marketpulse.evaluation.scoring import get_recent_events_with_outcomes
+
+    e1 = _ev(db_session, ticker="AAA")
+    e1.payload = {**e1.payload, "strategy": "momentum_breakout"}
+    _out(db_session, e1, excess=0.03)
+    e2 = _ev(db_session, ticker="BBB")
+    e2.payload = {**e2.payload, "strategy": "general"}
+    _out(db_session, e2, excess=0.03)
+    db_session.commit()
+
+    rows = get_recent_events_with_outcomes(db_session, horizon=5,
+                                            strategy="momentum_breakout")
+    assert [r.ticker for r in rows] == ["AAA"]
