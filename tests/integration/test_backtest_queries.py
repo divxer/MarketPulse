@@ -193,6 +193,7 @@ def test_run_all_backtests_handles_strategies_with_no_events(db_session):
 
 def test_run_all_backtests_applies_since_filter(db_session):
     from datetime import timedelta as _td
+
     from marketpulse.backtest.simulator import run_all_backtests
 
     _seed(db_session, ticker="OLD", strategy="momentum_breakout", days_ago=120)
