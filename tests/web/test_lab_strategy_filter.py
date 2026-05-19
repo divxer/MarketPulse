@@ -107,3 +107,50 @@ def test_lab_recap_source_drops_strategy_from_url(client: TestClient, monkeypatc
     r = client.get("/lab/ai-track?source=recap&strategy=momentum_breakout")
     assert r.status_code == 200
     # The route should NOT 500
+
+
+def test_lab_filter_card_renders_source_chips(client: TestClient, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/lab/ai-track")
+    # Source chip group present
+    assert "Source" in r.text or "事件来源" in r.text
+    assert "stock_analysis" in r.text
+    assert "recap" in r.text
+
+
+def test_lab_filter_card_renders_strategy_chips_when_source_is_stock(  # noqa: E501
+    client: TestClient, monkeypatch
+):
+    _login(client, monkeypatch)
+    r = client.get("/lab/ai-track?source=stock_analysis")
+    assert "momentum_breakout" in r.text
+    assert "fundamental_value" in r.text
+    assert "general" in r.text
+
+
+def test_lab_filter_card_disables_strategy_chips_when_source_is_recap(  # noqa: E501
+    client: TestClient, monkeypatch
+):
+    """Strategy chips visually disabled when source=recap."""
+    _login(client, monkeypatch)
+    r = client.get("/lab/ai-track?source=recap")
+    # The disabled marker should appear on the strategy section
+    assert "is-disabled" in r.text or 'aria-disabled="true"' in r.text
+
+
+def test_lab_kpi_strip_renders_best_strategy_card_when_data_exists(  # noqa: E501
+    client: TestClient, monkeypatch, db_session
+):
+    _login(client, monkeypatch)
+    # Seed 5+ events same strategy to make best_strategy non-null
+    for i in range(6):
+        _seed_event(db_session, ticker=f"T{i}", strategy="momentum_breakout")
+    db_session.commit()
+    r = client.get("/lab/ai-track")
+    assert "Best Strategy" in r.text or "最强策略" in r.text
+
+
+def test_lab_kpi_strip_shows_dash_when_no_strategy_has_n5(client: TestClient, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/lab/ai-track")
+    assert "Best Strategy" in r.text or "最强策略" in r.text

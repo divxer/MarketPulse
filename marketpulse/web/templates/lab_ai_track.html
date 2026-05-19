@@ -5,19 +5,25 @@
 
 {% include "partials/ai_track_hero.html" ignore missing %}
 
+<section class="mp-ai-track-kpi">
+  {% include "partials/ai_track_kpi_strip.html" ignore missing %}
+</section>
+
 {% if overall.n_total == 0 %}
-  <section style="padding: 0 48px;">
-    <div class="mp-card" style="padding:64px; text-align:center;">
-      <p class="muted" style="font-size:16px;">
-        AI 评估数据积累中,需要至少 7 个交易日才有可读数据。
-      </p>
-      <a href="/recaps" class="mp-btn mp-btn--ghost" style="margin-top:16px;">浏览历史复盘</a>
+  <section class="mp-ai-track-body">
+    <div class="mp-ai-track-main">
+      <div class="mp-card" style="padding:64px; text-align:center;">
+        <p class="muted" style="font-size:16px;">
+          AI 评估数据积累中,需要至少 7 个交易日才有可读数据。
+        </p>
+        <a href="/recaps" class="mp-btn mp-btn--ghost" style="margin-top:16px;">浏览历史复盘</a>
+      </div>
     </div>
+    <aside class="mp-ai-track-rail">
+      {% include "partials/ai_track_filter_card.html" ignore missing %}
+    </aside>
   </section>
 {% else %}
-  <section class="mp-ai-track-kpi">
-    {% include "partials/ai_track_kpi_strip.html" ignore missing %}
-  </section>
   <section class="mp-ai-track-body">
     <div class="mp-ai-track-main">
       {% include "partials/ai_track_trend_chart.html" ignore missing %}

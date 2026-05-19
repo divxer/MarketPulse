@@ -21,8 +21,26 @@
       <span class="mp-eyebrow">Source</span>
       <div class="mp-seg" style="margin-top:6px;">
         <button type="submit" name="source" value="" class="{% if not filters.source %}is-active{% endif %}">全部</button>
-        <button type="submit" name="source" value="stock_analysis" class="{% if filters.source == 'stock_analysis' %}is-active{% endif %}">stock</button>
+        <button type="submit" name="source" value="stock_analysis" class="{% if filters.source == 'stock_analysis' %}is-active{% endif %}">stock_analysis</button>
         <button type="submit" name="source" value="recap" class="{% if filters.source == 'recap' %}is-active{% endif %}">recap</button>
+      </div>
+    </div>
+
+    {# Strategy filter: only enabled when Source == stock_analysis (recap events have no strategy field) #}
+    {% set strategy_disabled = filters.source and filters.source != 'stock_analysis' %}
+    <div class="{% if strategy_disabled %}is-disabled{% endif %}"
+         {% if strategy_disabled %}aria-disabled="true" title="策略筛选仅适用于股票分析事件"{% endif %}>
+      <span class="mp-eyebrow">Strategy</span>
+      <div class="mp-seg" style="margin-top:6px;">
+        <button type="submit" name="strategy" value=""
+                {% if strategy_disabled %}disabled{% endif %}
+                class="{% if not filters.strategy %}is-active{% endif %}">全部</button>
+        {% for s in strategy_library %}
+          <button type="submit" name="strategy" value="{{ s.name }}"
+                  {% if strategy_disabled %}disabled{% endif %}
+                  class="{% if filters.strategy == s.name %}is-active{% endif %}"
+                  title="{{ s.description }}">{{ s.display_name }}</button>
+        {% endfor %}
       </div>
     </div>
 

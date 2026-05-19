@@ -1008,7 +1008,7 @@ hr.mp-hr {
 /* ════════ Phase 2: /lab/ai-track layout ════════ */
 .mp-ai-track-kpi {
   padding: 0 48px 16px;
-  display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px;
+  display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px;
 }
 .mp-ai-track-body {
   padding: 0 48px 32px;
@@ -1019,6 +1019,9 @@ hr.mp-hr {
 
 @media (max-width: 1640px) {
   .mp-ai-track-body { grid-template-columns: 1fr; }
+}
+@media (max-width: 1200px) {
+  .mp-ai-track-kpi { grid-template-columns: repeat(3, 1fr); }
 }
 @media (max-width: 900px) {
   .mp-ai-track-kpi { grid-template-columns: repeat(2, 1fr); }
@@ -1040,4 +1043,13 @@ hr.mp-hr {
   background: #ede9fe;
   color: #5b21b6;
   font-weight: 600;
+}
+
+/* ════════ Phase 3: disabled strategy chip group ════════ */
+.is-disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+.is-disabled button {
+  cursor: not-allowed;
 }
