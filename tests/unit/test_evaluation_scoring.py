@@ -208,3 +208,19 @@ def test_get_per_ticker_hit_rates_excludes_zero_n(db_session):
 
     rows = get_per_ticker_hit_rates(db_session, horizon=5)
     assert rows == []
+
+
+def test_get_hit_rate_trend_returns_window_days_entries(db_session):
+    from marketpulse.evaluation.scoring import get_hit_rate_trend
+
+    # 30 days of 1 event/day, all bullish-hits
+    for d in range(30):
+        e = _ev(db_session, days_ago=d, subtype="bullish")
+        _out(db_session, e, excess=0.03)
+    db_session.commit()
+
+    trend = get_hit_rate_trend(db_session, horizon=5, window_days=30, rolling=10)
+    # 30 days in window
+    assert len(trend) == 30
+    # Each rolling 10-day window contains all hits → hit_rate = 1.0
+    assert all(d.hit_rate == pytest.approx(1.0) for d in trend if d.n_total > 0)

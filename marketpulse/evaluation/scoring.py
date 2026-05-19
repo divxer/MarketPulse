@@ -16,7 +16,7 @@ Platform note: source filter uses SQLite json_extract — SQLite-only.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -199,3 +199,81 @@ def get_per_ticker_hit_rates(
     ]
     rows.sort(key=lambda r: r.hit_rate if r.hit_rate is not None else -1, reverse=True)
     return rows
+
+
+@dataclass(frozen=True)
+class DailyHitRate:
+    day: date
+    n_total: int
+    hit_rate: float | None
+
+
+def get_hit_rate_trend(
+    db: Session,
+    *,
+    horizon: int = 5,
+    ticker: str | None = None,
+    source: str | None = None,
+    subtype: str | None = None,
+    since: date | None = None,
+    window_days: int = 90,
+    rolling: int = 30,
+) -> list[DailyHitRate]:
+    """Daily rolling hit rate.
+
+    Returns one entry per day in the window (oldest first). For each day,
+    the hit_rate is computed over events whose event_time falls in the
+    `rolling`-day window ending on that day.
+    """
+    end = date.today()
+    start = since or (end - timedelta(days=window_days - 1))
+
+    stmt = (
+        select(
+            EvaluationEvent.event_time,
+            EvaluationEvent.subtype,
+            EvaluationOutcome.excess_return,
+        )
+        .join(EvaluationOutcome, EvaluationOutcome.event_id == EvaluationEvent.id)
+        .where(EvaluationEvent.event_type == "ai_analysis")
+        .where(EvaluationOutcome.horizon_trading_days == horizon)
+        .where(
+            EvaluationEvent.event_time >= datetime.combine(
+                start - timedelta(days=rolling),
+                datetime.min.time(), tzinfo=UTC,
+            ),
+        )
+    )
+    if subtype is not None:
+        stmt = stmt.where(EvaluationEvent.subtype == subtype)
+    if ticker is not None:
+        stmt = stmt.where(EvaluationEvent.ticker == ticker)
+    if source is not None:
+        stmt = stmt.where(
+            func.json_extract(EvaluationEvent.payload, "$.source") == source,
+        )
+
+    raw_rows = db.execute(stmt).all()
+    # Bucket events by date
+    by_day: dict[date, list[tuple[str, float]]] = {}
+    for et, sub, excess in raw_rows:
+        d = et.date() if hasattr(et, "date") else et
+        by_day.setdefault(d, []).append((sub, excess))
+
+    out: list[DailyHitRate] = []
+    cur = start
+    while cur <= end:
+        window_start = cur - timedelta(days=rolling - 1)
+        n = 0
+        h = 0
+        d2 = window_start
+        while d2 <= cur:
+            for sub, excess in by_day.get(d2, []):
+                n += 1
+                if _is_hit(sub, excess):
+                    h += 1
+            d2 += timedelta(days=1)
+        rate = (h / n) if n > 0 else None
+        out.append(DailyHitRate(day=cur, n_total=n, hit_rate=rate))
+        cur += timedelta(days=1)
+    return out
