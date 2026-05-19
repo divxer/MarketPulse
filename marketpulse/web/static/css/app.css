@@ -988,3 +988,19 @@ hr.mp-hr {
 .mp-chip--success            { background:#d1fae5; color:#065f46; }
 .mp-chip--pending            { background:#fef3c7; color:#92400e; }
 .mp-chip--failed             { background:#fee2e2; color:#991b1b; }
+
+/* ════════ Phase 2: AI hit-rate badge ════════ */
+.mp-ai-badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 22px; padding: 0 8px;
+  font: 600 11px/1 var(--ns-font-mono);
+  border-radius: 2px; text-decoration: none;
+  transition: filter 200ms;
+}
+.mp-ai-badge .material-symbols-outlined { font-size: 14px; }
+.mp-ai-badge small { font-size: 10px; opacity: 0.7; margin-left: 2px; }
+.mp-ai-badge:hover { filter: brightness(0.95); }
+.mp-ai-badge--good     { background: #d1fae5; color: #065f46; }
+.mp-ai-badge--neutral  { background: var(--ns-surface-container); color: var(--ns-on-surface-variant); }
+.mp-ai-badge--bad      { background: #fee2e2; color: #991b1b; }
+.mp-ai-badge--pending  { background: #fef3c7; color: #92400e; }

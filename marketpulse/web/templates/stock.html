@@ -35,6 +35,23 @@
         <span class="material-symbols-outlined">auto_awesome</span>
         AI 分析
       </button>
+      {% if ai_badge_color %}
+        {% if ai_badge_color == "pending" %}
+          <span class="mp-ai-badge mp-ai-badge--pending"
+                title="N={{ ai_n_total }} 个 verdict, 5d horizon 数据积累中">
+            积累中
+            <small>({{ ai_n_total }})</small>
+          </span>
+        {% else %}
+          <a href="/lab/ai-track?ticker={{ ticker }}"
+             class="mp-ai-badge mp-ai-badge--{{ ai_badge_color }}"
+             title="过去 90 天 {{ ticker }} 的 5d horizon hit rate">
+            <span class="material-symbols-outlined">military_tech</span>
+            {{ "{:.0f}%".format(ai_hit_rate * 100) }}
+            <small>({{ ai_n_hits }}/{{ ai_n_total }})</small>
+          </a>
+        {% endif %}
+      {% endif %}
     </div>
   </header>
   <div class="mp-rule"></div>
