@@ -1116,3 +1116,11 @@ hr.mp-hr {
 .mp-chart-legend__swatch {
   width: 14px; height: 6px; border-radius: 1px;
 }
+
+.mp-backtest-table { width: 100%; min-width: 480px; font-size: 12px; }
+.mp-backtest-table th,
+.mp-backtest-table td { padding: 8px 10px; }
+.mp-backtest-table th { text-align: left; color: var(--ns-on-surface-variant); }
+.mp-backtest-table td.num,
+.mp-backtest-table th.num { text-align: right; }
+.mp-backtest-table tr:hover { background: var(--ns-surface-container); }

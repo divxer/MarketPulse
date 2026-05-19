@@ -127,3 +127,64 @@ def test_lab_backtest_renders_drawdown_svg(
     db_session.commit()
     r = client.get("/lab/backtest")
     assert "Drawdown" in r.text or "回撤" in r.text
+
+
+def test_lab_backtest_filter_card_renders_horizon_chips(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/lab/backtest")
+    assert "1d" in r.text
+    assert "5d" in r.text
+    assert "20d" in r.text
+    assert "60d" in r.text
+
+
+def test_lab_backtest_strategy_table_renders_all_strategies(
+    client, monkeypatch, db_session,
+):
+    _login(client, monkeypatch)
+    for s in ("momentum_breakout", "fundamental_value", "general"):
+        for i in range(6):
+            _seed_event(db_session, ticker=f"{s[0]}{i}", strategy=s)
+    db_session.commit()
+    r = client.get("/lab/backtest")
+    for name in ("动量突破", "价值分析", "通用分析", "事件驱动",
+                  "行业轮动", "超卖反弹"):
+        assert name in r.text
+
+
+def test_lab_backtest_strategy_table_shows_skipped_chip(
+    client, monkeypatch, db_session,
+):
+    """Strategy with capacity-skipped signals shows a chip in the table."""
+    _login(client, monkeypatch)
+    same_day = datetime.now(UTC) - timedelta(days=10)
+    for i in range(15):
+        e = EvaluationEvent(
+            event_type="ai_analysis", subtype="bullish", ticker=f"S{i}",
+            event_time=same_day,
+            event_price=100.0,
+            payload={"source": "stock_analysis", "strategy": "momentum_breakout",
+                     "strategy_version": "v1", "prompt_version": "analysis-v4"},
+        )
+        db_session.add(e)
+        db_session.flush()
+        db_session.add(EvaluationOutcome(
+            event_id=e.id, horizon_trading_days=5,
+            event_price=100.0, horizon_price=103.0,
+            horizon_date=(same_day - timedelta(days=5)).date(),
+            forward_return=0.03, benchmark_ticker="SPY",
+            benchmark_forward_return=0.01, excess_return=0.02,
+        ))
+    db_session.commit()
+    r = client.get("/lab/backtest")
+    assert "skipped" in r.text.lower() or "跳过" in r.text
+
+
+def test_lab_backtest_spy_baseline_row_marked(
+    client, monkeypatch, db_session,
+):
+    _login(client, monkeypatch)
+    _seed_event(db_session, ticker="X", strategy="momentum_breakout")
+    db_session.commit()
+    r = client.get("/lab/backtest")
+    assert "SPY 基准" in r.text or "基准" in r.text
