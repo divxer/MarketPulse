@@ -121,3 +121,31 @@ def test_analyze_different_strategies_cache_independently(db_session):
     rows = db_session.query(AiAnalysis).order_by(AiAnalysis.id).all()
     assert len(rows) == 2
     assert {r.strategy for r in rows} == {"momentum_breakout", "oversold_reversal"}
+
+
+def test_analyze_strips_verdicts_json_from_stored_markdown(db_session):
+    """Phase 3 UX: response_markdown must NOT contain the VERDICTS_JSON line —
+    that leaked the raw JSON into the rendered UI in Phase 2.
+
+    The verdict is still recorded in EvaluationEvent.payload (verified by the
+    event count + subtype assertions in sibling tests).
+    """
+    svc = _build_service(
+        db_session,
+        router_response='ROUTER_JSON: {"strategy": "general", "reason": "x"}',
+        deep_response=_DEEP_RESPONSE_BULLISH,
+    )
+    result = svc.analyze("AAPL")
+    # Stored AiAnalysis row uses stripped markdown
+    row = db_session.query(AiAnalysis).filter_by(ticker="AAPL").one()
+    assert "VERDICTS_JSON" not in row.response_markdown, (
+        f"VERDICTS_JSON should be stripped from stored markdown, "
+        f"got: {row.response_markdown!r}"
+    )
+    # AnalysisResult returned to the route also uses stripped markdown
+    assert "VERDICTS_JSON" not in result.response_markdown
+    # The actual body content survives intact
+    assert "突破质量" in row.response_markdown
+    # And the event still has the verdict
+    e = db_session.query(EvaluationEvent).one()
+    assert e.subtype == AIVerdict.BULLISH

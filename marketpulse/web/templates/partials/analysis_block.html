@@ -3,6 +3,12 @@
     {% if result.cached %}缓存结果{% else %}实时生成{% endif %} •
     模型 {{ result.model }} • 提示词版本 {{ result.prompt_version }}
   </small>
+  {% if strategy_display %}
+  <div class="mb-3" style="display:flex; align-items:center; gap:8px;">
+    <span class="mp-chip mp-chip--strategy">{{ strategy_display }}</span>
+    <span class="muted text-xs">策略 · 由 router 自动选择</span>
+  </div>
+  {% endif %}
   <div class="ai-markdown text-slate-800 leading-relaxed">
     {{ result.response_markdown | markdown }}
   </div>

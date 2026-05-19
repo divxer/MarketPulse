@@ -2,14 +2,13 @@ from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
-from sqlalchemy import func, select
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from marketpulse.ai import prompts
 from marketpulse.ai.service import AiService
 from marketpulse.data.service import DataService
 from marketpulse.data.yfinance_client import YFinanceClient
-from marketpulse.db.models import AiAnalysis, Holding, Trade, WatchlistItem
+from marketpulse.db.models import Holding, Trade, WatchlistItem
 from marketpulse.evaluation import scoring
 from marketpulse.logging import get_logger
 from marketpulse.recap.signals import (
@@ -136,21 +135,6 @@ def stock_page(
     )
     ai_badge_color = _ai_badge_color(ai_stats)
 
-    # Phase 3: surface the strategy used by the most recent cached analysis (if any).
-    latest_analysis = db.execute(
-        select(AiAnalysis)
-        .where(AiAnalysis.ticker == ticker)
-        .where(AiAnalysis.prompt_version == prompts.ANALYSIS_PROMPT_VERSION)
-        .order_by(AiAnalysis.requested_at.desc())
-        .limit(1)
-    ).scalars().first()
-
-    ai_strategy_display: str | None = None
-    if latest_analysis and latest_analysis.strategy:
-        strategies = load_strategies()
-        s = strategies.get(latest_analysis.strategy)
-        ai_strategy_display = s.display_name if s else latest_analysis.strategy
-
     return templates.TemplateResponse(
         request, "stock.html",
         {
@@ -166,7 +150,6 @@ def stock_page(
             "ai_n_hits": ai_stats.n_hits,
             "ai_n_total": ai_stats.n_total,
             "ai_badge_color": ai_badge_color,
-            "ai_strategy_display": ai_strategy_display,
         },
     )
 
@@ -368,7 +351,12 @@ def stock_analyze(
             {"ticker": ticker, "error": str(exc)},
             status_code=200,
         )
+    # Resolve strategy → display_name for the chip in the analysis card.
+    strategy_display: str | None = None
+    if result.strategy:
+        s = load_strategies().get(result.strategy)
+        strategy_display = s.display_name if s else result.strategy
     return templates.TemplateResponse(
         request, "partials/analysis_block.html",
-        {"ticker": ticker, "result": result},
+        {"ticker": ticker, "result": result, "strategy_display": strategy_display},
     )
