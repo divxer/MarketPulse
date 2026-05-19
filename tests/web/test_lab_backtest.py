@@ -102,3 +102,28 @@ def test_lab_backtest_kpi_shows_dash_when_no_qualifying_strategy(
     r = client.get("/lab/backtest")
     assert "Best Strategy" in r.text
     assert "—" in r.text or "n&lt;5" in r.text or "n<5" in r.text
+
+
+def test_lab_backtest_renders_equity_curve_svg(
+    client, monkeypatch, db_session,
+):
+    _login(client, monkeypatch)
+    for i in range(6):
+        _seed_event(db_session, ticker=f"T{i}", strategy="momentum_breakout")
+    db_session.commit()
+    r = client.get("/lab/backtest")
+    assert "<svg" in r.text
+    assert "<polyline" in r.text
+    assert r.text.count("<polyline") >= 2
+
+
+def test_lab_backtest_renders_drawdown_svg(
+    client, monkeypatch, db_session,
+):
+    _login(client, monkeypatch)
+    for i in range(6):
+        _seed_event(db_session, ticker=f"T{i}", strategy="momentum_breakout",
+                    excess=-0.02)
+    db_session.commit()
+    r = client.get("/lab/backtest")
+    assert "Drawdown" in r.text or "回撤" in r.text

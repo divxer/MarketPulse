@@ -1104,3 +1104,15 @@ hr.mp-hr {
 @media (max-width: 900px) {
   .mp-backtest-kpi { grid-template-columns: repeat(2, 1fr); }
 }
+
+.mp-chart-legend {
+  display: flex; flex-wrap: wrap; gap: 12px 20px;
+  padding: 12px 16px 4px;
+  font-size: 11px; color: var(--ns-on-surface-variant);
+}
+.mp-chart-legend__item {
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.mp-chart-legend__swatch {
+  width: 14px; height: 6px; border-radius: 1px;
+}

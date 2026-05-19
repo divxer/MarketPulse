@@ -19,7 +19,8 @@
 
 <section class="mp-backtest-body">
   <div class="mp-backtest-main">
-    {# Task 12 fills in equity + drawdown charts #}
+    {% include "partials/backtest_equity_chart.html" ignore missing %}
+    {% include "partials/backtest_drawdown_chart.html" ignore missing %}
   </div>
   <aside class="mp-backtest-rail">
     {# Task 13 fills in filter card + strategy table #}

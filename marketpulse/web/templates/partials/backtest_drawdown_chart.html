@@ -1,0 +1,28 @@
+<section class="mp-card">
+  <div class="mp-card__head">
+    <span class="mp-card__title">
+      <span class="material-symbols-outlined">trending_down</span>Drawdown(回撤)
+    </span>
+    <span class="mp-card__sub">从历史峰值的回撤百分比 · 0 在顶,负向下</span>
+  </div>
+  <div class="mp-card__body">
+    {% if chart_data.drawdown_curves %}
+    <svg viewBox="0 0 800 140" width="100%" height="140">
+      <line x1="0" y1="0" x2="800" y2="0"
+            stroke="var(--ns-outline-variant)" />
+      {% for c in chart_data.drawdown_curves %}
+        <polyline
+          points="{{ c.points_str }}"
+          fill="none"
+          stroke="{{ c.color }}"
+          stroke-width="1.5"
+          {% if c.is_spy %}stroke-dasharray="4 4"{% endif %}>
+          <title>{{ c.display_name }}</title>
+        </polyline>
+      {% endfor %}
+    </svg>
+    {% else %}
+      <p class="muted" style="text-align:center; padding:24px;">暂无数据</p>
+    {% endif %}
+  </div>
+</section>

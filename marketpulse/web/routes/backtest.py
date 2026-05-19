@@ -81,6 +81,8 @@ def lab_backtest(
         if strategies else 0.0
     )
 
+    chart_data = _build_chart_data(strategies + ([spy] if spy else []))
+
     filters = {"horizon": horizon, "since_days": since_days}
 
     return templates.TemplateResponse(
@@ -93,7 +95,100 @@ def lab_backtest(
             "best_cum": best_cum,
             "worst_dd": worst_dd,
             "avg_excess": avg_excess,
+            "chart_data": chart_data,
             "filters": filters,
             "filters_qs": _qs_from_filters(filters),
         },
     )
+
+
+def _build_chart_data(
+    results: list,
+) -> dict:
+    """Compose polyline points + drawdown points for all results.
+
+    Returns a dict with:
+      - equity_curves: list of {name, display_name, color, points_str, is_spy}
+      - drawdown_curves: same shape, drawdown values
+      - x_axis: list of (frac, label) tuples for axis labels
+    """
+    all_dates = sorted({d for r in results for d, _ in r.daily_equity_curve})
+    if not all_dates:
+        return {"equity_curves": [], "drawdown_curves": [], "x_axis": []}
+
+    date_to_idx = {d: i for i, d in enumerate(all_dates)}
+    n = len(all_dates)
+    width = 800.0
+    eq_height = 280.0
+    dd_height = 140.0
+
+    all_vals = [v for r in results for _, v in r.daily_equity_curve]
+    eq_min = min(all_vals) if all_vals else 0
+    eq_max = max(all_vals) if all_vals else 1
+    eq_range = max(eq_max - eq_min, 1e-6)
+
+    palette = [
+        "#2563eb", "#16a34a", "#dc2626", "#ea580c",
+        "#9333ea", "#0891b2", "#475569",
+    ]
+
+    equity_curves = []
+    drawdown_curves = []
+    for i, r in enumerate(results):
+        color = palette[i % len(palette)]
+        is_spy = r.strategy == "__spy_buyhold__"
+        if is_spy:
+            color = "#475569"
+
+        pts = []
+        for d, v in r.daily_equity_curve:
+            x = date_to_idx[d] / max(n - 1, 1) * width
+            y = eq_height - ((v - eq_min) / eq_range) * eq_height
+            pts.append(f"{x:.1f},{y:.1f}")
+
+        if r.daily_equity_curve:
+            values = [v for _, v in r.daily_equity_curve]
+            peak = values[0]
+            dd_pts = []
+            for j, v in enumerate(values):
+                peak = max(peak, v)
+                dd = (v - peak) / peak if peak > 0 else 0.0
+                y = (-dd) * dd_height * 2
+                y = min(y, dd_height)
+                d_j, _ = r.daily_equity_curve[j]
+                x = date_to_idx[d_j] / max(n - 1, 1) * width
+                dd_pts.append(f"{x:.1f},{y:.1f}")
+        else:
+            dd_pts = []
+
+        equity_curves.append({
+            "name": r.strategy,
+            "display_name": r.display_name,
+            "color": color,
+            "is_spy": is_spy,
+            "points_str": " ".join(pts),
+        })
+        drawdown_curves.append({
+            "name": r.strategy,
+            "display_name": r.display_name,
+            "color": color,
+            "is_spy": is_spy,
+            "points_str": " ".join(dd_pts),
+        })
+
+    label_count = min(5, n)
+    if n <= 1:
+        x_axis = [(0.0, str(all_dates[0]))] if all_dates else []
+    else:
+        x_axis = [
+            (i / (label_count - 1), str(all_dates[round(i / (label_count - 1) * (n - 1))]))
+            for i in range(label_count)
+        ]
+
+    return {
+        "equity_curves": equity_curves,
+        "drawdown_curves": drawdown_curves,
+        "x_axis": x_axis,
+        "eq_min": eq_min,
+        "eq_max": eq_max,
+    }
