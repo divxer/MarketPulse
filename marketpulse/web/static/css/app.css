@@ -1038,11 +1038,12 @@ hr.mp-hr {
 }
 .mp-ai-track-ticker-list li:last-child { border-bottom: 0; }
 
-/* ════════ Phase 3: strategy chip ════════ */
+/* ════════ Phase 3: strategy chip (uses NineScrolls neutral tokens) ════════ */
 .mp-chip--strategy {
-  background: #ede9fe;
-  color: #5b21b6;
+  background: var(--ns-surface-container);
+  color: var(--ns-on-surface);
   font-weight: 600;
+  letter-spacing: 0.01em;
 }
 
 /* ════════ Phase 3: disabled strategy chip group ════════ */
