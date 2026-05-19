@@ -130,7 +130,7 @@ def simulate_strategy_portfolio(
 2. **Same-ticker positions stack** — 4 simultaneous AAPL longs from 4 consecutive bullish events all hold concurrently. v0 simplification; Phase 5 may add `max_concurrent_per_ticker` constraint.
 3. **No fees / no slippage** — personal broker 0-commission baseline.
 4. **No cash interest** — cash sits at 0% yield.
-5. **Trading-day timeline** — calendar days skip weekends + US market holidays. Use `pandas_market_calendars` or roll our own from `EvaluationOutcome.horizon_date` (which already respects trading-day math).
+5. **Trading-day timeline** — calendar days skip weekends + US market holidays. Approach: iterate the **union of distinct dates** appearing in `event_time.date()` + `horizon_date` across all relevant outcomes. This implicitly respects the trading-day grid because Phase 1's `forward_return.py` already computes horizons via the ticker's yfinance bar index (which skips non-trading days). No new calendar dependency required. (If gaps emerge between events on illiquid tickers, plan can switch to `pandas_market_calendars` — note Phase 1 does NOT use it; that "consistency" rationale is removed from this spec.)
 
 ## SPY Baseline
 
@@ -143,17 +143,35 @@ def simulate_spy_buyhold(
     initial_capital: float = 10_000.0,
 ) -> StrategyBacktestResult:
     """
-    Buy SPY at first_event_time using initial_capital, hold to last_horizon_date,
-    mark-to-market daily.
+    "Buy SPY at first_event_time, hold to last_horizon_date" baseline.
 
-    NOTE: this benchmark is anchored to the SAME timeline as the strategies
-    being compared. If a strategy's events span 2025-12-01 → 2026-05-15,
-    the SPY benchmark runs the same window — NOT a hardcoded "from start of
-    test period" which would create a lookback bias.
+    Data source: EvaluationOutcome.benchmark_forward_return is the SPY return
+    over each event's horizon (Phase 1 already populated this). We build the
+    SPY equity curve by **linear interpolation on each outcome's horizon
+    window**, using the SAME `mtm_model = "linear_interpolation_v0"`
+    convention as strategies. This keeps SPY and strategies methodologically
+    consistent — both are smoothed approximations of the true daily path.
+
+    Algorithm:
+      1. Collect distinct (event_time, horizon_date, benchmark_forward_return)
+         tuples from all EvaluationOutcomes in the time window.
+      2. For each trading day d from first_event_time to last_horizon_date:
+         a. Find SPY's effective return-to-date by interpolating across the
+            overlapping outcome windows.
+         b. equity[d] = initial_capital * (1 + cumulative_spy_return_to_d)
+      3. NOTE: this is an APPROXIMATION. Real daily SPY bars from yfinance
+         would be more accurate (Phase 4.5 upgrade).
+
+    Why anchored to first_event_time: avoids lookback bias. If the strategy's
+    events span 2025-12-01 → 2026-05-15, SPY runs that same window — NOT a
+    hardcoded "from start of Phase 2 history" which would unfairly compare
+    different time slices.
     """
 ```
 
 Result is rendered as the 7th line (dotted, neutral gray) on the equity curve, and shown in the leaderboard table marked as **baseline** (not ranked).
+
+**Phase 4.5 upgrade path:** swap the interpolation logic for real SPY daily bars (fetched via `DataService.get_history("SPY", ...)`) — only the helper changes, the public `simulate_spy_buyhold()` signature stays.
 
 ## `StrategyBacktestResult`
 
@@ -169,7 +187,10 @@ class StrategyBacktestResult:
     # Trade counts
     n_trades: int                          # bullish events traded
     n_capacity_skipped: int                # signals dropped due to capital cap
-    n_pending: int                         # events with horizon not yet matured
+    # NOTE: "n_pending" (events whose horizon hasn't matured) is NOT a field
+    # of this result. The simulator filters on outcome-present rows only.
+    # The /lab UI shows pending-events count separately via the existing
+    # Phase 2 EvaluationEvent counter (no need to duplicate in backtest).
 
     # Performance
     cumulative_return: float               # final_equity / initial_capital − 1
@@ -184,7 +205,11 @@ class StrategyBacktestResult:
     avg_win_pct: float
     avg_loss_pct: float
 
-    # Equity curve for plotting
+    # Equity curve for plotting — DOWNSAMPLED to ~120 points before being
+    # returned. For windows < 120 trading days, this is the raw daily series;
+    # for longer windows, evenly-spaced samples (keeping endpoints + key
+    # turning points). Routes pass this directly to templates — no further
+    # truncation needed.
     daily_equity_curve: list[tuple[date, float]]
 
     # Benchmark comparison
@@ -201,6 +226,8 @@ class StrategyBacktestResult:
 ## Capital Constraint
 
 - `max_capital_in_use = $10_000` (hardcoded v0)
+- **Unit:** sum of `position_size` over **open positions** (not their MTM est_position_value). So if 10 positions are open each at $1,000 deployed-capital, `capital_in_use = $10,000` regardless of whether they've appreciated to $1500 each.
+  - Rationale: this is "how much cash I committed", not "how much risk I'm carrying". Risk-based caps come in Phase 5.
 - If a new bullish event arrives and `capital_in_use + position_size > max`, the signal is **dropped**:
   - logged via structlog `log.info("backtest_signal_capacity_skipped", strategy=..., ticker=..., date=...)`
   - counted in `n_capacity_skipped` on the result
@@ -354,20 +381,18 @@ URL: `/lab/backtest?horizon=5&since_days=90`
 
 ### Cross-link with `/lab/ai-track`
 
-- Add a tab strip at the top of `/lab/ai-track` and `/lab/backtest`:
-  ```
-  Hit Rate (↗ /lab/ai-track) | Backtest (↗ /lab/backtest)
-  ```
-- `/lab/ai-track` strategy leaderboard rows get a "→ Backtest" arrow link to `/lab/backtest?strategy=<name>`
-  (Note: backtest doesn't filter by single strategy in v0 — clicking just navigates to /lab/backtest; same filters preserved)
-- Filter state is shared via query string
+**v0:** plain navigation, no tab strip. Top of `/lab/backtest` shows a small back-link "← Hit Rate"; top of `/lab/ai-track` is **NOT modified** (avoids Phase 3 scope creep).
+
+The page-to-page navigation is via the existing nav bar entries (Phase 3 already has `/lab/ai-track` in the nav). Plan adds `/lab/backtest` as another entry.
+
+**Phase 4.5 candidate:** unified tab strip across both lab pages with shared filter state via query string. Defers because it requires modifying the Phase 3 page header.
 
 ## Edge Cases
 
 | Scenario | Handling |
 |---|---|
 | Strategy has 0 bullish events in window | Equity curve flat at initial_capital; n_trades = 0; metrics = "—" |
-| All events have unmatured outcomes | n_pending counted; n_trades = 0; show "等待 outcome" hint |
+| All events have unmatured outcomes | n_trades = 0; equity curve = [(today, initial_capital)]; UI shows "等待 outcome 成熟" hint (queries EvaluationEvent directly for the count, not via result) |
 | Event with no SPY benchmark return in outcome | Use 0 as benchmark_return fallback; log warning |
 | `since_days=all` with thousands of events | Computation should stay under 1s (pure Python loops over <10k events) |
 | Strategy YAML deleted but events still in DB | Treat as orphan; render with raw strategy name, no display_name |
@@ -428,7 +453,7 @@ These are the brainstorming outcomes. Implementation should NOT revisit without 
 - Cross-link with `/lab/ai-track` specified at tab + table-link granularity ✓
 
 **One open ambiguity** (intentional, for plan to resolve):
-- **Trading calendar source.** Spec mentions `pandas_market_calendars` OR rolling our own. Plan should pick one. Recommendation: use `pandas_market_calendars` because `EvaluationOutcome.horizon_date` was already computed using it (Phase 1 used the lib) — consistency over rolling our own.
+- **Trading calendar source.** Default: derive the trading-day grid from the union of `event_time.date()` + `horizon_date` values already in the DB (Phase 1 computed these via yfinance bar-index, no separate calendar library). Plan can swap in `pandas_market_calendars` if gaps emerge on illiquid tickers; not required for v0.
 
 ## Implementation Pointers
 
