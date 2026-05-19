@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import markdown as _markdown
@@ -71,7 +72,21 @@ def create_app() -> FastAPI:
     # Honor user-configured TTL for the in-memory quote cache.
     from marketpulse.data.quote_cache import QUOTE_CACHE
     QUOTE_CACHE.configure(settings.quote_cache_ttl_seconds)
-    app = FastAPI(title="MarketPulse")
+
+    from marketpulse.scheduler.jobs import build_scheduler
+    scheduler = build_scheduler()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):  # noqa: ARG001
+        if not scheduler.running:
+            scheduler.start()
+        try:
+            yield
+        finally:
+            if scheduler.running:
+                scheduler.shutdown(wait=False)
+
+    app = FastAPI(title="MarketPulse", lifespan=lifespan)
 
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -114,19 +129,6 @@ def create_app() -> FastAPI:
                 return JSONResponse({"detail": "unauthorized"}, status_code=401)
             return RedirectResponse(url="/login", status_code=303)
         return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
-
-    from marketpulse.scheduler.jobs import build_scheduler
-    scheduler = build_scheduler()
-
-    @app.on_event("startup")
-    def _start_scheduler() -> None:
-        if not scheduler.running:
-            scheduler.start()
-
-    @app.on_event("shutdown")
-    def _stop_scheduler() -> None:
-        if scheduler.running:
-            scheduler.shutdown(wait=False)
 
     return app
 
