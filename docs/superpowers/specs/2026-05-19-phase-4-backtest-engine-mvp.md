@@ -100,22 +100,36 @@ def simulate_strategy_portfolio(
       - outcome.horizon_trading_days == horizon
       - (since is None) OR (event.event_time >= since)
       - outcome.horizon_price is not None
+      - event.event_time.date() < outcome.horizon_date  # causal — defends
+        against any DB anomaly where a horizon would resolve before the
+        event was recorded. Should always be true by Phase 1 construction;
+        we still assert it explicitly to make the temporal invariant
+        unbreakable.
 
     Build a daily equity curve from min(event_time) to max(horizon_date).
-    For each trading day d:
-      a) OPEN: new bullish events with event_time.date() == d
+    For each trading day d, in this ORDER (matters — avoids subtle
+    same-day look-ahead bias):
+      a) CLOSE: open positions whose horizon_date == d
+         - realized PnL = position_size * (horizon_price / entry_price - 1)
+         - cash += position_size + realized_pnl
+         - This MUST happen before OPEN so freed capital is available to
+           new same-day signals AND new positions don't participate in
+           today's MTM (which would be a same-day forward bias).
+      b) OPEN: new bullish events with event_time.date() == d
          - if (capital_in_use + position_size) > max_capital_in_use:
              skip, increment n_capacity_skipped
          - else: open position(ticker, entry_price=event_price,
                                entry_date=d, horizon_date=outcome.horizon_date)
-      b) CLOSE: open positions whose horizon_date == d
-         - realized PnL = position_size * (horizon_price / entry_price - 1)
-         - cash += position_size + realized_pnl
-      c) MTM open positions (linear interpolation):
+         - Newly opened positions are NOT marked-to-market on day d (their
+           est_position_value equals position_size at entry by definition).
+      c) MTM open positions opened BEFORE today (linear interpolation):
          est_price(d) = entry_price + (horizon_price - entry_price)
                         * trading_days_elapsed / total_horizon_days
          est_position_value = position_size * (est_price / entry_price)
-      d) equity[d] = cash + Σ est_position_value
+      d) RECORD: equity[d] = cash + Σ position_values
+                          (where freshly-opened positions contribute their
+                          entry value, older positions contribute their
+                          MTM-interpolated value)
 
     Compute metrics on the daily return series:
       daily_returns = equity.pct_change()
@@ -166,6 +180,14 @@ def simulate_spy_buyhold(
     events span 2025-12-01 → 2026-05-15, SPY runs that same window — NOT a
     hardcoded "from start of Phase 2 history" which would unfairly compare
     different time slices.
+
+    IMPORTANT semantic note: this makes the SPY baseline a **window-aligned**
+    benchmark, NOT a full-period universal benchmark. Two backtest runs over
+    different time windows produce two different SPY equity curves — they are
+    NOT directly comparable as cross-run "vs SPY" deltas. Within a single
+    backtest run, all 6 strategies share the same SPY window so cross-strategy
+    comparison stays valid. Cross-run comparison requires care; document in
+    UI tooltips.
     """
 ```
 
@@ -220,19 +242,25 @@ class StrategyBacktestResult:
     # data without schema migration. v0 populates None; Phase 5 will compute
     # values for new runs.
     strategy_exposure: float | None = None         # avg gross exposure during run
-    capital_request_signal: float | None = None    # bid for shared capital pool
+    capital_bid_score: float | None = None         # priority weight when competing
+                                                    # for shared capital pool
+                                                    # (was capital_request_signal —
+                                                    # renamed: "signal" overloaded
+                                                    # with trading signal)
 ```
 
 ## Capital Constraint
 
+**Terminology:** this is a **hard cap with skip-based enforcement** — not a "soft cap". v0 has no rotation, no priority queue, no overflow buffer. The earlier "soft cap" phrasing was misleading.
+
 - `max_capital_in_use = $10_000` (hardcoded v0)
 - **Unit:** sum of `position_size` over **open positions** (not their MTM est_position_value). So if 10 positions are open each at $1,000 deployed-capital, `capital_in_use = $10,000` regardless of whether they've appreciated to $1500 each.
   - Rationale: this is "how much cash I committed", not "how much risk I'm carrying". Risk-based caps come in Phase 5.
-- If a new bullish event arrives and `capital_in_use + position_size > max`, the signal is **dropped**:
+- If a new bullish event arrives and `capital_in_use + position_size > max`, the signal is **dropped (hard rejection)**:
   - logged via structlog `log.info("backtest_signal_capacity_skipped", strategy=..., ticker=..., date=...)`
   - counted in `n_capacity_skipped` on the result
 - v0: NO rotation / NO priority queue / NO reservation. First-come-first-served by event_time order.
-- Phase 5 will introduce: signal strength prioritization, rotation (close oldest position to make room for stronger new signal), or true shared-capital allocator.
+- Phase 5 will introduce: signal strength prioritization, rotation (close oldest position to make room for stronger new signal), or true shared-capital allocator. Those mechanics may justify a "soft cap" naming there — but v0 is hard.
 
 **Why this matters:** without a cap, high-signal-density strategies (e.g., a momentum strategy that fires daily) would appear to dwarf low-density strategies (e.g., fundamental_value that fires weekly) purely because of trade frequency, not alpha quality.
 
@@ -418,17 +446,19 @@ These are the brainstorming outcomes. Implementation should NOT revisit without 
 1. **Long-only model.** Bearish / neutral signals are ignored, NOT used to open shorts.
 2. **6 independent portfolios + SPY baseline = 7 lines.** No shared capital pool, no cross-strategy correlation handling.
 3. **Linear interpolation MTM.** Real daily bars deferred to Phase 4.5.
-4. **Capital cap = $10,000 per strategy, hardcoded.** Phase 5 will make this configurable.
+4. **Capital cap = $10,000 per strategy, hardcoded — HARD cap with skip-based enforcement.** Not a soft cap; over-budget signals are dropped. Phase 5 may introduce soft-cap mechanics with rotation.
 5. **Position size = $1,000 fixed.** No volatility weighting, no signal-strength sizing.
 6. **Same-ticker positions stack.** No `max_concurrent_per_ticker` constraint.
-7. **SPY benchmark anchored to `first_event_time`.** NOT to a fixed "test start date" (avoids lookback bias).
+7. **SPY benchmark anchored to `first_event_time`** (window-aligned benchmark, NOT a full-period universal benchmark). Avoids lookback bias within a single backtest run. Cross-run "vs SPY" deltas need care since each run uses its own SPY window.
 8. **Metrics computed on DAILY return series.** Not on trade returns (avoids irregular-spacing Sharpe bias).
 9. **`mtm_model` field surfaced in API + UI.** Provenance / disclaimer.
-10. **Reserved Phase 5 fields** (`strategy_exposure`, `capital_request_signal`) added as `None` defaults to enable retroactive replay without schema migration.
+10. **Reserved Phase 5 fields** (`strategy_exposure`, `capital_bid_score`) added as `None` defaults to enable retroactive replay without schema migration. (Field originally proposed as `capital_request_signal` — renamed to avoid "signal" overloading with "trading signal".)
 11. **No Alembic migration.** Pure read-side over Phase 1-3 schema.
 12. **Warning banner mandatory.** UI explicitly labels v0 as research-grade, not execution-level.
 13. **Strategy filter NOT in v0 filter card.** All 6 strategies always shown (head-to-head is the point).
 14. **Recap-sourced events excluded** — backtest is `source = "stock_analysis"` only (recap events are commentary, not actionable verdicts).
+15. **Simulator daily loop ORDER: CLOSE → OPEN → MTM → RECORD.** Strict. CLOSE first so freed capital is available to same-day new signals; new positions do NOT participate in same-day MTM (would be forward bias).
+16. **JOIN must include causal constraint** `event.event_time.date() < outcome.horizon_date`. Defends against any DB anomaly with reversed timestamps.
 
 ## Self-Review Notes
 
