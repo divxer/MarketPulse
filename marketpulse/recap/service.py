@@ -2,10 +2,14 @@ import json
 from datetime import UTC, date, datetime
 from typing import Any, Protocol
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from marketpulse.ai import prompts
 from marketpulse.data.types import Bar, MarketOverview, NewsItem, Quote
-from marketpulse.db.models import DailyRecap, Holding, WatchlistItem
+from marketpulse.db.models import DailyRecap, EvaluationEvent, Holding, WatchlistItem
+from marketpulse.evaluation.constants import AIVerdict
+from marketpulse.evaluation.events import record_event
 from marketpulse.holdings.service import compute_totals, enrich_holdings
 from marketpulse.logging import get_logger
 from marketpulse.recap.signals import detect_signals
@@ -134,6 +138,60 @@ class RecapService:
             commentary_md, events_json, verdicts_json = _parse_ai_output(commentary)
             recap.ai_commentary_text = commentary_md
             recap.key_events_json = events_json
+
+            # Phase 2: record per-ticker verdicts from VERDICTS_JSON.
+            if verdicts_json is not None:
+                # SQLite-only: delete prior events from a previous generation of
+                # this recap_date so retry doesn't double-count.
+                self.session.query(EvaluationEvent).filter(
+                    EvaluationEvent.event_type == "ai_analysis",
+                    func.json_extract(EvaluationEvent.payload, "$.source") == "recap",
+                    func.json_extract(EvaluationEvent.payload, "$.recap_date")
+                        == target.isoformat(),
+                ).delete(synchronize_session=False)
+
+                try:
+                    verdicts = json.loads(verdicts_json)
+                except json.JSONDecodeError:
+                    verdicts = []
+                if isinstance(verdicts, list):
+                    for v in verdicts:
+                        if not isinstance(v, dict):
+                            continue
+                        ticker = (v.get("ticker") or "").strip().upper()
+                        verdict_value = v.get("verdict") or ""
+                        if not ticker or verdict_value not in AIVerdict.all():
+                            log.warning("recap_verdict_invalid_shape",
+                                        ticker=ticker, verdict=verdict_value)
+                            continue
+                        try:
+                            quote = self.data.get_quote(ticker)
+                        except Exception as exc:
+                            log.warning("recap_verdict_quote_failed",
+                                        ticker=ticker, error=str(exc))
+                            continue
+                        try:
+                            record_event(
+                                event_type="ai_analysis",
+                                subtype=verdict_value,
+                                ticker=ticker,
+                                event_time=datetime.now(UTC),
+                                event_price=quote.price,
+                                payload={
+                                    "rationale": v.get("rationale", ""),
+                                    "prompt_version": prompts.COMMENTARY_PROMPT_VERSION,
+                                    "source": "recap",
+                                    "recap_date": target.isoformat(),
+                                },
+                                db=self.session,
+                            )
+                        except ValueError as exc:
+                            log.warning("recap_record_event_invalid",
+                                        ticker=ticker, error=str(exc))
+                        except Exception as exc:
+                            log.warning("recap_record_event_failed",
+                                        ticker=ticker, error=str(exc))
+
             recap.generation_status = "success"
             recap.error_message = None
             recap.generated_at = datetime.now(UTC)
