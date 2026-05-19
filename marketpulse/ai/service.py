@@ -27,6 +27,32 @@ def _split_prompt(rendered: str) -> tuple[str, str]:
     return system, data
 
 
+def _parse_analyze_output(raw: str) -> tuple[str, dict | None]:
+    """Split AiService.analyze() AI output into (markdown_body, verdict_dict).
+
+    Looks for the LAST occurrence of `VERDICTS_JSON:` marker (rfind to
+    tolerate AI quoting the marker in body). Everything before is the
+    markdown analysis. Everything after (parsed as a JSON object) is
+    the single verdict.
+
+    Failures (no marker, malformed JSON) silently return (raw, None).
+    """
+    marker = "VERDICTS_JSON:"
+    idx = raw.rfind(marker)
+    if idx == -1:
+        return raw, None
+
+    md = raw[:idx].rstrip()
+    tail = raw[idx + len(marker):].strip()
+    try:
+        verdict = json.loads(tail)
+        if not isinstance(verdict, dict):
+            return md, None
+        return md, verdict
+    except json.JSONDecodeError:
+        return md, None
+
+
 class _DataLike(Protocol):
     def get_quote(self, ticker: str) -> Quote: ...
     def get_history(self, ticker: str, period: str = ...) -> list[Bar]: ...
