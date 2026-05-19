@@ -28,12 +28,6 @@
     <aside class="mp-ai-track-rail">
       {% include "partials/ai_track_filter_card.html" ignore missing %}
       {% include "partials/ai_track_ticker_table.html" ignore missing %}
-      {# Fallback: emit ticker slugs so integration tests can assert on them
-         even before the ticker-table partial lands (T15). The partial will
-         render a styled list on top of this hidden block. #}
-      <ul hidden aria-hidden="true" class="mp-ai-track-ticker-list--raw">
-        {% for t in per_ticker %}<li>{{ t.ticker }}</li>{% endfor %}
-      </ul>
     </aside>
   </section>
 {% endif %}
