@@ -3,10 +3,11 @@ from datetime import UTC, datetime
 from marketpulse.ai.prompts import (
     ANALYSIS_PROMPT_VERSION,
     COMMENTARY_PROMPT_VERSION,
-    render_analysis_prompt,
     render_commentary_prompt,
+    render_strategy_analysis_prompt,
 )
 from marketpulse.data.types import Bar, Fundamentals, NewsItem, Quote
+from marketpulse.strategies import load_strategies
 
 
 def test_render_analysis_prompt_contains_data() -> None:
@@ -17,7 +18,10 @@ def test_render_analysis_prompt_contains_data() -> None:
     news = [NewsItem(ticker="NVDA", headline="Big news", url="u",
                      published_at=datetime.now(UTC), source="x")]
     bars = [Bar(date=datetime(2026, 5, 7).date(), open=1, high=2, low=0.5, close=1.5, volume=100)]
-    out = render_analysis_prompt(quote=quote, fundamentals=fund, news=news, bars=bars)
+    general = load_strategies()["general"]
+    out = render_strategy_analysis_prompt(
+        strategy=general, quote=quote, fundamentals=fund, news=news, bars=bars,
+    )
     assert "NVDA" in out
     assert "Big news" in out
     assert ANALYSIS_PROMPT_VERSION  # non-empty

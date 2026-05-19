@@ -2,25 +2,27 @@ import json
 from typing import Any
 
 from marketpulse.data.types import Bar, Fundamentals, NewsItem, Quote
+from marketpulse.strategies.types import Strategy
 
-ANALYSIS_PROMPT_VERSION = "analysis-v3-zh-verdict"
+ANALYSIS_PROMPT_VERSION = "analysis-v4"
 COMMENTARY_PROMPT_VERSION = "commentary-v5-zh-verdicts"
 RISK_PROMPT_VERSION = "risk-v2-zh-data"
 
-_ANALYSIS_SYSTEM = (
-    "你是一名股票研究分析师。请用中文输出一份简明的 markdown 报告,"
-    "包含三个部分:## 基本面、## 技术面、## 风险。只使用所提供的数据,"
-    "不要编造数字,不要给出买入或卖出建议。股票代码、行业名称等专有名词"
-    "可保留英文原文。\n\n"
+_BASE_ANALYSIS_SYSTEM = (
+    "你是一名股票研究分析师。请用中文输出一份简明的 markdown 报告。"
+    "只使用所提供的数据,不要编造数字,不要给出买入或卖出建议。"
+    "股票代码、行业名称等专有名词可保留英文原文。\n\n"
     "在 markdown 报告之后必须**单独一行**输出 verdict JSON,"
     "严格遵守此 schema:\n\n"
     "VERDICTS_JSON: {\"ticker\": \"AAPL\", \"verdict\": \"bullish\", "
     "\"rationale\": \"一句话说明依据\"}\n\n"
     "verdict 取值: bullish | neutral | bearish。\n"
-    "- bullish: 数据显示中短期相对大盘有正向超额 (技术面+基本面综合)\n"
+    "- bullish: 数据显示中短期相对大盘有正向超额\n"
     "- bearish: 数据显示中短期相对大盘负向超额风险\n"
     "- neutral: 无明确方向倾向 (数据混合 / 噪声大)\n\n"
-    "客观,基于数据,不要因为缺数据而强行选边。"
+    "客观,基于数据,不要因为缺数据而强行选边。\n\n"
+    "---\n\n"
+    "下面是这次分析使用的具体策略指令:\n\n"
 )
 
 _RISK_SYSTEM = (
@@ -64,9 +66,21 @@ _COMMENTARY_SYSTEM = (
 )
 
 
-def render_analysis_prompt(
-    *, quote: Quote, fundamentals: Fundamentals, news: list[NewsItem], bars: list[Bar]
+def render_strategy_analysis_prompt(
+    *,
+    strategy: Strategy,
+    quote: Quote,
+    fundamentals: Fundamentals,
+    news: list[NewsItem],
+    bars: list[Bar],
 ) -> str:
+    """Build the deep-analysis prompt for the chosen strategy.
+
+    Concatenates _BASE_ANALYSIS_SYSTEM (verdict taxonomy + style rules)
+    with the strategy's `instructions` body. Data block is identical to
+    the pre-Phase-3 render.
+    """
+    system = _BASE_ANALYSIS_SYSTEM + strategy.instructions
     payload: dict[str, Any] = {
         "ticker": quote.ticker,
         "current": {
@@ -92,7 +106,7 @@ def render_analysis_prompt(
             for n in news[:10]
         ],
     }
-    return f"{_ANALYSIS_SYSTEM}\n\nDATA:\n{json.dumps(payload, indent=2)}"
+    return f"{system}\n\nDATA:\n{json.dumps(payload, indent=2)}"
 
 
 def render_risk_prompt(

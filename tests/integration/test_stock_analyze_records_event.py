@@ -63,7 +63,7 @@ def test_first_analyze_records_event_with_verdict(db_session):
     assert e.ticker == "AAPL"
     assert e.event_price == pytest.approx(180.0)
     assert e.payload["source"] == "stock_analysis"
-    assert e.payload["prompt_version"].startswith("analysis-v3")
+    assert e.payload["prompt_version"].startswith("analysis-v4")
 
 
 def test_cached_analyze_does_not_record_duplicate_event(db_session):
