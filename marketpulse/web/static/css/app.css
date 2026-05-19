@@ -1053,3 +1053,20 @@ hr.mp-hr {
 .is-disabled button {
   cursor: not-allowed;
 }
+
+/* ════════ Phase 3: strategy leaderboard list ════════ */
+.mp-ai-track-strategy-list { list-style: none; margin: 0; padding: 10px 16px 18px; }
+.mp-ai-track-strategy-list li {
+  display: grid; grid-template-columns: 1fr auto auto;
+  column-gap: 10px; row-gap: 2px;
+  grid-template-areas:
+    "name      pct    chip"
+    "hint      ratio  ratio";
+  align-items: center; padding: 8px 0;
+  border-bottom: 1px solid var(--ns-outline-variant);
+}
+.mp-ai-track-strategy-list li:last-child { border-bottom: 0; }
+.mp-ai-track-strategy-list li .mp-strategy-link { grid-area: name; }
+.mp-ai-track-strategy-list li small.muted:first-of-type { grid-area: hint; font-size: 10px; }
+.mp-strategy-link { color: var(--ns-primary); text-decoration: none; }
+.mp-strategy-link:hover { text-decoration: underline; }
