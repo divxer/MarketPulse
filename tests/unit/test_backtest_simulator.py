@@ -152,3 +152,42 @@ def test_excess_vs_spy_subtracts_benchmark():
         max_capital_in_use=10_000.0,
     )
     assert r.excess_vs_spy > 0
+
+
+def test_spy_buyhold_single_outcome():
+    """One outcome 5/1→5/8 with benchmark_return=0.02 → SPY equity ends ≈ 10_200."""
+    from marketpulse.backtest.simulator import simulate_spy_buyhold
+    pairs = [_pair("AAA", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0,
+                    benchmark_return=0.02)]
+    r = simulate_spy_buyhold(
+        pairs=pairs,
+        initial_capital=10_000.0,
+    )
+    assert r.strategy == "__spy_buyhold__"
+    assert r.display_name == "SPY 基准"
+    final = r.daily_equity_curve[-1][1]
+    assert final == pytest.approx(10_200.0, abs=10.0)
+    assert r.n_trades == 0
+
+
+def test_spy_buyhold_with_no_pairs_returns_flat():
+    from marketpulse.backtest.simulator import simulate_spy_buyhold
+    r = simulate_spy_buyhold(pairs=[], initial_capital=10_000.0)
+    assert r.cumulative_return == 0.0
+    assert r.daily_equity_curve[0][1] == 10_000.0
+
+
+def test_spy_buyhold_mtm_interpolation_midpoint():
+    """5/1 → 5/7 (4 trading days), benchmark 0.04 → midpoint ≈ 10_200."""
+    from marketpulse.backtest.simulator import simulate_spy_buyhold
+    pairs = [
+        _pair("X", date(2026, 5, 1), 100.0, date(2026, 5, 7), 110.0,
+              benchmark_return=0.04),
+    ]
+    pairs.append(_pair("Y", date(2026, 5, 3), 100.0, date(2026, 5, 5), 102.0,
+                        benchmark_return=0.0))
+    r = simulate_spy_buyhold(pairs=pairs, initial_capital=10_000.0)
+    curve = dict(r.daily_equity_curve)
+    mid = curve.get(date(2026, 5, 5))
+    assert mid is not None
+    assert 10_000 <= mid <= curve[date(2026, 5, 7)] + 1

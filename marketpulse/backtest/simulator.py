@@ -211,6 +211,94 @@ def _empty_result(
     )
 
 
+def simulate_spy_buyhold(
+    pairs: list[EventOutcomePair],
+    *,
+    initial_capital: float = 10_000.0,
+) -> StrategyBacktestResult:
+    """SPY buy-and-hold baseline, anchored to the same window as strategy events.
+
+    Spec § SPY Baseline: uses linear interpolation across overlapping
+    `benchmark_forward_return` windows from the same outcomes the strategies
+    use — methodologically consistent with strategy MTM (both
+    mtm_model = 'linear_interpolation_v0').
+
+    Algorithm:
+      1. Build calendar from all event/horizon dates in `pairs`.
+      2. For each calendar day d, compute the cumulative SPY return:
+         - For each outcome o whose [event_date, horizon_date] window covers d,
+           add fractional benchmark contribution proportional to
+           elapsed_fraction(d) within that window.
+         - Average across overlapping windows (simple mean).
+      3. equity[d] = initial_capital * (1 + cumulative_spy_return)
+    """
+    if not pairs:
+        from datetime import date as _date
+        return StrategyBacktestResult(
+            strategy="__spy_buyhold__",
+            display_name="SPY 基准",
+            horizon=0,
+            n_trades=0,
+            n_capacity_skipped=0,
+            cumulative_return=0.0,
+            annual_return=0.0,
+            sharpe=None,
+            sortino=None,
+            max_drawdown=0.0,
+            calmar=None,
+            win_rate=0.0,
+            avg_win_pct=0.0,
+            avg_loss_pct=0.0,
+            daily_equity_curve=[(_date.today(), initial_capital)],
+            excess_vs_spy=0.0,
+        )
+
+    raw_dates = []
+    for p in pairs:
+        raw_dates.append(p.event_time.date())
+        raw_dates.append(p.horizon_date)
+    calendar = build_calendar(raw_dates)
+
+    equity_curve: list[tuple[date, float]] = []
+    for d in calendar:
+        contributions: list[float] = []
+        for p in pairs:
+            entry = p.event_time.date()
+            if entry <= d <= p.horizon_date:
+                fraction = elapsed_fraction(
+                    calendar, entry=entry, horizon=p.horizon_date, current=d,
+                )
+                contributions.append(p.benchmark_forward_return * fraction)
+        spy_ret_to_date = (
+            sum(contributions) / len(contributions) if contributions else 0.0
+        )
+        equity_curve.append((d, initial_capital * (1 + spy_ret_to_date)))
+
+    downsampled = downsample_equity_curve(equity_curve, target_points=120)
+    metrics = compute_metrics(
+        equity_curve=equity_curve, n_trades=0, trade_returns=[],
+    )
+
+    return StrategyBacktestResult(
+        strategy="__spy_buyhold__",
+        display_name="SPY 基准",
+        horizon=0,
+        n_trades=0,
+        n_capacity_skipped=0,
+        cumulative_return=metrics.cumulative_return,
+        annual_return=metrics.annual_return,
+        sharpe=metrics.sharpe,
+        sortino=metrics.sortino,
+        max_drawdown=metrics.max_drawdown,
+        calmar=metrics.calmar,
+        win_rate=0.0,
+        avg_win_pct=0.0,
+        avg_loss_pct=0.0,
+        daily_equity_curve=downsampled,
+        excess_vs_spy=0.0,
+    )
+
+
 # downsample stub — full implementation in Task 8.
 def downsample_equity_curve(
     curve: list[tuple[date, float]], *, target_points: int = 120,
