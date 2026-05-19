@@ -1,0 +1,21 @@
+<section class="mp-card">
+  <div class="mp-card__head">
+    <span class="mp-card__title">
+      <span class="material-symbols-outlined">show_chart</span>30 日滚动 Hit Rate
+    </span>
+    <span class="mp-card__sub">{{ trend|length }} 个数据点</span>
+  </div>
+  <div class="mp-card__body">
+    {% if trend|length >= 2 %}
+      <svg viewBox="0 0 600 200" width="100%" height="200">
+        <polyline
+          points="{% for d in trend %}{{ 600 if loop.last else loop.index0 * (600 / (trend|length - 1)) }},{{ 200 - (d.hit_rate or 0) * 200 }} {% endfor %}"
+          fill="none" stroke="var(--ns-primary)" stroke-width="2" />
+        <line x1="0" y1="100" x2="600" y2="100"
+              stroke="var(--ns-outline-variant)" stroke-dasharray="4 4" />
+      </svg>
+    {% else %}
+      <p class="muted" style="text-align:center; padding:32px;">趋势数据不足</p>
+    {% endif %}
+  </div>
+</section>

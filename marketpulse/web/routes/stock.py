@@ -9,6 +9,7 @@ from marketpulse.ai.service import AiService
 from marketpulse.data.service import DataService
 from marketpulse.data.yfinance_client import YFinanceClient
 from marketpulse.db.models import Holding, Trade, WatchlistItem
+from marketpulse.evaluation import scoring
 from marketpulse.logging import get_logger
 from marketpulse.recap.signals import (
     bollinger_series,
@@ -28,6 +29,18 @@ from marketpulse.web.main import templates
 
 router = APIRouter()
 log = get_logger(__name__)
+
+
+def _ai_badge_color(stats: scoring.HitRateStats) -> str | None:
+    if stats.n_total == 0:
+        return None
+    if stats.n_total < 5 or stats.hit_rate is None:
+        return "pending"
+    if stats.hit_rate >= 0.60:
+        return "good"
+    if stats.hit_rate >= 0.40:
+        return "neutral"
+    return "bad"
 
 _VALID_PERIODS = {"60d", "6m", "ytd", "1y", "5y", "all"}
 _PERIOD_DAYS_FIXED = {"60d": 60, "6m": 180, "1y": 365, "5y": 1825}
@@ -112,6 +125,15 @@ def stock_page(
         .limit(5)
         .all()
     )
+    ai_stats = scoring.compute_hit_rate(
+        db,
+        event_type="ai_analysis",
+        ticker=ticker,
+        horizon=5,
+        since=date.today() - timedelta(days=90),
+    )
+    ai_badge_color = _ai_badge_color(ai_stats)
+
     return templates.TemplateResponse(
         request, "stock.html",
         {
@@ -123,6 +145,10 @@ def stock_page(
             "in_watchlist": in_watchlist,
             "recent_trades": recent_trades,
             "watchlist_items": watchlist_items,
+            "ai_hit_rate": ai_stats.hit_rate,
+            "ai_n_hits": ai_stats.n_hits,
+            "ai_n_total": ai_stats.n_total,
+            "ai_badge_color": ai_badge_color,
         },
     )
 

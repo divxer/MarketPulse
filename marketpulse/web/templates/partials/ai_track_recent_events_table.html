@@ -1,0 +1,42 @@
+<table class="mp-table mp-ai-track-recent">
+  <thead>
+    <tr>
+      <th>时间</th>
+      <th>Ticker</th>
+      <th>Source</th>
+      <th>Verdict</th>
+      <th class="num">价</th>
+      <th class="num">{{ filters.horizon }}d 后价</th>
+      <th class="num">Forward %</th>
+      <th class="num">Excess vs SPY</th>
+      <th>Outcome</th>
+      <th>Rationale</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in recent %}
+      <tr>
+        <td class="mono">
+          <time data-utc="{{ r.event_time.isoformat() }}">{{ r.event_time.strftime('%Y-%m-%d %H:%M') }}</time>
+        </td>
+        <td><a href="/stock/{{ r.ticker }}" class="mp-ticker-link">{{ r.ticker }}</a></td>
+        <td><span class="mp-chip">{{ r.source }}</span></td>
+        <td>
+          <span class="mp-chip mp-chip--{% if r.verdict == 'bullish' %}up{% elif r.verdict == 'bearish' %}down{% else %}neutral{% endif %}">{{ r.verdict }}</span>
+        </td>
+        <td class="num mono tnum">${{ "{:.2f}".format(r.event_price) }}</td>
+        <td class="num mono tnum">${{ "{:.2f}".format(r.horizon_price) }}</td>
+        <td class="num mono tnum {% if r.forward_return >= 0 %}up{% else %}down{% endif %}">{{ "{:+.2f}%".format(r.forward_return * 100) }}</td>
+        <td class="num mono tnum {% if r.excess_return >= 0 %}up{% else %}down{% endif %}">{{ "{:+.2f}%".format(r.excess_return * 100) }}</td>
+        <td>
+          {% if r.hit %}<span class="mp-chip mp-chip--good">命中</span>
+          {% else %}<span class="mp-chip mp-chip--bad">未中</span>{% endif %}
+        </td>
+        <td class="muted" style="max-width:300px; overflow:hidden; text-overflow:ellipsis;">{{ r.rationale }}</td>
+      </tr>
+    {% endfor %}
+    {% if not recent %}
+      <tr><td colspan="10" class="muted" style="text-align:center; padding:32px;">暂无评估事件</td></tr>
+    {% endif %}
+  </tbody>
+</table>

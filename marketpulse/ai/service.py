@@ -10,6 +10,11 @@ from marketpulse.ai.client import AiClient
 from marketpulse.ai.types import AnalysisResult
 from marketpulse.data.types import Bar, Fundamentals, NewsItem, Quote
 from marketpulse.db.models import AiAnalysis
+from marketpulse.evaluation.constants import AIVerdict
+from marketpulse.evaluation.events import record_event
+from marketpulse.logging import get_logger
+
+log = get_logger(__name__)
 
 _DATA_SEPARATOR = "\n\nDATA:\n"
 
@@ -25,6 +30,32 @@ def _split_prompt(rendered: str) -> tuple[str, str]:
     if not sep:
         raise ValueError("rendered prompt missing DATA separator")
     return system, data
+
+
+def _parse_analyze_output(raw: str) -> tuple[str, dict | None]:
+    """Split AiService.analyze() AI output into (markdown_body, verdict_dict).
+
+    Looks for the LAST occurrence of `VERDICTS_JSON:` marker (rfind to
+    tolerate AI quoting the marker in body). Everything before is the
+    markdown analysis. Everything after (parsed as a JSON object) is
+    the single verdict.
+
+    Failures (no marker, malformed JSON) silently return (raw, None).
+    """
+    marker = "VERDICTS_JSON:"
+    idx = raw.rfind(marker)
+    if idx == -1:
+        return raw, None
+
+    md = raw[:idx].rstrip()
+    tail = raw[idx + len(marker):].strip()
+    try:
+        verdict = json.loads(tail)
+        if not isinstance(verdict, dict):
+            return md, None
+        return md, verdict
+    except json.JSONDecodeError:
+        return md, None
 
 
 class _DataLike(Protocol):
@@ -118,6 +149,36 @@ class AiService:
             expires_at=now + timedelta(hours=self.ttl_hours),
         )
         self.session.add(record)
+
+        # Phase 2: parse verdict and record event (same transaction as AiAnalysis)
+        _, verdict = _parse_analyze_output(response)
+        if verdict is not None:
+            v_value = verdict.get("verdict")
+            v_ticker = (verdict.get("ticker") or "").strip().upper()
+            if v_value in AIVerdict.all() and v_ticker:
+                try:
+                    record_event(
+                        event_type="ai_analysis",
+                        subtype=v_value,
+                        ticker=v_ticker,
+                        event_time=now,
+                        event_price=quote.price,
+                        payload={
+                            "rationale": verdict.get("rationale", ""),
+                            "prompt_version": version,
+                            "source": "stock_analysis",
+                            "model": self.model_analyze,
+                        },
+                        db=self.session,
+                    )
+                except ValueError as exc:
+                    log.warning("ai_verdict_invalid", error=str(exc), verdict=verdict)
+                except Exception as exc:
+                    log.warning("record_event_failed", error=str(exc))
+            else:
+                log.warning("ai_verdict_invalid_shape", verdict=verdict)
+
+        # Single commit covering both AiAnalysis + EvaluationEvent
         self.session.commit()
         return AnalysisResult(
             ticker=ticker,

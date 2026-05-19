@@ -1,0 +1,29 @@
+<section class="mp-card">
+  <div class="mp-card__head">
+    <span class="mp-card__title">
+      <span class="material-symbols-outlined">leaderboard</span>按 Ticker
+    </span>
+    <span class="mp-card__sub">{{ filters.horizon }}d hit rate desc</span>
+  </div>
+  <ul class="mp-ai-track-ticker-list">
+    {% for t in per_ticker %}
+      <li>
+        <a href="?{{ filters_qs_no_ticker }}{% if filters_qs_no_ticker %}&{% endif %}ticker={{ t.ticker }}"
+           class="mp-ticker-link">{{ t.ticker }}</a>
+        {% if t.n_total < 5 %}
+          <span class="mp-chip mp-chip--pending" style="margin-left:auto;">
+            积累中 ({{ t.n_total }})
+          </span>
+        {% else %}
+          <span class="mono tnum" style="margin-left:auto;">
+            {{ "{:.0f}%".format(t.hit_rate * 100) }}
+          </span>
+          <small class="muted">{{ t.n_hits }}/{{ t.n_total }}</small>
+        {% endif %}
+      </li>
+    {% endfor %}
+    {% if not per_ticker %}
+      <li class="muted" style="padding:16px; text-align:center;">暂无 ticker 数据</li>
+    {% endif %}
+  </ul>
+</section>

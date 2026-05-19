@@ -988,3 +988,49 @@ hr.mp-hr {
 .mp-chip--success            { background:#d1fae5; color:#065f46; }
 .mp-chip--pending            { background:#fef3c7; color:#92400e; }
 .mp-chip--failed             { background:#fee2e2; color:#991b1b; }
+
+/* ════════ Phase 2: AI hit-rate badge ════════ */
+.mp-ai-badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 22px; padding: 0 8px;
+  font: 600 11px/1 var(--ns-font-mono);
+  border-radius: 2px; text-decoration: none;
+  transition: filter 200ms;
+}
+.mp-ai-badge .material-symbols-outlined { font-size: 14px; }
+.mp-ai-badge small { font-size: 10px; opacity: 0.7; margin-left: 2px; }
+.mp-ai-badge:hover { filter: brightness(0.95); }
+.mp-ai-badge--good     { background: #d1fae5; color: #065f46; }
+.mp-ai-badge--neutral  { background: var(--ns-surface-container); color: var(--ns-on-surface-variant); }
+.mp-ai-badge--bad      { background: #fee2e2; color: #991b1b; }
+.mp-ai-badge--pending  { background: #fef3c7; color: #92400e; }
+
+/* ════════ Phase 2: /lab/ai-track layout ════════ */
+.mp-ai-track-kpi {
+  padding: 0 48px 16px;
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px;
+}
+.mp-ai-track-body {
+  padding: 0 48px 32px;
+  display: grid; grid-template-columns: 760px 1fr; gap: 56px;
+}
+.mp-ai-track-main { display: flex; flex-direction: column; gap: 16px; }
+.mp-ai-track-rail { display: flex; flex-direction: column; gap: 16px; }
+
+@media (max-width: 1640px) {
+  .mp-ai-track-body { grid-template-columns: 1fr; }
+}
+@media (max-width: 900px) {
+  .mp-ai-track-kpi { grid-template-columns: repeat(2, 1fr); }
+}
+
+.mp-ai-track-recent-wrap { overflow-x: auto; }
+.mp-ai-track-recent { min-width: 1100px; width: 100%; }
+
+.mp-ai-track-ticker-list { list-style: none; margin: 0; padding: 10px 16px 18px; }
+.mp-ai-track-ticker-list li {
+  display: grid; grid-template-columns: 60px 1fr auto;
+  gap: 10px; align-items: center; padding: 6px 0;
+  border-bottom: 1px solid var(--ns-outline-variant);
+}
+.mp-ai-track-ticker-list li:last-child { border-bottom: 0; }

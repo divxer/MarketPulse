@@ -1,0 +1,49 @@
+<div class="mp-card mp-kpi">
+  <div class="mp-kpi__head">
+    <span class="mp-eyebrow mp-eyebrow--primary">总 verdicts</span>
+    <span class="material-symbols-outlined mp-kpi__icon">analytics</span>
+  </div>
+  <div class="mp-kpi__value grotesk tnum">{{ overall.n_total }}</div>
+  <div class="mp-kpi__hint">
+    {{ overall.n_bullish }} 看涨 / {{ overall.n_bearish }} 看跌 / {{ overall.n_neutral }} 中性
+  </div>
+</div>
+
+<div class="mp-card mp-kpi">
+  <div class="mp-kpi__head">
+    <span class="mp-eyebrow mp-eyebrow--primary">{{ filters.horizon }}d Hit Rate</span>
+    <span class="material-symbols-outlined mp-kpi__icon">military_tech</span>
+  </div>
+  <div class="mp-kpi__value grotesk tnum"
+       style="color: {% if overall.hit_rate and overall.hit_rate >= 0.60 %}var(--mp-up)
+                     {% elif overall.hit_rate and overall.hit_rate < 0.40 %}var(--mp-down)
+                     {% else %}var(--ns-navy){% endif %};">
+    {% if overall.hit_rate is not none %}{{ "{:.0f}%".format(overall.hit_rate * 100) }}{% else %}—{% endif %}
+  </div>
+  <div class="mp-kpi__hint">{{ overall.n_hits }}/{{ overall.n_total }} 命中</div>
+</div>
+
+<div class="mp-card mp-kpi">
+  <div class="mp-kpi__head">
+    <span class="mp-eyebrow mp-eyebrow--primary">Avg Excess</span>
+    <span class="material-symbols-outlined mp-kpi__icon">trending_up</span>
+  </div>
+  <div class="mp-kpi__value grotesk tnum"
+       style="color: {% if overall.avg_excess_return >= 0 %}var(--mp-up){% else %}var(--mp-down){% endif %};">
+    {{ "{:+.2f}%".format(overall.avg_excess_return * 100) }}
+  </div>
+  <div class="mp-kpi__hint">对 SPY 超额收益均值</div>
+</div>
+
+<div class="mp-card mp-kpi">
+  <div class="mp-kpi__head">
+    <span class="mp-eyebrow mp-eyebrow--primary">Best Ticker</span>
+    <span class="material-symbols-outlined mp-kpi__icon">emoji_events</span>
+  </div>
+  <div class="mp-kpi__value grotesk tnum">
+    {% if best %}{{ best.ticker }} {{ "{:+.0f}%".format(best.avg_excess_return * 100) }}{% else %}—{% endif %}
+  </div>
+  <div class="mp-kpi__hint">
+    {% if best %}{{ filters.horizon }}d horizon · n={{ best.n_total }}{% else %}n<5 暂无最佳{% endif %}
+  </div>
+</div>

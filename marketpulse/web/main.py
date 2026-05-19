@@ -82,6 +82,7 @@ def create_app() -> FastAPI:
         health,
         holdings,
         home,
+        lab,
         recap,
         splits,
         stock,
@@ -98,6 +99,7 @@ def create_app() -> FastAPI:
     app.include_router(alerts.router)
     app.include_router(stock.router)
     app.include_router(recap.router)
+    app.include_router(lab.router)
 
     from fastapi import HTTPException
 

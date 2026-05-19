@@ -3,14 +3,24 @@ from typing import Any
 
 from marketpulse.data.types import Bar, Fundamentals, NewsItem, Quote
 
-ANALYSIS_PROMPT_VERSION = "analysis-v2-zh"
-COMMENTARY_PROMPT_VERSION = "commentary-v4-zh-markdown"
+ANALYSIS_PROMPT_VERSION = "analysis-v3-zh-verdict"
+COMMENTARY_PROMPT_VERSION = "commentary-v5-zh-verdicts"
 RISK_PROMPT_VERSION = "risk-v2-zh-data"
 
 _ANALYSIS_SYSTEM = (
-    "你是一名股票研究分析师。请用中文输出一份简明的 markdown 报告,包含三个部分:"
-    "## 基本面、## 技术面、## 风险。只使用所提供的数据,不要编造数字,"
-    "不要给出买入或卖出建议。股票代码、行业名称等专有名词可保留英文原文。"
+    "你是一名股票研究分析师。请用中文输出一份简明的 markdown 报告,"
+    "包含三个部分:## 基本面、## 技术面、## 风险。只使用所提供的数据,"
+    "不要编造数字,不要给出买入或卖出建议。股票代码、行业名称等专有名词"
+    "可保留英文原文。\n\n"
+    "在 markdown 报告之后必须**单独一行**输出 verdict JSON,"
+    "严格遵守此 schema:\n\n"
+    "VERDICTS_JSON: {\"ticker\": \"AAPL\", \"verdict\": \"bullish\", "
+    "\"rationale\": \"一句话说明依据\"}\n\n"
+    "verdict 取值: bullish | neutral | bearish。\n"
+    "- bullish: 数据显示中短期相对大盘有正向超额 (技术面+基本面综合)\n"
+    "- bearish: 数据显示中短期相对大盘负向超额风险\n"
+    "- neutral: 无明确方向倾向 (数据混合 / 噪声大)\n\n"
+    "客观,基于数据,不要因为缺数据而强行选边。"
 )
 
 _RISK_SYSTEM = (
@@ -43,6 +53,14 @@ _COMMENTARY_SYSTEM = (
     "kind 取值: deal | earnings | econ | merger | analyst | other\n"
     "请提供 3-5 条今日最关键事件。若数据中无明确事件,输出空数组 []。\n\n"
     "整体要客观、冷静、具体,提及具体的 ticker 和数字。股票代码保留英文原文。"
+    "\n\n在 KEY_EVENTS_JSON 之后**再单独一行**输出 VERDICTS_JSON (可选):\n\n"
+    "VERDICTS_JSON: [\n"
+    "  {\"ticker\": \"AAPL\", \"verdict\": \"bullish\", \"rationale\": \"...\"},\n"
+    "  {\"ticker\": \"NVDA\", \"verdict\": \"bearish\", \"rationale\": \"...\"}\n"
+    "]\n\n"
+    "verdict 取值: bullish | neutral | bearish。"
+    "只对今日复盘里你有**明确方向判断**的 ticker 输出 verdict。"
+    "不必每个自选股都给(避免强行表态)。数组可以为空 []。"
 )
 
 
