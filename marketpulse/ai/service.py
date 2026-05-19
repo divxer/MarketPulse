@@ -218,6 +218,10 @@ class AiService:
         response = self.ai.complete(
             system=system, user=data_block, model=self.model_analyze,
         )
+        # Strip VERDICTS_JSON marker from the markdown body before persisting.
+        # Phase 2 stored the raw response which leaked the JSON line into the
+        # UI markdown render. We keep the verdict in EvaluationEvent.payload.
+        md, verdict = _parse_analyze_output(response)
         now = datetime.now(UTC)
         input_snapshot = {
             "ticker": quote.ticker,
@@ -237,14 +241,13 @@ class AiService:
             strategy=strategy.name,
             strategy_version=strategy.version,
             input_data_json=json.dumps(input_snapshot, default=str),
-            response_markdown=response,
+            response_markdown=md,
             requested_at=now,
             expires_at=now + timedelta(hours=self.ttl_hours),
         )
         self.session.add(record)
 
-        # Phase 2: parse verdict and record event (same transaction).
-        _, verdict = _parse_analyze_output(response)
+        # Phase 2: record event (verdict was parsed above for body stripping).
         if verdict is not None:
             v_value = verdict.get("verdict")
             v_ticker = (verdict.get("ticker") or "").strip().upper()
@@ -282,7 +285,7 @@ class AiService:
             prompt_version=base_version,
             strategy=strategy.name,
             strategy_version=strategy.version,
-            response_markdown=response,
+            response_markdown=md,
             requested_at=now,
             cached=False,
         )
