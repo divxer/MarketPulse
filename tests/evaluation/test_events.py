@@ -13,11 +13,16 @@ from marketpulse.evaluation.events import record_event
 
 
 @pytest.fixture
-def db():
-    """Use the same session pattern other tests use."""
+def db(tmp_path):
+    """Isolated per-test SQLite DB — prevents data bleeding between tests."""
+    from marketpulse.db.base import Base
+    db_url = f"sqlite:///{tmp_path / 'test.db'}"
+    db_base.init_engine(db_url)
+    Base.metadata.create_all(db_base.get_engine())
     s = next(db_base.session_scope())
     yield s
-    s.rollback()
+    s.close()
+    db_base.reset_engine()
 
 
 def test_record_ai_analysis_event(db):
