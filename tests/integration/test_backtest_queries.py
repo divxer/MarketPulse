@@ -155,3 +155,51 @@ def test_returns_namedtuple_like_with_required_fields(db_session):
     assert r.horizon_price > 100.0
     assert r.horizon_date is not None
     assert r.benchmark_forward_return == 0.001
+
+
+def test_run_all_backtests_returns_7_results(db_session):
+    """6 strategies + 1 SPY baseline = 7 results, in strategy display order."""
+    from marketpulse.backtest.simulator import run_all_backtests
+
+    strategies_v1 = [
+        "fundamental_value", "momentum_breakout", "news_event",
+        "sector_rotation", "oversold_reversal", "general",
+    ]
+    for i, s in enumerate(strategies_v1):
+        _seed(db_session, ticker=f"T{i}", strategy=s, days_ago=10, excess=0.03)
+    db_session.commit()
+
+    results = run_all_backtests(db_session, horizon=5)
+    assert len(results) == 7
+    names = [r.strategy for r in results]
+    assert "__spy_buyhold__" in names
+    for s in strategies_v1:
+        assert s in names
+
+
+def test_run_all_backtests_handles_strategies_with_no_events(db_session):
+    from marketpulse.backtest.simulator import run_all_backtests
+
+    _seed(db_session, ticker="ONE", strategy="momentum_breakout")
+    db_session.commit()
+
+    results = run_all_backtests(db_session, horizon=5)
+    momentum = next(r for r in results if r.strategy == "momentum_breakout")
+    assert momentum.n_trades >= 1
+
+    value = next(r for r in results if r.strategy == "fundamental_value")
+    assert value.n_trades == 0
+
+
+def test_run_all_backtests_applies_since_filter(db_session):
+    from datetime import timedelta as _td
+    from marketpulse.backtest.simulator import run_all_backtests
+
+    _seed(db_session, ticker="OLD", strategy="momentum_breakout", days_ago=120)
+    _seed(db_session, ticker="NEW", strategy="momentum_breakout", days_ago=10)
+    db_session.commit()
+
+    cutoff = date.today() - _td(days=90)
+    results = run_all_backtests(db_session, horizon=5, since=cutoff)
+    momentum = next(r for r in results if r.strategy == "momentum_breakout")
+    assert momentum.n_trades == 1

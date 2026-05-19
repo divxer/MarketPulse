@@ -320,3 +320,51 @@ def downsample_equity_curve(
     if out[-1] != curve[-1]:
         out.append(curve[-1])
     return out
+
+
+def run_all_backtests(
+    db,
+    *,
+    horizon: int = 5,
+    since: date | None = None,
+    initial_capital: float = 10_000.0,
+    position_size: float = 1_000.0,
+    max_capital_in_use: float = 10_000.0,
+) -> list[StrategyBacktestResult]:
+    """Run the 6 Phase 3 strategies + SPY baseline.
+
+    Returns a list ordered: [6 strategies in load_strategies() iteration order,
+    then __spy_buyhold__ last]. The /lab/backtest route sorts by Sharpe
+    desc itself.
+    """
+    from marketpulse.backtest.queries import get_bullish_events_with_outcomes
+    from marketpulse.strategies import load_strategies
+
+    strategies = load_strategies()
+    all_pairs: list[EventOutcomePair] = []
+    results: list[StrategyBacktestResult] = []
+
+    for name, strat in strategies.items():
+        pairs = get_bullish_events_with_outcomes(
+            db, strategy=name, horizon=horizon, since=since,
+        )
+        all_pairs.extend(pairs)
+        r = simulate_strategy_from_pairs(
+            pairs=pairs,
+            strategy=name,
+            display_name=strat.display_name,
+            horizon=horizon,
+            initial_capital=initial_capital,
+            position_size=position_size,
+            max_capital_in_use=max_capital_in_use,
+        )
+        results.append(r)
+        log.info(
+            "backtest_run_complete",
+            strategy=name, horizon=horizon, n_trades=r.n_trades,
+            sharpe=r.sharpe, cum_return=r.cumulative_return,
+        )
+
+    spy = simulate_spy_buyhold(pairs=all_pairs, initial_capital=initial_capital)
+    results.append(spy)
+    return results
