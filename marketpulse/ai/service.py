@@ -10,6 +10,11 @@ from marketpulse.ai.client import AiClient
 from marketpulse.ai.types import AnalysisResult
 from marketpulse.data.types import Bar, Fundamentals, NewsItem, Quote
 from marketpulse.db.models import AiAnalysis
+from marketpulse.evaluation.constants import AIVerdict
+from marketpulse.evaluation.events import record_event
+from marketpulse.logging import get_logger
+
+log = get_logger(__name__)
 
 _DATA_SEPARATOR = "\n\nDATA:\n"
 
@@ -144,6 +149,36 @@ class AiService:
             expires_at=now + timedelta(hours=self.ttl_hours),
         )
         self.session.add(record)
+
+        # Phase 2: parse verdict and record event (same transaction as AiAnalysis)
+        _, verdict = _parse_analyze_output(response)
+        if verdict is not None:
+            v_value = verdict.get("verdict")
+            v_ticker = (verdict.get("ticker") or "").strip().upper()
+            if v_value in AIVerdict.all() and v_ticker:
+                try:
+                    record_event(
+                        event_type="ai_analysis",
+                        subtype=v_value,
+                        ticker=v_ticker,
+                        event_time=now,
+                        event_price=quote.price,
+                        payload={
+                            "rationale": verdict.get("rationale", ""),
+                            "prompt_version": version,
+                            "source": "stock_analysis",
+                            "model": self.model_analyze,
+                        },
+                        db=self.session,
+                    )
+                except ValueError as exc:
+                    log.warning("ai_verdict_invalid", error=str(exc), verdict=verdict)
+                except Exception as exc:
+                    log.warning("record_event_failed", error=str(exc))
+            else:
+                log.warning("ai_verdict_invalid_shape", verdict=verdict)
+
+        # Single commit covering both AiAnalysis + EvaluationEvent
         self.session.commit()
         return AnalysisResult(
             ticker=ticker,
