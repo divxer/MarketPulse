@@ -84,3 +84,21 @@ def test_lab_since_days_all_no_date_filter(client: TestClient, monkeypatch, db_s
     assert r.status_code == 200
     # OLD ticker should appear in ticker table (no date filter)
     assert "OLD" in r.text
+
+
+def test_lab_hero_renders_h1(client: TestClient, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    _seed_events(db_session)
+    r = client.get("/lab/ai-track")
+    assert "AI Hit Rate" in r.text
+    assert "实验室" in r.text or "AI 评估" in r.text
+
+
+def test_lab_renders_4_kpi_strip_when_data_present(client: TestClient, monkeypatch, db_session):
+    _login(client, monkeypatch)
+    _seed_events(db_session)
+    r = client.get("/lab/ai-track")
+    # KPI labels
+    assert "总 verdicts" in r.text
+    assert "Hit Rate" in r.text
+    assert "Avg Excess" in r.text
