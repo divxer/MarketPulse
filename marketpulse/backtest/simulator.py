@@ -58,13 +58,20 @@ def simulate_strategy_from_pairs(
     if not pairs:
         return _empty_result(strategy, display_name, horizon, initial_capital)
 
-    raw_dates: set[date] = set()
+    # Anchor dates: only event_time + horizon_date values that came from the
+    # DB (Phase 1's outcomes.py already aligned these to yfinance trading days).
+    # These are the dates Sharpe/Sortino/Calmar are computed against — they
+    # must NOT include US holidays or other gap-filled days, or daily-return
+    # series gets diluted with 0.0 returns that deflate vol and inflate Sharpe.
+    db_dates: set[date] = set()
     for p in pairs:
-        raw_dates.add(p.event_time.date())
-        raw_dates.add(p.horizon_date)
-    # Fill in weekdays between min and max so MTM days appear in the
-    # equity curve even when only entry/horizon dates are in the DB
-    # (e.g. sparse single-event windows). Calendar still excludes weekends.
+        db_dates.add(p.event_time.date())
+        db_dates.add(p.horizon_date)
+
+    # Equity-curve dates: densify by adding intermediate weekdays so the
+    # chart has smooth daily MTM marks even on sparse single-event windows.
+    # This is a chart-only concern; metrics use db_dates above.
+    raw_dates: set[date] = set(db_dates)
     min_d, max_d = min(raw_dates), max(raw_dates)
     cur = min_d
     while cur <= max_d:
@@ -151,14 +158,20 @@ def simulate_strategy_from_pairs(
 
     downsampled = downsample_equity_curve(equity_curve, target_points=120)
 
+    # Metrics use only the DB-anchored subset of the equity curve, NOT the
+    # weekday-densified one. Including gap-filled days would inject 0.0
+    # daily returns on US holidays / non-event days and inflate Sharpe.
+    metrics_curve = [(d, v) for d, v in equity_curve if d in db_dates]
     metrics = compute_metrics(
-        equity_curve=equity_curve,
+        equity_curve=metrics_curve,
         n_trades=n_trades,
         trade_returns=trade_returns,
     )
 
     # Excess vs SPY proxy: avg(forward − benchmark) over executed trades,
-    # scaled by deployed-capital fraction.
+    # scaled by deployed-capital fraction. NOTE this is a v0 proxy; the real
+    # alpha-vs-baseline comparison uses (strategy.cumulative_return -
+    # spy.cumulative_return) as computed by /lab/backtest.
     excess_terms = [
         p.forward_return - p.benchmark_forward_return for p in executed_pairs
     ]

@@ -68,8 +68,12 @@ def lab_backtest(
         reverse=True,
     )
 
+    # Best Strategy must have n>=5 AND a real Sharpe — without both,
+    # the KPI hint (which formats Sharpe to 2 decimals) can't render.
     best_strategy = next(
-        (r for r in strategies_sorted if r.n_trades >= 5), None,
+        (r for r in strategies_sorted
+         if r.n_trades >= 5 and r.sharpe is not None),
+        None,
     )
     best_sharpe = next(
         (r for r in strategies_sorted if r.sharpe is not None), None,
