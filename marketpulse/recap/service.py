@@ -13,33 +13,51 @@ from marketpulse.recap.signals import detect_signals
 log = get_logger(__name__)
 
 
-def _parse_ai_output(raw: str) -> tuple[str, str | None]:
-    """Split AI output into (commentary_markdown, key_events_json_str).
+def _parse_ai_output(raw: str) -> tuple[str, str | None, str | None]:
+    """Split AI output into (commentary_markdown, key_events_json_str, verdicts_json_str).
 
-    Looks for the LAST occurrence of the `KEY_EVENTS_JSON:` marker (rfind,
-    not index) — the structured separator is always the final occurrence;
-    earlier occurrences are AI quoting/referring to the marker in commentary.
-    Everything before the last marker is the commentary (Markdown).
-    Everything after (parsed as JSON) is events.
+    Looks for the LAST occurrence of each marker (rfind to tolerate AI
+    quoting marker in commentary). KEY_EVENTS_JSON and VERDICTS_JSON are
+    both optional and independent. Order in the output is canonically
+    KEY_EVENTS_JSON first then VERDICTS_JSON, but the parser doesn't
+    require a specific order.
 
-    Failures (no marker, malformed JSON, JSON not a list) silently fall
-    back to (entire raw output as commentary, events_json = None).
+    Failures (no marker, malformed JSON, JSON not the right shape)
+    silently fall back: missing marker → None for that field; entire
+    raw output stays as commentary minus any marker tails actually found.
     """
-    marker = "KEY_EVENTS_JSON:"
-    idx = raw.rfind(marker)
-    if idx == -1:
-        return raw, None
+    commentary = raw
+    verdicts_json: str | None = None
+    events_json: str | None = None
 
-    commentary = raw[:idx].rstrip()
-    events_part = raw[idx + len(marker):].strip()
+    # Extract VERDICTS_JSON if present (look for last occurrence).
+    v_marker = "VERDICTS_JSON:"
+    v_idx = commentary.rfind(v_marker)
+    if v_idx != -1:
+        tail = commentary[v_idx + len(v_marker):].strip()
+        try:
+            parsed = json.loads(tail)
+            if isinstance(parsed, list):
+                verdicts_json = json.dumps(parsed, ensure_ascii=False)
+            # not a list → skip but still strip from commentary
+        except json.JSONDecodeError:
+            pass
+        commentary = commentary[:v_idx].rstrip()
 
-    try:
-        events = json.loads(events_part)
-        if not isinstance(events, list):
-            return commentary, None
-        return commentary, json.dumps(events, ensure_ascii=False)
-    except json.JSONDecodeError:
-        return commentary, None
+    # Extract KEY_EVENTS_JSON if present.
+    e_marker = "KEY_EVENTS_JSON:"
+    e_idx = commentary.rfind(e_marker)
+    if e_idx != -1:
+        tail = commentary[e_idx + len(e_marker):].strip()
+        try:
+            parsed = json.loads(tail)
+            if isinstance(parsed, list):
+                events_json = json.dumps(parsed, ensure_ascii=False)
+        except json.JSONDecodeError:
+            pass
+        commentary = commentary[:e_idx].rstrip()
+
+    return commentary, events_json, verdicts_json
 
 
 class _DataLike(Protocol):
@@ -113,7 +131,7 @@ class RecapService:
                 json.dumps(holdings_totals) if holdings_totals else None
             )
             recap.news_summary_json = json.dumps(news_summary)
-            commentary_md, events_json = _parse_ai_output(commentary)
+            commentary_md, events_json, verdicts_json = _parse_ai_output(commentary)
             recap.ai_commentary_text = commentary_md
             recap.key_events_json = events_json
             recap.generation_status = "success"

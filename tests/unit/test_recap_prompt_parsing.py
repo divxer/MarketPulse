@@ -13,7 +13,7 @@ def test_parse_with_valid_marker_and_json():
         "{\"time\": \"16:00 EDT\", \"title\": \"AVGO 与 AAPL 协议\", \"kind\": \"deal\"}"
         "]"
     )
-    commentary, events_json = _parse_ai_output(raw)
+    commentary, events_json, verdicts_json = _parse_ai_output(raw)
     assert "## 大盘" in commentary
     assert "## 板块与个股" in commentary
     assert "KEY_EVENTS_JSON" not in commentary
@@ -29,7 +29,7 @@ def test_parse_without_marker_returns_raw_commentary_and_none_events():
     from marketpulse.recap.service import _parse_ai_output
 
     raw = "## 大盘\n\n这是一段没有 events 标记的复盘。"
-    commentary, events_json = _parse_ai_output(raw)
+    commentary, events_json, verdicts_json = _parse_ai_output(raw)
     assert commentary == raw
     assert events_json is None
 
@@ -39,7 +39,7 @@ def test_parse_malformed_json_falls_back_to_none_events():
     from marketpulse.recap.service import _parse_ai_output
 
     raw = "## 大盘\n\n复盘正文。\n\nKEY_EVENTS_JSON: not-a-json-array"
-    commentary, events_json = _parse_ai_output(raw)
+    commentary, events_json, verdicts_json = _parse_ai_output(raw)
     # Note: rstrip removes the trailing newlines/whitespace after "正文。"
     assert "复盘正文" in commentary
     assert "KEY_EVENTS_JSON" not in commentary
@@ -51,7 +51,7 @@ def test_parse_events_not_a_list_falls_back():
     from marketpulse.recap.service import _parse_ai_output
 
     raw = "正文\n\nKEY_EVENTS_JSON: {\"a\": 1}"
-    commentary, events_json = _parse_ai_output(raw)
+    commentary, events_json, verdicts_json = _parse_ai_output(raw)
     assert events_json is None
 
 
@@ -59,7 +59,7 @@ def test_parse_strips_trailing_whitespace_in_commentary():
     from marketpulse.recap.service import _parse_ai_output
 
     raw = "## 大盘\n\n正文\n\n   \n\nKEY_EVENTS_JSON: []"
-    commentary, events_json = _parse_ai_output(raw)
+    commentary, events_json, verdicts_json = _parse_ai_output(raw)
     assert commentary == "## 大盘\n\n正文"
     assert events_json == "[]"
 
@@ -68,7 +68,7 @@ def test_parse_empty_events_array():
     from marketpulse.recap.service import _parse_ai_output
 
     raw = "正文\n\nKEY_EVENTS_JSON: []"
-    commentary, events_json = _parse_ai_output(raw)
+    commentary, events_json, verdicts_json = _parse_ai_output(raw)
     assert events_json == "[]"
 
 
@@ -84,10 +84,65 @@ def test_parse_with_marker_quoted_in_commentary():
         "{\"time\": \"10:00\", \"title\": \"真正的事件\", \"kind\": \"deal\"}"
         "]"
     )
-    commentary, events_json = _parse_ai_output(raw)
+    commentary, events_json, verdicts_json = _parse_ai_output(raw)
     # Commentary should preserve the quoted KEY_EVENTS_JSON: mention
     assert "正文里提到了 KEY_EVENTS_JSON:" in commentary
     # And events should be the JSON after the LAST occurrence
     assert events_json is not None
     events = json.loads(events_json)
     assert events[0]["title"] == "真正的事件"
+
+
+def test_parse_returns_three_tuple_when_both_markers_present():
+    from marketpulse.recap.service import _parse_ai_output
+
+    raw = (
+        "## 大盘\n\n正文\n\n"
+        "KEY_EVENTS_JSON: [{\"time\": \"10:00\", \"title\": \"A\", \"kind\": \"deal\"}]\n\n"
+        "VERDICTS_JSON: [{\"ticker\": \"AAPL\", \"verdict\": \"bullish\", \"rationale\": \"x\"}]"
+    )
+    result = _parse_ai_output(raw)
+    assert len(result) == 3
+    commentary, events_json, verdicts_json = result
+    assert "## 大盘" in commentary
+    assert "KEY_EVENTS_JSON" not in commentary
+    assert "VERDICTS_JSON" not in commentary
+    assert events_json is not None
+    assert verdicts_json is not None
+    import json
+    assert json.loads(verdicts_json)[0]["ticker"] == "AAPL"
+
+
+def test_parse_verdicts_only_no_key_events():
+    from marketpulse.recap.service import _parse_ai_output
+
+    raw = (
+        "## 大盘\n\n正文\n\n"
+        "VERDICTS_JSON: [{\"ticker\": \"AAPL\", \"verdict\": \"bullish\", \"rationale\": \"x\"}]"
+    )
+    commentary, events_json, verdicts_json = _parse_ai_output(raw)
+    assert "## 大盘" in commentary
+    assert events_json is None
+    assert verdicts_json is not None
+
+
+def test_parse_key_events_only_no_verdicts():
+    from marketpulse.recap.service import _parse_ai_output
+
+    raw = (
+        "## 大盘\n\n正文\n\n"
+        "KEY_EVENTS_JSON: [{\"time\": \"10:00\", \"title\": \"A\", \"kind\": \"deal\"}]"
+    )
+    commentary, events_json, verdicts_json = _parse_ai_output(raw)
+    assert events_json is not None
+    assert verdicts_json is None
+
+
+def test_parse_neither_marker_returns_raw_commentary():
+    from marketpulse.recap.service import _parse_ai_output
+
+    raw = "## 大盘\n\n没有任何 markers 的复盘。"
+    commentary, events_json, verdicts_json = _parse_ai_output(raw)
+    assert commentary == raw
+    assert events_json is None
+    assert verdicts_json is None
