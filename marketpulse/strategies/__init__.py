@@ -4,6 +4,7 @@ A strategy is a named, versioned, YAML-defined playbook for /stock AI
 analysis. The router picks one strategy per ticker; deep analysis runs
 with that strategy's specialist instructions.
 """
+from marketpulse.strategies.loader import load_strategies
 from marketpulse.strategies.types import Strategy
 
-__all__ = ["Strategy"]
+__all__ = ["Strategy", "load_strategies"]
