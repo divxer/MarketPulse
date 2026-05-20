@@ -987,3 +987,143 @@ def test_sector_cap_disabled_via_toggle_bypassed():
     # All 5 land — global cap_full is $10k; 5×$1k=$5k fits
     assert len(won) == 5
     assert len(blocked) == 0
+
+
+def test_correlation_cap_fires_when_cluster_exceeds():
+    """5 correlated tickers (ρ≈1.0); 4 land ($4k cap), 5th blocked because cluster $5k → reject.
+
+    Uses unique tickers per bid so DEDUP doesn't collapse them (DEDUP is keyed
+    on same-day same-ticker collisions). All tickers share an identical price
+    series so pairwise corr ≈ 1.0 — they form a single correlation cluster.
+    """
+    from datetime import date, timedelta
+
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+
+    # Build identical price series → corr=1.0 across all correlated tickers.
+    # Window is [as_of - lookback_days, as_of) = [2026-03-02, 2026-05-01) for
+    # as_of=2026-05-01 lookback=60d → seed series ending the day before as_of.
+    base_prices = [(date(2026, 3, 2) + timedelta(days=i), 100.0 + i) for i in range(60)]
+    correlated_tickers = {"AAPL1", "AAPL2", "AAPL3", "AAPL4", "GOOGL"}
+
+    class FakePriceProvider:
+        def get_daily_closes(self, ticker, start, end):
+            if ticker in correlated_tickers:
+                return [(d, v) for d, v in base_prices if start <= d < end]
+            return []
+
+    def neutral_sector(_t: str) -> str:
+        return "unknown"
+
+    good_curve = [(date(2026, 4, 1) + timedelta(days=i), 10_000.0 * (1.005 ** i))
+                  for i in range(30)]
+    bids = [
+        _pair("AAPL1", "s1", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0),
+        _pair("AAPL2", "s2", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0),
+        _pair("AAPL3", "s3", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0),
+        _pair("AAPL4", "s4", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0),
+        _pair("GOOGL", "s5", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0),
+    ]
+    daily_curves = {f"s{i}": good_curve for i in range(1, 6)}
+
+    r = simulate_shared_pool(
+        bids=bids, daily_curves=daily_curves,
+        horizon=5, initial_capital=10_000.0, base_position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=False,
+        sector_caps_enabled=False,  # isolate correlation test
+        correlation_caps_enabled=True,
+        correlation_cap_pct=0.40, correlation_threshold=0.60,
+        sector_provider=neutral_sector,
+        price_provider=FakePriceProvider(),
+    )
+    won = [b for b in r.bid_history if b.outcome == "won"]
+    blocked = [b for b in r.bid_history if b.outcome == "correlation_cap_full"]
+    # 4 AAPLx land first; 5th (GOOGL) blocked because cluster of 5 = $5k > $4k cap
+    assert len(won) == 4
+    assert len(blocked) == 1
+    # Diagnostic preserved
+    assert len(blocked[0].blocked_by_correlation_with) > 0
+    # Top neighbor is one of the AAPLx tickers (correlation ≈ 1.0)
+    assert blocked[0].blocked_by_correlation_with[0][0].startswith("AAPL")
+
+
+def test_correlation_cap_does_not_fire_below_threshold():
+    """Inverse series (ρ ≈ -1) → no neighbor → no cap → both bids land."""
+    from datetime import date, timedelta
+
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+
+    # Same window alignment as the cluster-fires test (2026-03-02 onwards).
+    a_prices = [(date(2026, 3, 2) + timedelta(days=i), 100.0 + i) for i in range(60)]
+    b_prices = [(date(2026, 3, 2) + timedelta(days=i), 160.0 - i) for i in range(60)]
+
+    class FakePriceProvider:
+        def get_daily_closes(self, ticker, start, end):
+            data = {"AAPL": a_prices, "TLT": b_prices}.get(ticker, [])
+            return [(d, v) for d, v in data if start <= d < end]
+
+    def neutral_sector(_t: str) -> str:
+        return "unknown"
+
+    good_curve = [(date(2026, 4, 1) + timedelta(days=i), 10_000.0 * (1.005 ** i))
+                  for i in range(30)]
+    bids = [
+        _pair("AAPL", "s1", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0),
+        _pair("TLT", "s2", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0),
+    ]
+    daily_curves = {"s1": good_curve, "s2": good_curve}
+
+    r = simulate_shared_pool(
+        bids=bids, daily_curves=daily_curves,
+        horizon=5, initial_capital=10_000.0, base_position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=False,
+        sector_caps_enabled=False,
+        correlation_caps_enabled=True,
+        correlation_cap_pct=0.40, correlation_threshold=0.60,
+        sector_provider=neutral_sector,
+        price_provider=FakePriceProvider(),
+    )
+    won = [b for b in r.bid_history if b.outcome == "won"]
+    assert len(won) == 2
+
+
+def test_correlation_cap_cold_start_bypassed():
+    """Insufficient overlap (10 days, min_overlap=30) → None corr → no neighbor → both open."""
+    from datetime import date, timedelta
+
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+
+    short_prices = [(date(2026, 4, 20) + timedelta(days=i), 100.0 + i) for i in range(10)]
+
+    class FakePriceProvider:
+        def get_daily_closes(self, ticker, start, end):
+            if ticker in {"NEW1", "NEW2"}:
+                return [(d, v) for d, v in short_prices if start <= d < end]
+            return []
+
+    def neutral_sector(_t: str) -> str:
+        return "unknown"
+
+    good_curve = [(date(2026, 4, 1) + timedelta(days=i), 10_000.0 * (1.005 ** i))
+                  for i in range(30)]
+    bids = [
+        _pair("NEW1", "s1", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0),
+        _pair("NEW2", "s2", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0),
+    ]
+    daily_curves = {"s1": good_curve, "s2": good_curve}
+
+    r = simulate_shared_pool(
+        bids=bids, daily_curves=daily_curves,
+        horizon=5, initial_capital=10_000.0, base_position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=False,
+        sector_caps_enabled=False,
+        correlation_caps_enabled=True,
+        correlation_cap_pct=0.40, correlation_threshold=0.60,
+        sector_provider=neutral_sector, price_provider=FakePriceProvider(),
+    )
+    won = [b for b in r.bid_history if b.outcome == "won"]
+    # Both should land — cold-start failsafe-open
+    assert len(won) == 2

@@ -101,10 +101,7 @@ def simulate_shared_pool(
         risk_policy = "corr06_only_v0"
 
     sector_cap_dollars = sector_cap_pct * initial_capital
-    # correlation_cap_dollars reserved for T7 (suppress unused-var for now)
-    _ = correlation_cap_pct * initial_capital
-    _ = correlation_threshold
-    _ = price_provider
+    correlation_cap_dollars = correlation_cap_pct * initial_capital
 
     # Resolve sector_provider — default to real get_sector
     if sector_provider is None:
@@ -368,7 +365,35 @@ def simulate_shared_pool(
                     n_sector_cap_skipped_by_strategy.get(b.strategy, 0) + 1
                 )
                 continue
-            # ─── NEW Phase 5c-2: correlation cap check (reserved for T7) ───
+            # ─── NEW Phase 5c-2: correlation cap check ───
+            if correlation_caps_enabled and price_provider is not None:
+                from marketpulse.backtest.correlation import (
+                    find_correlation_neighbors,
+                )
+
+                open_tickers = [p.ticker for p in open_positions]
+                neighbors, corr_diagnostics = find_correlation_neighbors(
+                    b.ticker, open_tickers,
+                    as_of=d, threshold=correlation_threshold,
+                    lookback_days=lookback_days,
+                    price_provider=price_provider,
+                )
+                cluster_exposure = requested_size + sum(
+                    p.position_size for p in open_positions
+                    if p.ticker in neighbors
+                )
+                if cluster_exposure > correlation_cap_dollars:
+                    all_bid_records.append(BidRecord(
+                        date=d, strategy=b.strategy, ticker=b.ticker,
+                        weight=weights[b.strategy],
+                        outcome="correlation_cap_full", winner=None,
+                        position_size=requested_size,
+                        blocked_by_correlation_with=corr_diagnostics,
+                    ))
+                    n_correlation_cap_skipped_by_strategy[b.strategy] = (
+                        n_correlation_cap_skipped_by_strategy.get(b.strategy, 0) + 1
+                    )
+                    continue
             open_positions.append(_OpenPosition(
                 strategy=b.strategy, ticker=b.ticker,
                 entry_date=d, entry_price=b.event_price,
