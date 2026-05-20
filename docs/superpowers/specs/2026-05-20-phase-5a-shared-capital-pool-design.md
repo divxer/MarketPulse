@@ -88,7 +88,12 @@ for d in trading_calendar:
     bids_by_ticker = group_by(todays_bids, key=lambda b: b.ticker)
     winners = {}
     for ticker, bids in bids_by_ticker.items():
-        best = max(bids, key=lambda b: weights[b.strategy])
+        # Tiebreaker: highest weight wins; on tie, alphabetically-earliest
+        # strategy name. min(...) on (-weight, strategy_name) gives:
+        #   primary  = max weight (since negated)
+        #   secondary = min strategy_name (alphabetical ascending)
+        # Deterministic across runs and across Python versions.
+        best = min(bids, key=lambda b: (-weights[b.strategy], b.strategy))
         winners[ticker] = best
         for loser in bids:
             if loser != best:
@@ -99,10 +104,10 @@ for d in trading_calendar:
                 ))
 
     # ─── ALLOCATE (capital-constrained, greedy by weight desc) ───
+    # Same composite-key tiebreaker as DEDUP: weight desc, then strategy asc.
     sorted_winners = sorted(
         winners.values(),
-        key=lambda b: weights[b.strategy],
-        reverse=True,
+        key=lambda b: (-weights[b.strategy], b.strategy),
     )
     for bid in sorted_winners:
         capital_in_use = sum(p.position_size for p in open_positions)
@@ -166,6 +171,8 @@ for d in trading_calendar:
 - **All bids dedup-lost or cap-skipped** → `ALLOC` input empty, equity drifts on MTM only.
 - **Cash drops below `$1k` but cap not full** → distinct counter `n_cash_short_skipped` (vs cap-full `n_capacity_skipped`). Both surfaced in `StrategyContribution`.
 - **In-flight ticker** (already held in another position) → bid filtered out in `BID COLLECT` step. Avoids doubling up.
+- **Same-day round-trip allowed (v0 simplification)** → a position closes on day d (CLOSE step) and a NEW bid for the same ticker arrives on day d (BID COLLECT step). Because CLOSE precedes BID COLLECT in the strict order, the ticker is no longer in `open_positions` when bid collection runs, so the new bid passes the in-flight filter and may open. Real trading would require a 1-day cooldown to avoid wash-sale rules and over-trading. **Phase 5a accepts this as a v0 simplification.** Phase 5b/6 should add `min_holding_days_after_close` enforcement. Tracked as an explicit non-goal in §1.
+- **Equal-weight tiebreaker** → when two strategies bid the same weight (common in bootstrap when both = 1.0), DEDUP `max(..., key=weights[s])` and ALLOC `sorted(..., key=weights[s])` use Python's stable sort + iteration order. To make this deterministic across runs, both sorts use `(weights[s], strategy_name)` as the composite key — alphabetical strategy name as the secondary sort. Test: `test_equal_weight_tiebreaker_uses_alphabetical_strategy`.
 
 ---
 
@@ -195,10 +202,20 @@ def rolling_sharpe(
 Phase 5a does NOT rebuild Sharpe from scratch per bid call. Instead:
 
 1. **Pre-compute** all six per-strategy isolated `StrategyBacktestResult` objects (Phase 4's existing `run_all_backtests` already does this).
-2. **Expose** each strategy's full (un-downsampled) daily equity curve via a new `_full_equity_curve` field on `StrategyBacktestResult`.
+2. **Expose** each strategy's full (un-downsampled) daily equity curve via a new `full_equity_curve` field on `StrategyBacktestResult`.
 3. **At each bid step**, slice each strategy's daily curve to the lookback window and compute Sharpe via `empyrical.sharpe_ratio` on the diff'd values.
 
 This means the Phase 5a "extra work" beyond Phase 4 is purely the bidding logic in the daily loop. Pre-computation cost is unchanged.
+
+### Design rationale — why use Phase 4 ISOLATED curves (not shared-pool slices) for Sharpe
+
+The Sharpe input for bid weighting is each strategy's PHASE 4 isolated daily curve (the "what if this strategy ran alone with $10k" curve), NOT a slice of the shared-pool curve attributable to this strategy.
+
+**Reason:** bid weights should reflect **intrinsic strategy quality**, not the strategy's accident-of-ordering in the shared pool. If momentum_breakout got starved of capital last month (because oversold_reversal happened to fire first and consume cap), its shared-pool Sharpe would be artificially low even though the strategy itself is good. That would create a feedback loop where unlucky strategies stay unlucky.
+
+Using the isolated curve breaks that loop: bid weights measure "this strategy's quality given a fair chance", and the pool dynamically allocates based on that quality estimate. Capital starvation in the pool doesn't degrade future bid weights.
+
+**Edge case:** Phase 4 isolated runs use the **same event set** as Phase 5a shared runs, just with each strategy getting its own $10k. The pairs going into both simulators are identical (same `get_bullish_events_with_outcomes` query). So the isolated daily curve is a clean signal of strategy quality.
 
 ### Bid weight computation function
 
@@ -218,6 +235,20 @@ def compute_bid_weights(
       2. Compute Sharpe via empyrical on diff'd values; gate at n<5 = None
       3. If all None → all 1.0 (full equal-weight bootstrap)
       4. Otherwise: None strategies = mean of known; floor 0.1
+
+    Contract:
+      - All strategies in `strategies_today` MUST be keys of `daily_curves`.
+        Missing-key behavior is undefined; the caller (orchestrator) is
+        responsible for ensuring the dict is complete. Test
+        `test_compute_bid_weights_raises_on_missing_strategy` locks this
+        with an explicit KeyError assertion.
+      - `daily_curves[s]` may be empty list (zero-event strategy in window)
+        → that strategy's slice will also be empty → n=0 < 5 → None →
+        bootstrap path applies.
+      - `as_of` must be a real trading date in the calendar (no validation
+        in this fn; rolling_sharpe handles cutoff math).
+      - `min_floor` lower-bounds ALL weights including non-None ones.
+        Spec-locked at 0.1; do not change without revisiting §3 floor design.
     """
 ```
 
@@ -263,23 +294,31 @@ class StrategyBacktestResult:
     strategy_exposure: float | None = None   # avg deployed / initial in shared pool
     capital_bid_score: float | None = None   # avg rolling Sharpe weight used
 
-    # Phase 5a internal-use: un-downsampled daily curve for rolling
-    # Sharpe lookups. Never serialized to template (the chart still uses
-    # the downsampled `daily_equity_curve`).
-    _full_equity_curve: list[tuple[date, float]] | None = None
+    # Un-downsampled daily curve, used cross-module by sharpe.rolling_sharpe()
+    # for window slicing. Never serialized to template (the chart still uses
+    # the downsampled `daily_equity_curve`). Name is public (no leading
+    # underscore) because compute_bid_weights in a separate module reads it.
+    full_equity_curve: list[tuple[date, float]] | None = None
 
 
 @dataclass(frozen=True)
 class PortfolioBacktestResult:
-    """Phase 5a shared-pool result — the ONE portfolio combining all strategies."""
+    """Phase 5a shared-pool result — the ONE portfolio combining all strategies.
 
-    display_name: str = "Shared Pool"
+    Field order: all non-defaulted fields FIRST (Python dataclass requirement);
+    defaulted provenance fields LAST. Mirrors Phase 4's StrategyBacktestResult
+    ordering — non-default-then-default — and avoids the
+    'non-default argument follows default argument' import-time TypeError.
+    """
+
+    # Identity (required)
     horizon: int                          # 5 / 20 / 60
-    mtm_model: str = "linear_interpolation_v0"
-    bid_policy: str = "rolling_sharpe_60d_v0"   # Phase 5a provenance
 
+    # Aggregate counts (required)
     n_trades: int                         # positions opened across all strategies
     n_dedup_total: int                    # cross-strategy ticker collisions resolved
+
+    # Performance metrics (required; sharpe/sortino/calmar may be None)
     cumulative_return: float
     annual_return: float
     sharpe: float | None
@@ -290,11 +329,18 @@ class PortfolioBacktestResult:
     avg_win_pct: float
     avg_loss_pct: float
 
+    # Series + benchmarks (required)
     daily_equity_curve: list[tuple[date, float]]   # downsampled to ~120 points
-    excess_vs_spy: float                  # combined cum_return − spy.cum_return
+    excess_vs_spy: float                           # combined cum − spy.cum
 
+    # Breakdown + diagnostics (required)
     per_strategy_stats: dict[str, "StrategyContribution"]
     bid_history: list["BidRecord"]        # capped at MAX_BID_RECORDS_RENDERED = 100
+
+    # Defaulted provenance (always-default in v0; future versions vary)
+    display_name: str = "Shared Pool"
+    mtm_model: str = "linear_interpolation_v0"
+    bid_policy: str = "rolling_sharpe_60d_v0"   # Phase 5a provenance
 
 
 @dataclass(frozen=True)
@@ -320,19 +366,35 @@ class StrategyContribution:
 
 @dataclass(frozen=True)
 class BidRecord:
-    """One bid decision — diagnostic timeline.
-
-    Stored on PortfolioBacktestResult.bid_history. Capped at
-    MAX_BID_RECORDS_RENDERED = 100 to bound template payload size.
-    The shared-pool simulator may track more internally but the UI
-    only sees the most recent 100.
-    """
+    """One bid decision — diagnostic timeline."""
     date: date
     strategy: str
     ticker: str
     weight: float                # weight used (post-floor, post-bootstrap)
     outcome: Literal["won", "dedup_loser", "cap_full", "cash_short"]
     winner: str | None           # who won the ticker (only when outcome=dedup_loser)
+
+
+# ───── BidRecord retention policy ─────
+#
+# Two-layer cap (spec-locked invariant):
+#
+# 1. Inside simulate_shared_pool() the simulator records EVERY bid attempt
+#    into an internal `_all_bids: list[BidRecord]`. This is unbounded
+#    during simulation — needed for unit tests that assert specific bid
+#    outcomes deep in the timeline.
+#
+# 2. The orchestrator (run_shared_pool_backtest) slices the LAST 100
+#    entries before constructing PortfolioBacktestResult.bid_history.
+#    Last-N (not first-N) so the UI shows MOST RECENT decisions.
+#
+# Test: test_bid_records_capped_at_render_layer asserts that
+# `len(result.bid_history) <= 100` AND that they are the last 100
+# in chronological order (not the first 100).
+#
+# Memory bound: even 10k events × 6 strategies = 60k bids at ~80 bytes
+# each = ~4.8 MB. Fine for one simulation; the slice prevents per-render
+# template bloat.
 ```
 
 ### Orchestrator return contract
@@ -461,7 +523,9 @@ The strategy display-name link continues to point to `/lab/ai-track?strategy=<na
 > 回放 Phase 3 的 6 个策略 + SPY 基准在过去 N 天内的策略级合成 PnL。
 
 **Shared Pool mode** (new):
-> 6 个策略共享单一 \$10k 资本池,通过 60-day 滚动 Sharpe 加权竞标分配。撞 ticker 时高 Sharpe 策略赢。**bid_policy=rolling_sharpe_60d_v0**。
+> 6 个策略共享单一 \$10k 资本池,通过 {{ lookback_days }}-day 滚动 Sharpe 加权竞标分配。撞 ticker 时高 Sharpe 策略赢。**bid_policy={{ bid_policy }}**。
+
+Template variables `lookback_days` and `bid_policy` pulled from the route's context so future Phase 5b changes (e.g., 90d window, kelly_v0 policy) update copy automatically without code edits to the partial.
 
 ### Bid history timeline (shared-pool mode only)
 
@@ -494,10 +558,10 @@ marketpulse/backtest/
 ├── types.py                              MODIFY: add PortfolioBacktestResult,
 │                                                 StrategyContribution, BidRecord;
 │                                                 extend StrategyBacktestResult with
-│                                                 _full_equity_curve field
+│                                                 full_equity_curve field
 ├── sharpe.py                             NEW: rolling_sharpe() + compute_bid_weights()
 ├── portfolio_simulator.py                NEW: simulate_shared_pool() core loop
-├── simulator.py                          MODIFY: populate _full_equity_curve on
+├── simulator.py                          MODIFY: populate full_equity_curve on
 │                                                 StrategyBacktestResult;
 │                                                 add run_shared_pool_backtest() entry
 └── __init__.py                           MODIFY: re-export new types
@@ -530,7 +594,7 @@ No DB migration. No new dependencies (empyrical-reloaded already added in Phase 
 
 ## 7. Test Plan
 
-### Key invariants to lock (≈28 tests)
+### Key invariants to lock (≈38 tests)
 
 **Rolling Sharpe service:**
 ```
@@ -547,6 +611,9 @@ test_bid_weight_avg_fill_when_some_below_threshold
 test_bid_weight_floors_negative_sharpe_at_0_1
 test_bid_weight_does_not_floor_high_positive_sharpe
 test_bid_weight_all_negative_degenerates_to_fifo
+test_bid_weight_deep_negative_sharpe_still_floored_at_0_1     # -10 → 0.1
+test_compute_bid_weights_raises_on_missing_strategy           # contract enforcement
+test_bid_weight_empty_curve_in_daily_curves_returns_bootstrap # n=0 path
 ```
 
 **Shared-pool simulator:**
@@ -562,9 +629,15 @@ test_shared_pool_excess_vs_spy_is_pool_cum_minus_spy
 test_shared_pool_no_signal_day_still_records_equity
 test_shared_pool_bootstrap_period_uses_equal_weight
 test_shared_pool_contribution_pnl_sums_to_pool_pnl
-test_shared_pool_bid_records_capped_at_max
 test_shared_pool_in_flight_ticker_filtered_at_bid_collect
 test_shared_pool_sharpe_does_not_peek_future
+test_shared_pool_same_day_reentry_after_close_allowed       # v0 simplification
+test_equal_weight_tiebreaker_uses_alphabetical_strategy     # DEDUP + ALLOC
+test_strategy_contribution_avg_exposure_correct             # day-avg math
+test_bid_records_capped_at_render_layer                     # last-100 slice
+test_simulator_internal_bid_history_unbounded               # raw store unbounded
+test_phase4_isolated_results_unchanged_with_shared_run      # Phase 4 regression
+test_n_dedup_total_equals_sum_of_per_strategy_n_dedup       # accounting integrity
 ```
 
 **Route + UI:**
@@ -580,7 +653,7 @@ test_lab_backtest_per_strategy_unchanged              # Phase 4 regression
 
 ### Coverage target
 
-≥ 90% on new modules (`sharpe.py`, `portfolio_simulator.py`). The existing Phase 4 `simulator.py` only gains the `_full_equity_curve` field which is exercised by every existing test via the simulator path.
+≥ 90% on new modules (`sharpe.py`, `portfolio_simulator.py`). The existing Phase 4 `simulator.py` only gains the `full_equity_curve` field which is exercised by every existing test via the simulator path.
 
 ---
 
@@ -616,6 +689,7 @@ test_lab_backtest_per_strategy_unchanged              # Phase 4 regression
 | **Performance: 6 isolated + 1 shared per page load** | Acceptable at MarketPulse's data volume (hundreds of events, sub-second). Will revisit at 100× scale. |
 | **Phase 4 isolated results no longer "the answer"** | Both isolated AND shared computed every render. UI toggle. Per-Strategy is still default. |
 | **Lookback window choice (60d) is arbitrary** | Provenance via `bid_policy` field; future runs can use `rolling_sharpe_90d_v0` etc. without breaking history. |
+| **Deep-negative Sharpe (e.g., -5, -10) gets same floor as -0.1** | v0 accepts this — floor is constant at 0.1. Catastrophically-losing strategies still get *some* capital (rare, but non-zero). Phase 5b/c can introduce a soft-lockout threshold (e.g., Sharpe < -2.0 → weight 0) once we have enough live data to know what "catastrophic" means in our universe. Acceptable trade-off because n<5 None gate already shields against tiny-sample false negatives. |
 
 ---
 
@@ -649,3 +723,15 @@ Every clause in §1 (Identity) maps to a section below:
 ---
 
 **Spec author:** Claude (brainstorming session 2026-05-20, ~30 min, 5 user-locked decisions + 8 derived locks)
+
+**Review iteration 1 (2026-05-20):** /review identified 1 critical (dataclass field order
+would raise TypeError at import), 3 important (bid-history dual-cap policy, underscore-
+prefix vs cross-module access, same-day re-entry semantics), and 7 minor items (tiebreaker
+determinism, deep-negative-Sharpe floor, parameter contract, design rationale, hero text
+templating, missing tests, risks-table coverage). All addressed inline in this commit:
+field order corrected in §4, two-layer bid-history cap explicit in §4, `full_equity_curve`
+public name in §4, same-day re-entry documented as v0 simplification in §2, composite-key
+tiebreaker `(-weight, strategy_name)` locked in §2 pseudocode, design rationale for using
+Phase 4 isolated curves added to §3, contract block on `compute_bid_weights` in §3, hero
+text templated in §5, ~10 new tests added to §7 (now 38 total), deep-negative-Sharpe
+risk added to §9.
