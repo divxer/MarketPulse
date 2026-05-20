@@ -15,6 +15,34 @@ from marketpulse.web.main import templates
 router = APIRouter()
 
 
+def _compute_size_distribution(
+    bid_records: list,
+    min_position: float = 200.0,
+    max_position: float = 4_000.0,
+    n_bins: int = 7,
+) -> list[float]:
+    """Linearly-spaced histogram of position sizes across won/dedup/cap/cash bids.
+
+    Spec § 4: 7 bins linearly over [min_position, max_position]. Excludes
+    size_too_small (their position_size is the raw pre-clamp value, not a
+    real allocation). Returns normalized heights 0-1 for SVG rendering.
+    """
+    valid = [
+        b.position_size for b in bid_records
+        if b.outcome != "size_too_small" and b.position_size > 0
+    ]
+    if not valid:
+        return [0.0] * n_bins
+    bin_width = (max_position - min_position) / n_bins
+    counts = [0] * n_bins
+    for size in valid:
+        bin_idx = min(int((size - min_position) / bin_width), n_bins - 1)
+        bin_idx = max(0, bin_idx)
+        counts[bin_idx] += 1
+    max_count = max(counts) if counts else 1
+    return [c / max_count for c in counts]
+
+
 def _qs_from_filters(filters: dict) -> str:
     """Build a clean query string, dropping defaults / None / empty."""
     DEFAULTS = {"horizon": 5, "since_days": 90, "mode": "per-strategy"}
@@ -66,9 +94,17 @@ def lab_backtest(
         )
         results = out["isolated"]
         shared_result = out["shared"]
+        # Compute size distribution histogram from bid history
+        size_distribution = _compute_size_distribution(
+            shared_result.bid_history,
+            min_position=200.0,
+            max_position=4_000.0,
+            n_bins=7,
+        )
     else:
         results = run_all_backtests(db, horizon=horizon, since=since)
         shared_result = None
+        size_distribution = None
 
     strategies = [r for r in results if r.strategy != "__spy_buyhold__"]
     spy = next((r for r in results if r.strategy == "__spy_buyhold__"), None)
@@ -116,6 +152,10 @@ def lab_backtest(
             "mode": mode,
             "shared_result": shared_result,
             "lookback_days": 60,
+            "size_distribution": size_distribution,
+            "min_position": 200.0,
+            "max_position": 4_000.0,
+            "sizing_policy": shared_result.sizing_policy if shared_result else None,
         },
     )
 
