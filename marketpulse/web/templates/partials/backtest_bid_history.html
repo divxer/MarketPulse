@@ -1,0 +1,40 @@
+{% if shared_result and shared_result.bid_history %}
+<section class="mp-card">
+  <div class="mp-card__head">
+    <span class="mp-card__title">
+      <span class="material-symbols-outlined">history</span>近 100 次 bid 决策
+    </span>
+    <span class="mp-card__sub">诊断用 · 最新在上</span>
+  </div>
+  <div class="mp-card__body" style="padding:0; max-height:400px; overflow-y:auto;">
+    <table class="mp-table mp-bid-history-table">
+      <thead>
+        <tr>
+          <th>日期</th>
+          <th>策略</th>
+          <th>Ticker</th>
+          <th class="num">权重</th>
+          <th>结果</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for b in shared_result.bid_history|reverse %}
+        <tr class="{% if b.outcome == 'won' %}is-won{% elif b.outcome == 'dedup_loser' %}is-loser{% else %}is-skipped{% endif %}">
+          <td class="mono tnum">{{ b.date.isoformat() }}</td>
+          <td>{{ b.strategy }}</td>
+          <td>{{ b.ticker }}</td>
+          <td class="num mono tnum">{{ "{:.2f}".format(b.weight) }}</td>
+          <td>
+            {% if b.outcome == 'won' %}<span class="mp-chip mp-chip--up">✓ won</span>
+            {% elif b.outcome == 'dedup_loser' %}<span class="mp-chip" title="ceded to {{ b.winner }}">→ {{ b.winner }}</span>
+            {% elif b.outcome == 'cap_full' %}<span class="mp-chip mp-chip--down">cap full</span>
+            {% elif b.outcome == 'cash_short' %}<span class="mp-chip mp-chip--down">cash short</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
