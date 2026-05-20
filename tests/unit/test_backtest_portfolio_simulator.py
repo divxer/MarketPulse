@@ -338,3 +338,65 @@ def test_shared_pool_contribution_pnl_includes_unrealized_mtm():
     total_contrib = sum(c.contribution_pnl for c in r.per_strategy_stats.values())
     pool_pnl = r.cumulative_return * 10_000.0
     assert abs(total_contrib - pool_pnl) < 1.0
+
+
+def test_shared_pool_bid_policy_reflects_lookback_days():
+    """Review final fix #1: bid_policy provenance string varies with lookback_days
+    so dashboards/logs aren't lying when caller passes a non-default window."""
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+    # Two runs, two different lookback windows
+    bids = [_pair("A", "momentum_breakout", date(2026, 5, 1), 100.0,
+                   date(2026, 5, 8), 105.0)]
+    r60 = simulate_shared_pool(
+        bids=bids,
+        daily_curves={"momentum_breakout": _curve()},
+        horizon=5,
+        initial_capital=10_000.0, position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+    )
+    r90 = simulate_shared_pool(
+        bids=bids,
+        daily_curves={"momentum_breakout": _curve()},
+        horizon=5,
+        initial_capital=10_000.0, position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=90,
+    )
+    assert r60.bid_policy == "rolling_sharpe_60d_v0"
+    assert r90.bid_policy == "rolling_sharpe_90d_v0"
+
+
+def test_shared_pool_bid_policy_set_on_empty_bids_path():
+    """Even the no-bids early-return path carries the correct provenance."""
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+    r = simulate_shared_pool(
+        bids=[], daily_curves={}, horizon=5,
+        initial_capital=10_000.0, position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=30,
+    )
+    assert r.bid_policy == "rolling_sharpe_30d_v0"
+
+
+def test_shared_pool_per_strategy_stats_iteration_is_sorted():
+    """Review final fix #2: per_strategy_stats dict iteration is deterministic
+    (alphabetical strategy name) so template row rendering is stable across runs."""
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+    daily_curves = {
+        "zebra": [],            # would land first in set() iteration sometimes
+        "alpha": _curve(),
+        "momentum_breakout": _curve(),
+    }
+    # Verify the non-empty path — empty-bids early-return has empty per_strategy_stats
+    bids = [_pair("AAA", "zebra", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0)]
+    r2 = simulate_shared_pool(
+        bids=bids,
+        daily_curves=daily_curves,
+        horizon=5,
+        initial_capital=10_000.0, position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+    )
+    # All 3 strategies in daily_curves should appear in per_strategy_stats,
+    # in alphabetical insertion order regardless of dict construction order.
+    keys = list(r2.per_strategy_stats.keys())
+    assert keys == sorted(daily_curves.keys()), (
+        f"Expected alphabetical order, got {keys}"
+    )

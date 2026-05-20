@@ -50,7 +50,15 @@ def simulate_shared_pool(
     max_capital_in_use: float = 10_000.0,
     lookback_days: int = 60,
 ) -> PortfolioBacktestResult:
-    """Phase 5a shared-pool simulator. See spec § 2 for algorithm."""
+    """Phase 5a shared-pool simulator. See spec § 2 for algorithm.
+
+    Provenance: every result carries bid_policy=f"rolling_sharpe_{lookback_days}d_v0"
+    so dashboards and logs can distinguish runs that varied the lookback window.
+    Default 60d matches spec § 8 decision #3; non-default lookbacks land in the
+    result's bid_policy string so the source-of-truth window is never ambiguous.
+    """
+    bid_policy = f"rolling_sharpe_{lookback_days}d_v0"
+
     if not bids:
         from datetime import date as _date
         return PortfolioBacktestResult(
@@ -71,6 +79,7 @@ def simulate_shared_pool(
             excess_vs_spy=0.0,
             per_strategy_stats={},
             bid_history=[],
+            bid_policy=bid_policy,
         )
 
     db_dates: set[date] = set()
@@ -280,11 +289,14 @@ def simulate_shared_pool(
         if capital_in_use_by_day else 0.0
     )
 
-    # Per-strategy contributions
+    # Per-strategy contributions — iterate in sorted strategy-name order so
+    # template row rendering is deterministic across runs (set() iteration is
+    # arbitrary; insertion order leaks into PortfolioBacktestResult.per_strategy_stats
+    # via dict semantics and would shuffle the strategy table).
     from marketpulse.strategies import load_strategies
     strategies_yaml = load_strategies()
     per_strategy_stats: dict[str, StrategyContribution] = {}
-    for s in set(daily_curves.keys()):
+    for s in sorted(daily_curves.keys()):
         ret_list = trade_returns_by_strategy.get(s, [])
         realized = sum(r * position_size for r in ret_list)
         unrealized = unrealized_pnl_by_strategy.get(s, 0.0)
@@ -330,4 +342,5 @@ def simulate_shared_pool(
         excess_vs_spy=0.0,  # orchestrator (Task 7) overrides with combined - SPY
         per_strategy_stats=per_strategy_stats,
         bid_history=bid_history,
+        bid_policy=bid_policy,
     )
