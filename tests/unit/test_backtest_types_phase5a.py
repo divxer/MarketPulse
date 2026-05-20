@@ -38,6 +38,8 @@ def _contribution_kwargs(**overrides):
         "n_capacity_skipped": 0,
         "n_cash_short_skipped": 0,
         "n_size_too_small_skipped": 0,  # NEW Phase 5b
+        "n_sector_cap_skipped": 0,        # NEW Phase 5c
+        "n_correlation_cap_skipped": 0,   # NEW Phase 5c
         "contribution_pnl": 250.0,
         "avg_exposure": 0.30,
         "avg_bid_weight": 1.4,
@@ -57,6 +59,11 @@ def _portfolio_kwargs(**overrides):
         "avg_capital_utilization": 0.55,
         "max_strategy_exposure": 0.55,  # NEW Phase 5b
         "hhi_concentration": 0.31,       # NEW Phase 5b
+        "max_sector_exposure": 0.0,              # NEW Phase 5c
+        "max_sector_exposure_by_sector": {},     # NEW Phase 5c
+        "sector_breakdown": {},                  # NEW Phase 5c
+        "max_neighbor_exposure": 0.0,            # NEW Phase 5c
+        "n_correlation_cap_events": 0,           # NEW Phase 5c
         "cumulative_return": 0.12,
         "annual_return": 0.24,
         "sharpe": 1.4,
@@ -246,6 +253,8 @@ def test_strategy_contribution_has_size_telemetry_fields():
         n_trades=5, n_dedup_skipped=1,
         n_capacity_skipped=0, n_cash_short_skipped=0,
         n_size_too_small_skipped=2,
+        n_sector_cap_skipped=0,
+        n_correlation_cap_skipped=0,
         contribution_pnl=250.0,
         avg_exposure=0.25, avg_bid_weight=1.2,
         avg_position_size=1450.0,
@@ -266,6 +275,11 @@ def test_portfolio_result_has_concentration_telemetry():
         avg_capital_utilization=0.42,
         max_strategy_exposure=0.55,
         hhi_concentration=0.31,
+        max_sector_exposure=0.0,
+        max_sector_exposure_by_sector={},
+        sector_breakdown={},
+        max_neighbor_exposure=0.0,
+        n_correlation_cap_events=0,
         cumulative_return=0.08, annual_return=0.15,
         sharpe=1.3, sortino=1.6, max_drawdown=-0.04, calmar=3.75,
         win_rate=0.62, avg_win_pct=0.03, avg_loss_pct=-0.018,
@@ -289,6 +303,11 @@ def test_portfolio_result_sizing_policy_overridable():
         horizon=5, n_trades=0, n_dedup_total=0,
         avg_capital_utilization=0.0,
         max_strategy_exposure=0.0, hhi_concentration=0.0,
+        max_sector_exposure=0.0,
+        max_sector_exposure_by_sector={},
+        sector_breakdown={},
+        max_neighbor_exposure=0.0,
+        n_correlation_cap_events=0,
         cumulative_return=0.0, annual_return=0.0,
         sharpe=None, sortino=None, max_drawdown=0.0, calmar=None,
         win_rate=0.0, avg_win_pct=0.0, avg_loss_pct=0.0,
@@ -298,3 +317,125 @@ def test_portfolio_result_sizing_policy_overridable():
         sizing_policy="vol_target_conviction_v0",
     )
     assert r.sizing_policy == "vol_target_conviction_v0"
+
+
+# ─── Phase 5c extensions ───
+
+def test_bid_record_sector_cap_full_outcome_with_diagnostic() -> None:
+    """Phase 5c: new 'sector_cap_full' outcome + blocked_by_sector diagnostic."""
+    from datetime import date
+
+    from marketpulse.backtest.types import BidRecord
+
+    b = BidRecord(
+        date=date(2026, 5, 1), strategy="x", ticker="AAPL",
+        weight=1.0, outcome="sector_cap_full", winner=None,
+        position_size=1500.0,
+        blocked_by_sector="Technology",
+    )
+    assert b.outcome == "sector_cap_full"
+    assert b.blocked_by_sector == "Technology"
+    assert b.blocked_by_correlation_with == ()
+
+
+def test_bid_record_correlation_cap_full_with_diagnostic_tuple() -> None:
+    """Phase 5c: 'correlation_cap_full' outcome + blocked_by_correlation_with tuple."""
+    from datetime import date
+
+    from marketpulse.backtest.types import BidRecord
+
+    diag = (("AAPL", 0.72), ("GOOGL", 0.68))
+    b = BidRecord(
+        date=date(2026, 5, 1), strategy="x", ticker="TQQQ",
+        weight=1.0, outcome="correlation_cap_full", winner=None,
+        position_size=2000.0,
+        blocked_by_correlation_with=diag,
+    )
+    assert b.outcome == "correlation_cap_full"
+    assert b.blocked_by_sector is None
+    assert b.blocked_by_correlation_with == diag
+
+
+def test_strategy_contribution_has_cap_skip_counters() -> None:
+    """Phase 5c adds n_sector_cap_skipped + n_correlation_cap_skipped."""
+    from marketpulse.backtest.types import StrategyContribution
+
+    c = StrategyContribution(
+        strategy="x", display_name="X",
+        n_trades=5, n_dedup_skipped=1,
+        n_capacity_skipped=0, n_cash_short_skipped=0,
+        n_size_too_small_skipped=0,
+        n_sector_cap_skipped=2,
+        n_correlation_cap_skipped=1,
+        contribution_pnl=100.0,
+        avg_exposure=0.20, avg_bid_weight=1.0,
+        avg_position_size=1200.0,
+        n_bids=9, n_floor_hits=0,
+    )
+    assert c.n_sector_cap_skipped == 2
+    assert c.n_correlation_cap_skipped == 1
+
+
+def test_portfolio_result_has_sector_correlation_telemetry() -> None:
+    """Phase 5c adds 7 new fields with sensible defaults."""
+    from datetime import date
+
+    from marketpulse.backtest.types import PortfolioBacktestResult
+
+    r = PortfolioBacktestResult(
+        horizon=5,
+        n_trades=10, n_dedup_total=2,
+        avg_capital_utilization=0.4,
+        max_strategy_exposure=0.3, hhi_concentration=0.2,
+        max_sector_exposure=0.35,
+        max_sector_exposure_by_sector={"Technology": 0.35, "Energy": 0.10},
+        sector_breakdown={"Technology": 0.20, "Energy": 0.05},
+        max_neighbor_exposure=0.30,
+        n_correlation_cap_events=1,
+        cumulative_return=0.05, annual_return=0.10,
+        sharpe=1.0, sortino=1.2, max_drawdown=-0.05, calmar=2.0,
+        win_rate=0.6, avg_win_pct=0.02, avg_loss_pct=-0.01,
+        daily_equity_curve=[(date(2026, 4, 1), 10_000.0)],
+        excess_vs_spy=0.02,
+        per_strategy_stats={}, bid_history=[],
+    )
+    assert r.max_sector_exposure == 0.35
+    assert r.max_sector_exposure_by_sector["Technology"] == 0.35
+    assert r.sector_breakdown["Energy"] == 0.05
+    assert r.max_neighbor_exposure == 0.30
+    assert r.n_correlation_cap_events == 1
+    assert r.sector_cap_policy == "uniform_40pct_v0"
+    assert r.correlation_cap_policy == "neighbor_sum_rho06_40pct_v0"
+    assert r.sector_caps_enabled is True
+    assert r.correlation_caps_enabled is True
+    assert r.risk_policy == "cap40_corr06_enforced_v0"
+
+
+def test_portfolio_result_caps_disabled_provenance() -> None:
+    """sector/correlation caps disabled → risk_policy='caps_disabled_v0'."""
+    from datetime import date
+
+    from marketpulse.backtest.types import PortfolioBacktestResult
+
+    r = PortfolioBacktestResult(
+        horizon=5, n_trades=0, n_dedup_total=0,
+        avg_capital_utilization=0.0,
+        max_strategy_exposure=0.0, hhi_concentration=0.0,
+        max_sector_exposure=0.0,
+        max_sector_exposure_by_sector={},
+        sector_breakdown={},
+        max_neighbor_exposure=0.0,
+        n_correlation_cap_events=0,
+        cumulative_return=0.0, annual_return=0.0,
+        sharpe=None, sortino=None, max_drawdown=0.0, calmar=None,
+        win_rate=0.0, avg_win_pct=0.0, avg_loss_pct=0.0,
+        daily_equity_curve=[(date(2026, 4, 1), 10_000.0)],
+        excess_vs_spy=0.0,
+        per_strategy_stats={}, bid_history=[],
+        sector_caps_enabled=False,
+        correlation_caps_enabled=False,
+        risk_policy="caps_disabled_v0",
+    )
+    assert r.sector_caps_enabled is False
+    assert r.correlation_caps_enabled is False
+    assert r.risk_policy == "caps_disabled_v0"
