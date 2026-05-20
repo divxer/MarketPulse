@@ -51,7 +51,7 @@ def test_shared_pool_zero_bids_returns_flat_curve():
         daily_curves={},
         horizon=5,
         initial_capital=10_000.0,
-        position_size=1_000.0,
+        base_position_size=1_000.0,
         max_capital_in_use=10_000.0,
         lookback_days=60,
     )
@@ -68,7 +68,7 @@ def test_shared_pool_single_bid_opens_one_position():
         bids=bids,
         daily_curves={"momentum_breakout": _curve()},
         horizon=5,
-        initial_capital=10_000.0, position_size=1_000.0,
+        initial_capital=10_000.0, base_position_size=1_000.0,
         max_capital_in_use=10_000.0, lookback_days=60,
     )
     assert r.n_trades == 1
@@ -87,7 +87,7 @@ def test_shared_pool_close_frees_cap_before_alloc():
         bids=bids,
         daily_curves={"momentum_breakout": _curve()},
         horizon=5,
-        initial_capital=10_000.0, position_size=1_000.0,
+        initial_capital=10_000.0, base_position_size=1_000.0,
         max_capital_in_use=10_000.0, lookback_days=60,
     )
     assert r.n_trades == 11
@@ -109,7 +109,7 @@ def test_shared_pool_in_flight_ticker_filtered_at_bid_collect():
             "news_event": _curve(),
         },
         horizon=5,
-        initial_capital=10_000.0, position_size=1_000.0,
+        initial_capital=10_000.0, base_position_size=1_000.0,
         max_capital_in_use=10_000.0, lookback_days=60,
     )
     assert r.n_trades == 1
@@ -128,7 +128,7 @@ def test_shared_pool_bootstrap_period_uses_equal_weight():
         bids=bids,
         daily_curves={"momentum_breakout": [], "news_event": []},
         horizon=5,
-        initial_capital=10_000.0, position_size=1_000.0,
+        initial_capital=10_000.0, base_position_size=1_000.0,
         max_capital_in_use=10_000.0, lookback_days=60,
     )
     assert r.n_trades == 2
@@ -150,7 +150,7 @@ def test_shared_pool_dedup_picks_highest_sharpe_winner():
             "news_event": _curve(daily_return=0.001, n_days=30),
         },
         horizon=5,
-        initial_capital=10_000.0, position_size=1_000.0,
+        initial_capital=10_000.0, base_position_size=1_000.0,
         max_capital_in_use=10_000.0, lookback_days=60,
     )
     assert r.n_trades == 1
@@ -174,7 +174,7 @@ def test_shared_pool_dedup_loser_records_bid_loss():
             "news_event": _curve(daily_return=0.001, n_days=30),
         },
         horizon=5,
-        initial_capital=10_000.0, position_size=1_000.0,
+        initial_capital=10_000.0, base_position_size=1_000.0,
         max_capital_in_use=10_000.0, lookback_days=60,
     )
     losers = [b for b in r.bid_history if b.outcome == "dedup_loser"]
@@ -195,7 +195,7 @@ def test_shared_pool_greedy_alloc_respects_max_cap():
         bids=bids,
         daily_curves={"momentum_breakout": _curve()},
         horizon=5,
-        initial_capital=10_000.0, position_size=1_000.0,
+        initial_capital=10_000.0, base_position_size=1_000.0,
         max_capital_in_use=10_000.0, lookback_days=60,
     )
     assert r.n_trades == 10
@@ -219,7 +219,7 @@ def test_equal_weight_tiebreak_uses_event_time_then_alpha():
         bids=bids,
         daily_curves={"news_event": [], "momentum_breakout": []},
         horizon=5,
-        initial_capital=10_000.0, position_size=1_000.0,
+        initial_capital=10_000.0, base_position_size=1_000.0,
         max_capital_in_use=10_000.0, lookback_days=60,
     )
     won = [b for b in r.bid_history if b.outcome == "won"]
@@ -236,7 +236,7 @@ def test_shared_pool_mtm_uses_linear_interp_per_position():
         bids=bids,
         daily_curves={"momentum_breakout": _curve()},
         horizon=4,
-        initial_capital=10_000.0, position_size=1_000.0,
+        initial_capital=10_000.0, base_position_size=1_000.0,
         max_capital_in_use=10_000.0, lookback_days=60,
     )
     curve = dict(r.daily_equity_curve)
@@ -254,7 +254,7 @@ def test_shared_pool_no_signal_day_still_records_equity():
         bids=bids,
         daily_curves={"momentum_breakout": _curve()},
         horizon=5,
-        initial_capital=10_000.0, position_size=1_000.0,
+        initial_capital=10_000.0, base_position_size=1_000.0,
         max_capital_in_use=10_000.0, lookback_days=60,
     )
     curve_dates = [d for d, _ in r.daily_equity_curve]
@@ -275,7 +275,7 @@ def test_shared_pool_contribution_pnl_sums_to_pool_pnl():
             "news_event": _curve(daily_return=0.005, n_days=30),
         },
         horizon=5,
-        initial_capital=10_000.0, position_size=1_000.0,
+        initial_capital=10_000.0, base_position_size=1_000.0,
         max_capital_in_use=10_000.0, lookback_days=60,
     )
     total_contrib = sum(c.contribution_pnl for c in r.per_strategy_stats.values())
@@ -298,7 +298,7 @@ def test_shared_pool_bid_records_capped_at_render_layer():
         bids=bids,
         daily_curves={"momentum_breakout": _curve(n_days=200)},
         horizon=5,
-        initial_capital=10_000.0, position_size=1_000.0,
+        initial_capital=10_000.0, base_position_size=1_000.0,
         max_capital_in_use=10_000.0, lookback_days=60,
     )
     assert len(r.bid_history) <= 100
@@ -313,7 +313,7 @@ def test_shared_pool_avg_capital_utilization_correct():
         bids=bids,
         daily_curves={"momentum_breakout": _curve()},
         horizon=4,
-        initial_capital=10_000.0, position_size=1_000.0,
+        initial_capital=10_000.0, base_position_size=1_000.0,
         max_capital_in_use=10_000.0, lookback_days=60,
     )
     assert 0.0 <= r.avg_capital_utilization <= 1.0
@@ -332,7 +332,7 @@ def test_shared_pool_contribution_pnl_includes_unrealized_mtm():
         bids=bids,
         daily_curves={"momentum_breakout": _curve()},
         horizon=10,
-        initial_capital=10_000.0, position_size=1_000.0,
+        initial_capital=10_000.0, base_position_size=1_000.0,
         max_capital_in_use=10_000.0, lookback_days=60,
     )
     total_contrib = sum(c.contribution_pnl for c in r.per_strategy_stats.values())
@@ -351,14 +351,14 @@ def test_shared_pool_bid_policy_reflects_lookback_days():
         bids=bids,
         daily_curves={"momentum_breakout": _curve()},
         horizon=5,
-        initial_capital=10_000.0, position_size=1_000.0,
+        initial_capital=10_000.0, base_position_size=1_000.0,
         max_capital_in_use=10_000.0, lookback_days=60,
     )
     r90 = simulate_shared_pool(
         bids=bids,
         daily_curves={"momentum_breakout": _curve()},
         horizon=5,
-        initial_capital=10_000.0, position_size=1_000.0,
+        initial_capital=10_000.0, base_position_size=1_000.0,
         max_capital_in_use=10_000.0, lookback_days=90,
     )
     assert r60.bid_policy == "rolling_sharpe_60d_v0"
@@ -370,7 +370,7 @@ def test_shared_pool_bid_policy_set_on_empty_bids_path():
     from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
     r = simulate_shared_pool(
         bids=[], daily_curves={}, horizon=5,
-        initial_capital=10_000.0, position_size=1_000.0,
+        initial_capital=10_000.0, base_position_size=1_000.0,
         max_capital_in_use=10_000.0, lookback_days=30,
     )
     assert r.bid_policy == "rolling_sharpe_30d_v0"
@@ -391,7 +391,7 @@ def test_shared_pool_per_strategy_stats_iteration_is_sorted():
         bids=bids,
         daily_curves=daily_curves,
         horizon=5,
-        initial_capital=10_000.0, position_size=1_000.0,
+        initial_capital=10_000.0, base_position_size=1_000.0,
         max_capital_in_use=10_000.0, lookback_days=60,
     )
     # All 3 strategies in daily_curves should appear in per_strategy_stats,
@@ -400,3 +400,148 @@ def test_shared_pool_per_strategy_stats_iteration_is_sorted():
     assert keys == sorted(daily_curves.keys()), (
         f"Expected alphabetical order, got {keys}"
     )
+
+
+# ─── Phase 5b Task 5: SIZE COMPUTE step ────────────────────────────────────
+
+def test_shared_pool_sizing_skips_below_min_with_outcome():
+    """Strategy whose computed size < min is skipped with size_too_small."""
+    from datetime import date, timedelta
+
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+
+    # Build daily curves: one strategy with low α + high σ → raw < min
+    # σ ≈ 0.085 → vol_scale = 0.01/0.085 ≈ 0.118 → raw ≈ $118 (< $200 min).
+    bad = []
+    v = 10_000.0
+    import random
+    random.seed(99)
+    for i in range(30):
+        d = date(2026, 4, 1) + timedelta(days=i)
+        bad.append((d, v))
+        v *= (1 + 0.00005 + random.gauss(0, 0.10))
+
+    bids = [_pair("X", "bad_strategy", date(2026, 5, 1), 100.0,
+                   date(2026, 5, 8), 105.0)]
+    r = simulate_shared_pool(
+        bids=bids,
+        daily_curves={"bad_strategy": bad},
+        horizon=5,
+        initial_capital=10_000.0, base_position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=True,
+    )
+    # bad_strategy's size should be < min → bid skipped
+    size_too_small = [b for b in r.bid_history if b.outcome == "size_too_small"]
+    assert len(size_too_small) == 1
+    assert size_too_small[0].strategy == "bad_strategy"
+    # Diagnostic: position_size = raw pre-clamp (< 200)
+    assert size_too_small[0].position_size < 200.0
+
+
+def test_shared_pool_sizing_filters_before_dedup():
+    """SIZE filters happen BEFORE DEDUP — strategy below min never wins DEDUP."""
+    import random
+    from datetime import date, timedelta
+
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+    random.seed(50)
+    bad = []
+    v = 10_000.0
+    for i in range(30):
+        d = date(2026, 4, 1) + timedelta(days=i)
+        bad.append((d, v))
+        v *= (1 + 0.00005 + random.gauss(0, 0.05))
+
+    good = [(date(2026, 4, 1) + timedelta(days=i), 10_000.0 * (1.005 ** i))
+            for i in range(30)]
+
+    # Both bid for AAPL — bad would normally lose dedup to good anyway,
+    # but here size filter removes bad even before dedup.
+    bids = [
+        _pair("AAPL", "bad", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0),
+        _pair("AAPL", "good", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0),
+    ]
+    r = simulate_shared_pool(
+        bids=bids,
+        daily_curves={"bad": bad, "good": good},
+        horizon=5,
+        initial_capital=10_000.0, base_position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=True,
+    )
+    # bad should be filtered with size_too_small (not dedup_loser)
+    bad_records = [b for b in r.bid_history if b.strategy == "bad"]
+    assert len(bad_records) == 1
+    assert bad_records[0].outcome == "size_too_small"
+    # good wins (was the only one in DEDUP)
+    good_won = [b for b in r.bid_history if b.strategy == "good" and b.outcome == "won"]
+    assert len(good_won) == 1
+
+
+def test_shared_pool_sizing_enabled_false_uses_fixed_base():
+    """sizing_enabled=False → Phase 5a behavior; every position is base."""
+    from datetime import date, timedelta
+
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+
+    good = [(date(2026, 4, 1) + timedelta(days=i), 10_000.0 * (1.005 ** i))
+            for i in range(30)]
+
+    bids = [_pair("AAA", "any", date(2026, 5, 1), 100.0,
+                   date(2026, 5, 8), 105.0)]
+    r = simulate_shared_pool(
+        bids=bids,
+        daily_curves={"any": good},
+        horizon=5,
+        initial_capital=10_000.0, base_position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=False,
+    )
+    # Every BidRecord.position_size == base
+    won = [b for b in r.bid_history if b.outcome == "won"]
+    assert len(won) == 1
+    assert won[0].position_size == 1000.0
+    # sizing_policy reflects fixed mode
+    assert r.sizing_policy == "fixed_v0"
+
+
+def test_shared_pool_sizing_provenance_field_set():
+    """sizing_enabled=True → sizing_policy='vol_target_conviction_v0'."""
+    from datetime import date, timedelta
+
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+
+    good = [(date(2026, 4, 1) + timedelta(days=i), 10_000.0 * (1.005 ** i))
+            for i in range(30)]
+    bids = [_pair("AAA", "any", date(2026, 5, 1), 100.0,
+                   date(2026, 5, 8), 105.0)]
+    r = simulate_shared_pool(
+        bids=bids,
+        daily_curves={"any": good},
+        horizon=5,
+        initial_capital=10_000.0, base_position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=True,
+    )
+    assert r.sizing_policy == "vol_target_conviction_v0"
+
+
+def test_shared_pool_empty_bids_returns_fixed_v0_when_disabled():
+    """Empty bids early-return: sizing_policy reflects flag state."""
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+    r_off = simulate_shared_pool(
+        bids=[], daily_curves={}, horizon=5,
+        initial_capital=10_000.0, base_position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=False,
+    )
+    assert r_off.sizing_policy == "fixed_v0"
+
+    r_on = simulate_shared_pool(
+        bids=[], daily_curves={}, horizon=5,
+        initial_capital=10_000.0, base_position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=True,
+    )
+    assert r_on.sizing_policy == "vol_target_conviction_v0"

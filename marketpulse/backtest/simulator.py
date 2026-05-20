@@ -470,7 +470,7 @@ def run_shared_pool_backtest(
     horizon: int = 5,
     since: date | None = None,
     initial_capital: float = 10_000.0,
-    position_size: float = 1_000.0,
+    base_position_size: float = 1_000.0,
     max_capital_in_use: float = 10_000.0,
     lookback_days: int = 60,
 ) -> dict:
@@ -513,7 +513,7 @@ def run_shared_pool_backtest(
         result, art = simulate_strategy_with_artifacts(
             pairs=pairs,
             strategy=name, display_name=strat.display_name, horizon=horizon,
-            initial_capital=initial_capital, position_size=position_size,
+            initial_capital=initial_capital, position_size=base_position_size,
             max_capital_in_use=max_capital_in_use,
         )
         isolated.append(result)
@@ -539,7 +539,7 @@ def run_shared_pool_backtest(
         daily_curves=daily_curves,
         horizon=horizon,
         initial_capital=initial_capital,
-        position_size=position_size,
+        base_position_size=base_position_size,
         max_capital_in_use=max_capital_in_use,
         lookback_days=lookback_days,
     )
