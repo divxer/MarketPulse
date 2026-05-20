@@ -1136,3 +1136,22 @@ hr.mp-hr {
   color: var(--ns-primary);
   background: var(--ns-surface-container);
 }
+
+/* ════════ Top-nav active state ════════
+ * Applied to the <a> in base.html nav when the link matches the current
+ * request path. Underline + primary color matches the rest of NS tokens.
+ */
+.mp-nav-active {
+  color: var(--ns-primary);
+  font-weight: 600;
+  position: relative;
+}
+.mp-nav-active::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -10px;
+  height: 2px;
+  background: var(--ns-primary);
+}
