@@ -34,7 +34,7 @@
       </thead>
       <tbody>
         {% for b in shared_result.bid_history|reverse %}
-        <tr class="{% if b.outcome == 'won' %}is-won{% elif b.outcome == 'dedup_loser' %}is-loser{% elif b.outcome == 'size_too_small' %}is-skipped{% else %}is-skipped{% endif %}">
+        <tr class="{% if b.outcome == 'won' %}is-won{% elif b.outcome == 'dedup_loser' %}is-loser{% elif b.outcome in ('size_too_small', 'sector_cap_full', 'correlation_cap_full') %}is-skipped{% else %}is-skipped{% endif %}">
           <td class="mono tnum">{{ b.date.isoformat() }}</td>
           <td>{{ b.strategy }}</td>
           <td>{{ b.ticker }}</td>
@@ -52,6 +52,8 @@
             {% elif b.outcome == 'cap_full' %}<span class="mp-chip mp-chip--down">cap full</span>
             {% elif b.outcome == 'cash_short' %}<span class="mp-chip mp-chip--down">cash short</span>
             {% elif b.outcome == 'size_too_small' %}<span class="mp-chip mp-chip--down">size too small</span>
+            {% elif b.outcome == 'sector_cap_full' %}<span class="mp-chip mp-chip--down" title="sector '{{ b.blocked_by_sector }}' 已满 (≥40%)">sector full · {{ b.blocked_by_sector }}</span>
+            {% elif b.outcome == 'correlation_cap_full' %}<span class="mp-chip mp-chip--down" title="与已有仓位高度相关 (ρ≥0.6): {% for t, c in b.blocked_by_correlation_with %}{{ t }}={{ '%.2f'|format(c) }}{% if not loop.last %}, {% endif %}{% endfor %}">corr full · {{ b.blocked_by_correlation_with|length }} neighbors</span>
             {% endif %}
           </td>
         </tr>
