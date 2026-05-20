@@ -1,0 +1,61 @@
+<div class="mp-card mp-kpi">
+  <div class="mp-kpi__head">
+    <span class="mp-eyebrow mp-eyebrow--primary">Pool Sharpe</span>
+    <span class="material-symbols-outlined mp-kpi__icon">trending_up</span>
+  </div>
+  <div class="mp-kpi__value grotesk tnum"
+       style="color: {% if shared_result and shared_result.sharpe and shared_result.sharpe >= 1 %}var(--mp-up){% else %}var(--ns-navy){% endif %};">
+    {% if shared_result and shared_result.sharpe is not none %}
+      {{ "{:.2f}".format(shared_result.sharpe) }}
+    {% else %}—{% endif %}
+  </div>
+  <div class="mp-kpi__hint">
+    {% if shared_result and shared_result.sharpe is not none %}n={{ shared_result.n_trades }}{% else %}n&lt;5{% endif %}
+  </div>
+</div>
+
+<div class="mp-card mp-kpi">
+  <div class="mp-kpi__head">
+    <span class="mp-eyebrow mp-eyebrow--primary">Pool Cum Ret</span>
+    <span class="material-symbols-outlined mp-kpi__icon">show_chart</span>
+  </div>
+  <div class="mp-kpi__value grotesk tnum"
+       style="color: {% if shared_result and shared_result.cumulative_return > 0 %}var(--mp-up){% else %}var(--mp-down){% endif %};">
+    {% if shared_result %}{{ "{:+.2f}%".format(shared_result.cumulative_return * 100) }}{% else %}—{% endif %}
+  </div>
+  <div class="mp-kpi__hint">所有 6 策略组合</div>
+</div>
+
+<div class="mp-card mp-kpi">
+  <div class="mp-kpi__head">
+    <span class="mp-eyebrow mp-eyebrow--primary">Pool MaxDD</span>
+    <span class="material-symbols-outlined mp-kpi__icon">trending_down</span>
+  </div>
+  <div class="mp-kpi__value grotesk tnum" style="color: var(--mp-down);">
+    {% if shared_result %}{{ "{:.2f}%".format(shared_result.max_drawdown * 100) }}{% else %}—{% endif %}
+  </div>
+  <div class="mp-kpi__hint">组合回撤</div>
+</div>
+
+<div class="mp-card mp-kpi">
+  <div class="mp-kpi__head">
+    <span class="mp-eyebrow mp-eyebrow--primary">vs SPY</span>
+    <span class="material-symbols-outlined mp-kpi__icon">compare_arrows</span>
+  </div>
+  <div class="mp-kpi__value grotesk tnum"
+       style="color: {% if shared_result and shared_result.excess_vs_spy >= 0 %}var(--mp-up){% else %}var(--mp-down){% endif %};">
+    {% if shared_result %}{{ "{:+.2f}%".format(shared_result.excess_vs_spy * 100) }}{% else %}—{% endif %}
+  </div>
+  <div class="mp-kpi__hint">累计差</div>
+</div>
+
+<div class="mp-card mp-kpi">
+  <div class="mp-kpi__head">
+    <span class="mp-eyebrow mp-eyebrow--primary">N dedup</span>
+    <span class="material-symbols-outlined mp-kpi__icon">scatter_plot</span>
+  </div>
+  <div class="mp-kpi__value grotesk tnum">
+    {% if shared_result %}{{ shared_result.n_dedup_total }}{% else %}—{% endif %}
+  </div>
+  <div class="mp-kpi__hint">同 ticker 撞挤次数</div>
+</div>
