@@ -11,15 +11,34 @@
 
 ## 1. Identity
 
-Phase 5b makes `position_size` variable, replacing Phase 5a's fixed `$1000` per signal. The model is **Hybrid: vol-target × conviction multiplier** — each position is first risk-normalized via inverse-volatility scaling, then scaled by the strategy's bid weight relative to the pool mean.
+Phase 5b makes `position_size` variable, replacing Phase 5a's fixed `$1000` per signal. The model is **Hybrid: vol-target × alpha-conviction multiplier** — each position is first risk-normalized via inverse-volatility scaling, then scaled by the strategy's **raw mean return** (alpha) relative to the pool mean.
 
 ```
 size_i = clamp(
-    base × (target_vol / σ_i) × (bid_weight_i / mean_bid_weight),
+    base × (target_vol / σ_i) × (α_i / mean_α),
     min = min_position_size,
     max = max_position_size,
 )
 ```
+
+> **⚠ Important — why α NOT bid_weight as the conviction multiplier.**
+>
+> Phase 5a's `bid_weight = rolling_sharpe = μ/σ`. If sizing also used Sharpe
+> as the conviction signal, the formula would collapse to:
+> ```
+> size ∝ (1/σ) × (μ/σ) = μ/σ²
+> ```
+> Low volatility would be rewarded **twice** — once in vol-targeting (1/σ),
+> once embedded inside Sharpe (μ/σ). The system would systematically over-
+> allocate to stable-low-vol strategies and starve momentum/breakout/event-
+> driven strategies whose alpha justifies their volatility.
+>
+> Using `rolling_alpha = μ` (raw mean return) as the conviction signal
+> breaks the chain: `size ∝ (1/σ) × μ = μ/σ` (alpha-risk-adjusted) —
+> volatility appears exactly once. The bid_weight = Sharpe still drives
+> bid **priority** in Phase 5a (who-trades-first when capital is scarce),
+> but it does NOT drive bid **size**. Two orthogonal signals, two distinct
+> purposes.
 
 Default constants (locked in § 7):
 - `base = $1,000` (matches Phase 5a fixed default → neutral strategy gets same as before)
@@ -27,32 +46,45 @@ Default constants (locked in § 7):
 - `min_position = $200` (below this, the position is *skipped*, not floored — to avoid clamping noise into the portfolio)
 - `max_position = $4,000` (40% of pool — concentration cap)
 
-`σ_i` = rolling 60d std of strategy `i`'s daily-return diffs on its Phase 4 isolated equity curve. Same lookback + n<5 None-gate as Phase 5a's `rolling_sharpe`. Cold-start fallback: when σ is None or zero, `vol_scale = 1.0` — sizing reduces to pure conviction multiplier. This mirrors Phase 5a's equal-weight bootstrap philosophy.
+`σ_i` and `α_i` are BOTH computed from strategy `i`'s Phase 4 isolated daily equity curve via two new functions in `sharpe.py`:
+- `rolling_sigma(curve, as_of=d, lookback_days=60)` — std of daily-return diffs (same window + n<5 None-gate as Phase 5a's `rolling_sharpe`)
+- `rolling_alpha(curve, as_of=d, lookback_days=60)` — mean of daily-return diffs (same window + n<5 None-gate)
 
-`bid_weight_i` comes directly from Phase 5a's `compute_bid_weights`. `mean_bid_weight = mean(bid_weights.values())` — note this averages over **today's firing strategies only**, NOT all 6 strategies pool-wide (consistent with Phase 5a's per-day weight computation). Both σ and bid_weight are guaranteed positive (Phase 5a floors at 0.1), so no divide-by-zero.
+When `σ_i` is None or zero, `vol_scale = 1.0`. When `α_i` is None, the strategy's `α_scale = mean_known_alpha / mean_α` (avg-fill bootstrap, matches Phase 5a's `compute_bid_weights` pattern for unknown signals). When **all** α are None across firing strategies, all `α_scale = 1.0` (full bootstrap).
 
-**Joint-bootstrap behavior — important precision.** Two cold-start fallbacks compose multiplicatively:
+`mean_α = mean(α_i for s in strategies_today if α_i is not None)`, computed over today's firing strategies only (not pool-wide all-6). If every strategy is None, `mean_α` is undefined and full-bootstrap fires.
 
-| State | σ status | bid_weight status | vol_scale | conv_scale | Effective size |
+Note: bid_weight (= Phase 5a's rolling_sharpe) appears in this spec only for **priority** semantics — it determines who-trades-first in DEDUP and ALLOC (unchanged from Phase 5a). It is **NOT** a multiplier in the size formula.
+
+**Joint-bootstrap behavior — accurate matrix.** Two independent signals (σ and α), each with their own None-gate and bootstrap fallback:
+
+| State | σ status | α status | vol_scale | α_scale | Effective size |
 |---|---|---|---|---|---|
-| Day 0-60 (early) | All None | All 1.0 (equal-weight) | All 1.0 | All 1.0 | **= base ($1000)** for every strategy |
-| Day 60+ (some validated) | Some have σ, others None | Mixed real + avg-fill | Real or 1.0 | Real or avg-fill | Hybrid |
-| Steady state | All have σ | All real | Real | Real | Full Hybrid math |
+| **True cold-start** (very early, <5 outcomes per strategy) | All None | All None | 1.0 | 1.0 (full bootstrap) | **= base ($1000)** uniformly |
+| **α-only bootstrap** (no strategy mature on alpha; some have σ already) | Some real, some None | All None | Real or 1.0 | 1.0 (full bootstrap) | base × (target_vol/σ) — pure vol-target |
+| **σ-only bootstrap** (some strategies validated by alpha; σ still maturing) | All None | Mixed real + avg-fill | 1.0 | Real or avg-fill | base × (α/mean_α) — pure alpha-conviction |
+| **Mixed maturity** (most realistic post-day-60) | Mixed real + None | Mixed real + None | Real or 1.0 | Real or avg-fill | Full Hybrid math |
+| **Steady state** (all mature) | All real | All real | Real | Real | Full Hybrid math |
 
-The first row is the most important: **during true cold-start (days 0-60), every position size = $1000 = base**. Sizing collapses to "everything uniform" — not "pure vol-targeting" nor "pure conviction-driven", but the **product of both bootstraps**. Position size only starts to differentiate once *either* σ *or* bid_weight has real signal. This is intentional: when statistical estimates are unreliable on both axes, the model defaults to uniform allocation rather than amplifying noise.
+The first row is the critical edge case: during true cold-start, **every** position size = `$1000 = base`. Both bootstraps active simultaneously → uniform allocation. Only once *either* σ *or* α has real signal does sizing differentiate. This is intentional: when statistical estimates are unreliable on both axes, the model defaults to uniform allocation rather than amplifying noise.
 
 ### What this means in practice
 
-Three example outcomes assuming `mean_bid_weight = 1.2`:
+Four example outcomes assuming `mean_α = 1.0% daily` across firing strategies:
 
-| Scenario | bid_weight | σ | vol_scale | conv_scale | raw | clamped |
+| Scenario | α (μ) | σ | vol_scale | α_scale | raw | clamped |
 |---|---|---|---|---|---|---|
-| Strong + low-vol | 2.0 | 0.5% | 2.0 | 1.67 | $3,333 | **$3,333** |
-| Neutral | 1.2 | 1.0% | 1.0 | 1.0 | $1,000 | **$1,000** |
-| Weak + high-vol | 0.1 (floor) | 2.0% | 0.5 | 0.083 | $42 | **None (size_too_small)** |
-| Strong + bootstrap (σ=None) | 2.5 | None | 1.0 | 2.08 | $2,083 | **$2,083** |
+| Strong + low-vol | 1.0% | 0.5% | 2.0 | 1.0 | $2,000 | **$2,000** |
+| High-α + neutral-vol | 1.5% | 1.0% | 1.0 | 1.5 | $1,500 | **$1,500** |
+| Weak + high-vol | 0.2% | 2.0% | 0.5 | 0.2 | $100 | **None (size_too_small)** |
+| Strong + bootstrap (σ=None) | 1.5% | None | 1.0 | 1.5 | $1,500 | **$1,500** |
 
-The fourth row is critical: during the cold-start period (first 60 days when no strategy has 5+ mature outcomes), `vol_scale` is uniformly 1.0 across all strategies, so position size becomes a pure function of `bid_weight`. This intentionally simplifies the model during the period when statistical estimates are unreliable.
+**Compare with the OLD double-counted formula** (using Sharpe as conviction):
+- Strong+low-vol would have gotten $3,333 (1.67× neutral) — now $2,000 (only 1.33×)
+- High-α+neutral-vol would have gotten $1,250 — now $1,500 (correctly rewarded for actual return)
+- The new formula dampens the over-concentration in low-vol strategies. Returns alpha its rightful weight in the multiplier.
+
+The fourth row is critical: during the cold-start period (first 60 days when no strategy has 5+ mature outcomes), `vol_scale` is uniformly 1.0 across all strategies, so position size becomes a pure function of `α / mean_α`. Strategies still differentiate based on raw return signal during cold-start; sizing reduces to a one-dimensional decision (alpha-only) rather than uniform.
 
 ### Out of scope (explicit deferrals)
 
@@ -62,11 +94,22 @@ The fourth row is critical: during the cold-start period (first 60 days when no 
 - **Drawdown-adjusted target_vol** — shrinking target_vol during drawdown, expanding during steady up periods.
 - **A/B URL toggle** — `?sizing=off` to compare Phase 5a vs 5b side-by-side on the UI. Defer to Phase 5b.1 if data warrants.
 
-### Why coupled with Phase 5a's bid weights
+### Why orthogonal to Phase 5a's bid weights
 
-`mean_bid_weight` is the normalizer that keeps the formula scale-invariant: if every strategy has the same weight (e.g., all-1.0 during bootstrap), every `conv_scale = 1.0` and sizing collapses to pure vol-targeting. If one strategy is dominant (Sharpe = 3 vs others = 0.1), it gets up to ~10x conviction multiplier — capped by `max_position = $4000`.
+Phase 5a's `bid_weight = rolling_sharpe = μ/σ` drives **bid PRIORITY** — who-gets-the-trade-first in DEDUP and the greedy ALLOC sort. Phase 5b's `α_scale = α/mean_α` drives **bid SIZE** — how-much-cap each trade consumes. Two orthogonal signals for two orthogonal concerns:
 
-The same `bid_weight` already determines (a) bid order priority within DEDUP and ALLOC; this is **deliberate reuse** — bid weight is the system's single source of truth for "how much we trust this strategy right now."
+| Signal | Source | Purpose |
+|---|---|---|
+| `bid_weight = rolling_sharpe` | Phase 5a, unchanged | **Priority**: bid ordering in DEDUP (3-key tiebreak) and ALLOC (greedy sort) |
+| `α_scale = rolling_alpha / mean_α` | Phase 5b, new | **Size**: conviction multiplier in sizing formula |
+| `vol_scale = target_vol / σ` | Phase 5b, new | **Size**: risk normalizer in sizing formula |
+
+This separation is **the key fix from review iteration 1's double-count finding** — see the ⚠ box at the top of this section. The system now has 3 independent dimensions:
+1. **Priority** (Sharpe): determines who trades in scarce-capital scenarios
+2. **Risk normalization** (1/σ): equalizes risk across positions
+3. **Alpha attribution** (α): rewards strategies for raw return regardless of volatility
+
+Volatility appears in exactly one place (vol_scale denominator). Sharpe appears in exactly one place (priority). The previous over-rewarding of stable-low-vol strategies is broken.
 
 ---
 
@@ -80,7 +123,7 @@ CLOSE → BID COLLECT → WEIGHT → SIZE COMPUTE → DEDUP → ALLOC → MTM �
 
 **Why SIZE COMPUTE before DEDUP:** if a strategy's sized position falls below `min_position`, ALL of its bids today must be filtered out *before* DEDUP runs. Otherwise a low-confidence strategy could win DEDUP against a higher-confidence one only to fail SIZE in ALLOC — wasting both the high-confidence bid and the cap-slot semantically.
 
-### New function — `rolling_sigma` (sharpe.py)
+### Two new functions in `sharpe.py`
 
 ```python
 def rolling_sigma(
@@ -96,20 +139,33 @@ def rolling_sigma(
       - Fewer than min_events qualifying points
       - σ computes to exactly 0 (degenerate zero-variance, e.g., flat curve)
 
-    Causality: identical window semantics to rolling_sharpe. Outcomes at
-    or after `as_of` are excluded.
+    Causality: identical window semantics to rolling_sharpe.
+    """
+
+
+def rolling_alpha(
+    daily_curve: list[tuple[date, float]],
+    *,
+    as_of: date,
+    lookback_days: int = 60,
+    min_events: int = 5,
+) -> float | None:
+    """Daily-return mean (alpha) over curve points in [as_of - lookback, as_of).
+
+    Returns None when fewer than min_events qualifying points.
+
+    Causality: identical window semantics to rolling_sigma.
     """
 ```
 
-Implementation parallels `rolling_sharpe`: slice the curve to `[as_of - lookback, as_of)`, compute `np.diff(values) / values[:-1]`, return `float(np.std(daily_returns))` if finite and > 0, else None.
+Implementations parallel `rolling_sharpe`: slice the curve, compute `np.diff(values) / values[:-1]`, then `np.std(...)` for sigma or `np.mean(...)` for alpha. Return None on insufficient samples or non-finite results.
 
-### New function — `compute_position_sizes` (sharpe.py)
+### `compute_position_sizes` (sharpe.py)
 
 ```python
 def compute_position_sizes(
     strategies_today: list[str],
     daily_curves: dict[str, list[tuple[date, float]]],
-    bid_weights: dict[str, float],
     *,
     as_of: date,
     base: float = 1_000.0,
@@ -119,7 +175,7 @@ def compute_position_sizes(
     lookback_days: int = 60,
     min_events: int = 5,
 ) -> tuple[dict[str, float | None], dict[str, float]]:
-    """Compute per-strategy position size (Hybrid: vol-target × conviction).
+    """Compute per-strategy position size (Hybrid: vol-target × alpha-conviction).
 
     Returns (sizes, raw_sizes_below_min):
       - sizes: dict[strategy, float | None]. None means raw was below
@@ -130,24 +186,33 @@ def compute_position_sizes(
         (so the bid history shows "model wanted $42" not just "blocked").
 
     Algorithm (spec § 2):
-      1. mean_w = mean(bid_weights.values()) over TODAY'S FIRING STRATEGIES
-         only (not pool-wide all-6 strategies). Never zero (Phase 5a floors
-         all bid_weights at 0.1).
-      2. For each s in strategies_today:
-         σ = rolling_sigma(daily_curves[s], as_of=as_of, lookback_days=...)
-         vol_scale = target_vol / σ if (σ is not None and σ > 0) else 1.0
-         conv_scale = bid_weights[s] / mean_w
-         raw = base * vol_scale * conv_scale
+      1. For each s, compute:
+         σ_s = rolling_sigma(daily_curves[s], as_of=as_of, ...)
+         α_s = rolling_alpha(daily_curves[s], as_of=as_of, ...)
+      2. mean_α = mean of α values over strategies where α is not None.
+         If ALL α are None → use base for everyone (true cold-start).
+         If SOME α are None → those strategies get α_scale = 1.0
+         (avg-fill bootstrap, equivalent to using mean_known_α as
+         the substitute). Others use α_s / mean_α.
+      3. For each s:
+         vol_scale = target_vol / σ_s if (σ_s is not None and σ_s > 0) else 1.0
+         α_scale = (α_s / mean_α) if (α_s is not None and mean_α is not None) else 1.0
+         raw = base * vol_scale * α_scale
          if raw < min_position:
              sizes[s] = None
              raw_sizes_below_min[s] = raw  # preserve for diagnostic log
          else:
              sizes[s] = min(raw, max_position)  # clamp at top, never at bottom
-      3. Return (sizes, raw_sizes_below_min)
+      4. Return (sizes, raw_sizes_below_min)
+
+    NOTE — bid_weights is NOT a parameter here. Phase 5a's bid_weight
+    (rolling_sharpe) drives bid PRIORITY in the simulator (DEDUP +
+    ALLOC sort key). It does NOT drive position size. See § 1 ⚠ box
+    for why (avoids μ/σ² double-count).
 
     Contract:
-      - Every entry of strategies_today MUST appear in bid_weights AND
-        daily_curves. Raises KeyError on missing.
+      - Every entry of strategies_today MUST appear in daily_curves.
+        Raises KeyError on missing.
       - max_position is a CEILING clamp (raw > max → max). min_position
         is a FLOOR DECISION (raw < min → None), not a clamp.
       - raw_sizes_below_min only contains strategies where sizes[s] is None.
@@ -172,10 +237,12 @@ for d in trading_calendar:
 
     # ─── SIZE COMPUTE ─── (NEW Phase 5b step)
     if sizing_enabled:
-        # compute_position_sizes returns BOTH the final-size dict AND the raw
-        # pre-clamp size for size_too_small strategies (for diagnostic logging)
+        # compute_position_sizes uses rolling_sigma + rolling_alpha internally.
+        # Does NOT take bid_weights — sizing is independent of bid priority.
+        # Returns BOTH the final-size dict AND the raw pre-clamp size for
+        # size_too_small strategies (for diagnostic logging).
         position_sizes, raw_sizes_below_min = compute_position_sizes(
-            strategies_today, daily_curves, weights,
+            strategies_today, daily_curves,
             as_of=d, base=base_position_size, target_vol=target_vol,
             min_position=min_position, max_position=max_position,
             lookback_days=lookback_days,
@@ -312,12 +379,31 @@ class StrategyContribution:
 class PortfolioBacktestResult:
     # ... all existing required fields unchanged ...
 
+    # NEW Phase 5b concentration telemetry (required) —
+    # observation-only in v0; Phase 5d will enforce risk budgets using these.
+    max_strategy_exposure: float  # peak single-strategy exposure across all
+                                  # days, expressed as fraction of pool.
+                                  # E.g. 0.45 = peak day, one strategy used
+                                  # 45% of the pool. Flags concentration.
+    hhi_concentration: float      # Herfindahl-Hirschman Index of avg-exposures
+                                  # across strategies. Σ(exposure_s²) over
+                                  # strategies. Range: 1/N (perfectly even)
+                                  # to 1.0 (one strategy owns all). High HHI
+                                  # = winner-take-all warning sign.
+
     # Defaulted provenance (always-default in v0)
     display_name: str = "Shared Pool"
     mtm_model: str = "linear_interpolation_v0"
     bid_policy: str = "rolling_sharpe_60d_v0"
     sizing_policy: str = "fixed_v0"  # NEW
 ```
+
+**Why both metrics:**
+- `max_strategy_exposure` captures peak concentration (one bad day's worst strategy)
+- `hhi_concentration` captures **distributional** concentration (is one strategy *consistently* dominating?)
+- Together they give early warning before Phase 5d's risk-budget logic ships
+
+Both are **observation-only** in Phase 5b. They are computed but not used to constrain allocation. Phase 5d will read them to enforce caps. Their values inform whether Phase 5d's defaults need adjustment.
 
 **Why default `"fixed_v0"` not None:** Phase 5a runs implicitly used a sizing model (fixed $1000). The new field makes that retroactively explicit. Phase 5b runs override to `"vol_target_conviction_v0"`. Future Phase 5b.1 (e.g., changed defaults) would bump to `"vol_target_conviction_v1"`.
 
@@ -424,7 +510,7 @@ In the bid history card header, an inline 120×24px SVG histogram showing the di
 诊断用 · 最新在上
 ```
 
-7 bins log-spaced over `[min_position, max_position]`. Excluded: `size_too_small` bids (no real size). Backend pre-computes bin heights normalized 0-1 → passed as `size_distribution: list[float]` (length 7) in template context.
+7 bins **linearly spaced** over `[min_position, max_position]` — review iter 2 fix. For `[$200, $4000]` range (20× span), linear is more intuitive than log; log only adds value for spans of 100× or more. Bin edges: `$200, $743, $1286, $1829, $2371, $2914, $3457, $4000`. Excluded: `size_too_small` bids (no real size). Backend pre-computes bin heights normalized 0-1 → passed as `size_distribution: list[float]` (length 7) in template context.
 
 Implementation in `backtest_bid_history.html`:
 
@@ -517,19 +603,31 @@ test_compute_position_sizes_returns_raw_sizes_below_min_dict      # Review fix #
 test_compute_position_sizes_raw_only_for_none_strategies          # Review fix #2
 ```
 
-### Simulator integration (10 tests)
+### Simulator integration (13 tests)
 
 ```
 test_shared_pool_sizing_skips_below_min_with_outcome
 test_shared_pool_sizing_filters_before_dedup
 test_shared_pool_sizing_caps_at_max_when_clamped
 test_shared_pool_sizing_enabled_false_uses_fixed_base
-test_shared_pool_sizing_high_conviction_gets_bigger_position
+test_shared_pool_sizing_high_alpha_gets_bigger_position             # was: high_conviction
 test_shared_pool_sizing_provenance_field_set
 test_shared_pool_avg_position_size_in_contribution
 test_shared_pool_n_size_too_small_in_contribution
-test_shared_pool_high_size_strategy_blocks_more_small_bids        # Review fix #3
-test_shared_pool_joint_bootstrap_yields_uniform_base_sizes        # Review fix #1
+test_shared_pool_high_size_strategy_blocks_more_small_bids          # Review iter 1 fix #3
+test_shared_pool_joint_bootstrap_yields_uniform_base_sizes          # Review iter 1 fix #1
+test_size_formula_not_double_rewarding_low_vol                      # Review iter 2 fix #1
+test_shared_pool_max_strategy_exposure_computed                     # Review iter 2 fix #3 telemetry
+test_shared_pool_hhi_concentration_computed                         # Review iter 2 fix #3 telemetry
+```
+
+### Concentration regression test (1 test, new section)
+
+```
+test_single_strategy_monopolizes_pool_under_high_conviction         # Review iter 2 — locks current
+                                                                     # winner-take-all behavior so
+                                                                     # Phase 5d's risk-budget logic
+                                                                     # can later detect when it kicks in
 ```
 
 ### Orchestrator + UI (5 tests)
@@ -555,7 +653,7 @@ test_lab_backtest_shared_mode_renders_size_sparkline
 | # | Decision | Status |
 |---|----------|--------|
 | 1 | **Scope**: 5b-1 (algorithm) + 5b-2 (UI). 5b-3 per-strategy YAML override deferred. | LOCKED |
-| 2 | **Sizing model**: Hybrid — `base × (target_vol/σ) × (bid_weight/mean_bid_weight)` | LOCKED |
+| 2 | **Sizing model**: Hybrid — `base × (target_vol/σ) × (α/mean_α)`. NOT `(bid_weight/mean_bid_weight)` — that would double-count σ via Sharpe (see § 1 ⚠ box, review iter 2 fix). | LOCKED |
 | 3 | **σ source**: rolling 60d causal on Phase 4 isolated daily curve (same window as bid_weight) | LOCKED |
 | 4 | **σ bootstrap**: σ None or 0 → `vol_scale = 1.0` (pure conviction-driven) | LOCKED |
 | 5 | **Defaults**: base=\$1000 / target_vol=1.0% daily / min=\$200 / max=\$4000 | LOCKED |
@@ -633,3 +731,17 @@ Every clause in § 1 (Identity) maps to a section:
 - **#3 ALLOC dynamics change documented** — § 2 ALLOCATE pseudocode now flags the semantic shift from Phase 5a (uniform $1k consumption) to Phase 5b (variable, conviction-proportional). Test `test_shared_pool_high_size_strategy_blocks_more_small_bids` locks the new behavior. § 8 Risks adds the cold-start-tighter caveat.
 
 Test count: 31 → 35 (+4 review-fix tests, +2 fix #2 contract tests). Spec line count: 570 → ~620. 8 locked decisions unchanged.
+
+**Review iteration 2 (2026-05-20):** Second quant review identified 3 Important + 7 Minor items. The 3 Important applied in this commit:
+
+- **#1 Double-count σ in formula** — `size ∝ μ/σ²` was the implied math under `(target_vol/σ) × (Sharpe/mean_Sharpe)`. Stable-low-vol strategies got rewarded twice. **Replaced**: conviction multiplier now uses `rolling_alpha / mean_α` (raw mean return) instead of `bid_weight / mean_bid_weight` (Sharpe). Now `size ∝ μ/σ` (alpha-risk-adjusted, no double-count). Phase 5a's `bid_weight = rolling_sharpe` stays — drives bid **priority** only, not bid **size**. New `rolling_alpha` function added to sharpe.py. Decision #2 wording updated. Worked-examples table in § 1 regenerated with new ratios. New test `test_size_formula_not_double_rewarding_low_vol` locks the property.
+
+- **#2 Joint-bootstrap matrix accuracy** — original 3-row table was incomplete; cold-start can be partial (σ-bootstrapping while α has signal, or vice versa). Expanded to a 5-row matrix covering all (σ_status × α_status) combinations. True cold-start (both None) = uniform base. The α-only and σ-only bootstrap paths each correctly degrade to a single-dimension allocation rather than uniform.
+
+- **#3 Winner-take-all telemetry** — added `max_strategy_exposure` and `hhi_concentration` to PortfolioBacktestResult. Both observation-only in v0. Phase 5d will use them for risk-budget enforcement. Phase 5b's job is to MAKE THE WARNING VISIBLE before damage compounds. New tests `test_shared_pool_max_strategy_exposure_computed` + `test_shared_pool_hhi_concentration_computed`. Plus the locking test `test_single_strategy_monopolizes_pool_under_high_conviction` documenting current behavior.
+
+Other review-2 Minor items addressed inline:
+- SVG sparkline bins now **linear** (not log) — span is only 20×, log adds visual noise
+- `compute_position_sizes` no longer takes `bid_weights` parameter (was: dependency leak; now: independent signal computation via rolling_alpha inside)
+
+Test count: 35 → 39 (+4 review-2 fix tests). Spec line count: ~635 → ~720. Locked decision #2 wording updated to reflect new formula. All 8 locked decisions otherwise unchanged.
