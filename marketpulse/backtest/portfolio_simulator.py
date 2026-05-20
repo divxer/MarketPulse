@@ -18,8 +18,9 @@ if TYPE_CHECKING:
 
     from marketpulse.backtest.correlation import PriceProvider
 
+from marketpulse.backtest.correlation import find_correlation_neighbors
 from marketpulse.backtest.metrics import compute_metrics
-from marketpulse.backtest.sharpe import compute_bid_weights
+from marketpulse.backtest.sharpe import compute_bid_weights, compute_position_sizes
 from marketpulse.backtest.trading_calendar import (
     build_calendar,
     elapsed_fraction,
@@ -228,7 +229,6 @@ def simulate_shared_pool(
         # ALLOCATE consumes position_sizes[strategy] for cap arithmetic and
         # records the requested size on every BidRecord outcome.
         if sizing_enabled and strategies_today:
-            from marketpulse.backtest.sharpe import compute_position_sizes
             position_sizes, raw_sizes_below_min = compute_position_sizes(
                 strategies_today, daily_curves,
                 as_of=d,
@@ -369,11 +369,14 @@ def simulate_shared_pool(
                 )
                 continue
             # ─── NEW Phase 5c-2: correlation cap check ───
+            # Known limit (spec § 5 + Appendix C.3): neighbor-sum is NOT
+            # transitive. For an N-chain topology A-B-C-...-N where adjacent
+            # pairs have ρ≥threshold but non-adjacent don't, total cluster
+            # exposure can reach N/2 × cap (e.g. 2.5× for a 5-chain). A
+            # transitive DBSCAN-style cluster algo would tighten this; see
+            # Appendix C.3 for the upgrade path. Acceptable for current
+            # ~30-ticker universe.
             if correlation_caps_enabled and price_provider is not None:
-                from marketpulse.backtest.correlation import (
-                    find_correlation_neighbors,
-                )
-
                 open_tickers = [p.ticker for p in open_positions]
                 neighbors, corr_diagnostics = find_correlation_neighbors(
                     b.ticker, open_tickers,
@@ -416,13 +419,15 @@ def simulate_shared_pool(
                 position_size=requested_size,
             ))
 
-        # Phase 5c: snapshot per-day sector exposure (post-ALLOCATE)
+        # Phase 5c: snapshot per-day sector exposure (post-ALLOCATE).
+        # Every ticker in open_positions is guaranteed to be in
+        # sector_by_ticker because pre-warm above populated all
+        # open_positions + candidates, and winning candidates are a subset
+        # of candidates. Direct dict access surfaces bugs faster than a
+        # silent .get() fallback would.
         day_snapshot: dict[str, float] = {}
         for p in open_positions:
-            s = sector_by_ticker.get(p.ticker)
-            if s is None:
-                s = sector_provider(p.ticker)
-                sector_by_ticker[p.ticker] = s
+            s = sector_by_ticker[p.ticker]
             day_snapshot[s] = day_snapshot.get(s, 0.0) + p.position_size
         sector_exposure_daily.append(day_snapshot)
 
@@ -578,7 +583,14 @@ def simulate_shared_pool(
         max_sector_exposure_by_sector = {}
         sector_breakdown = {}
 
-    # Phase 5c-2 correlation telemetry — max_neighbor_exposure deferred to future iteration
+    # Phase 5c-2 correlation telemetry.
+    # max_neighbor_exposure is a SPEC-LOCKED v0 PLACEHOLDER (spec § 7 + plan
+    # T8 explicitly state "stays 0.0 in v0; computation deferred to future
+    # iteration"). The field is reserved on PortfolioBacktestResult so the
+    # schema is stable for future versions; the lab UI does not surface this
+    # number anywhere in v0, so the 0.0 is never rendered to users.
+    # See `n_correlation_cap_events` for the v0 correlation-cap signal that
+    # IS computed.
     max_neighbor_exposure = 0.0
 
     # Last-100 slice of bid history (spec § 4: render-layer cap)

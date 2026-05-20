@@ -25,6 +25,35 @@ from marketpulse.logging import get_logger
 log = get_logger(__name__)
 
 
+class _DBPriceProvider:
+    """Wrap database price_cache rows in the PriceProvider Protocol.
+
+    Used by Phase 5c correlation cap to fetch causal daily closes from the
+    existing price_cache table without coupling the simulator to SQLAlchemy.
+    Constructed once per orchestrator call; no per-bid caching (the
+    correlation cap's lookback window changes per bid date, so caching
+    inside the provider would have low hit rate). Per-pair LRU caching
+    would belong in correlation.py if needed.
+    """
+
+    def __init__(self, session) -> None:
+        self._session = session
+
+    def get_daily_closes(self, ticker: str, start: date, end: date) -> list[tuple[date, float]]:
+        from marketpulse.db.models import PriceCacheEntry
+        rows = (
+            self._session.query(PriceCacheEntry)
+            .filter(
+                PriceCacheEntry.ticker == ticker,
+                PriceCacheEntry.date >= start,
+                PriceCacheEntry.date < end,
+            )
+            .order_by(PriceCacheEntry.date)
+            .all()
+        )
+        return [(r.date, float(r.close)) for r in rows]
+
+
 @dataclass
 class _OpenPosition:
     """Internal simulator state for one in-flight long position."""
@@ -548,27 +577,9 @@ def run_shared_pool_backtest(
     spy = simulate_spy_buyhold(pairs=all_pairs, initial_capital=initial_capital)
     isolated.append(spy)
 
-    # Phase 5c: wire price_provider for correlation cap (uses existing price_cache)
-    class _DBPriceProvider:
-        """Wrap database price_cache rows in the PriceProvider Protocol."""
-
-        def __init__(self, session) -> None:
-            self._session = session
-
-        def get_daily_closes(self, ticker, start, end):
-            from marketpulse.db.models import PriceCacheEntry
-            rows = (
-                self._session.query(PriceCacheEntry)
-                .filter(
-                    PriceCacheEntry.ticker == ticker,
-                    PriceCacheEntry.date >= start,
-                    PriceCacheEntry.date < end,
-                )
-                .order_by(PriceCacheEntry.date)
-                .all()
-            )
-            return [(r.date, float(r.close)) for r in rows]
-
+    # Phase 5c: wire price_provider for correlation cap (uses existing price_cache).
+    # _DBPriceProvider is module-scope (above) for testability + to avoid re-defining
+    # the class per orchestrator call.
     price_provider = _DBPriceProvider(db) if correlation_caps_enabled else None
 
     # Run shared pool, then patch excess_vs_spy

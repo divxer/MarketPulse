@@ -50,7 +50,11 @@ def compute_pairwise_correlation(
       - Computed corr is NaN (zero variance in either series)
 
     Contract:
-      - Window: [as_of - lookback_days, as_of) — exclusive upper bound
+      - Window: [as_of - lookback_days, as_of) — exclusive upper bound.
+        `lookback_days` is **calendar days** (timedelta arithmetic). A 60-day
+        calendar window typically yields ~42 trading days of overlap, hence
+        the default `min_overlap=30` (allows ~3 weeks of missing data on
+        either leg before the cap goes cold-start).
       - Data source: PriceProvider.get_daily_closes (raw OHLC close)
       - Self-pair: returns None (NOT 1.0) — caller never wants a position
         to be its own neighbor.
@@ -77,7 +81,10 @@ def compute_pairwise_correlation(
     a_returns = np.diff(a_prices) / a_prices[:-1]
     b_returns = np.diff(b_prices) / b_prices[:-1]
 
-    if a_returns.std() == 0.0 or b_returns.std() == 0.0:
+    # Use a small tolerance instead of exact float == 0.0 to catch
+    # floating-point drift in nominally-constant series. np.corrcoef would
+    # return NaN downstream regardless, but the explicit guard is clearer.
+    if a_returns.std() < 1e-12 or b_returns.std() < 1e-12:
         return None
 
     corr = float(np.corrcoef(a_returns, b_returns)[0, 1])

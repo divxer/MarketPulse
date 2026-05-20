@@ -3,6 +3,23 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _reset_sector_caches():
+    """Force fresh module-level caches between tests.
+
+    `marketpulse.backtest.sector` uses process-global dicts for the sector
+    lookup, overrides snapshot, and 'warned ticker' set. Without this fixture,
+    a test that populates _SECTOR_CACHE leaks state to later tests, masking
+    bugs where get_sector is called without yf_client.
+    """
+    from marketpulse.backtest.sector import _reset_caches_for_testing
+    _reset_caches_for_testing()
+    yield
+    _reset_caches_for_testing()
+
 
 def test_load_sector_overrides_returns_dict_for_well_formed_yaml(tmp_path: Path) -> None:
     """Well-formed YAML returns dict[str, str]."""
