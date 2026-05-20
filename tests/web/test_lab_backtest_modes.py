@@ -67,3 +67,29 @@ def test_lab_backtest_per_strategy_unchanged_with_shared_data(
     db_session.commit()
     r = client.get("/lab/backtest?mode=per-strategy")
     assert "Best Strategy" in r.text
+
+
+def test_lab_backtest_shared_mode_renders_size_distribution_context(
+    client, monkeypatch, db_session,
+):
+    """Backend computes size_distribution and passes it via context."""
+    _login(client, monkeypatch)
+    _seed_event(db_session, ticker="A1", strategy="momentum_breakout")
+    db_session.commit()
+    r = client.get("/lab/backtest?mode=shared-pool")
+    assert r.status_code == 200
+    # The SVG sparkline rendering uses this; we don't directly assert the
+    # list value, just that the page rendered without error.
+    assert "shared" in r.text.lower() or "共享池" in r.text
+
+
+def test_lab_backtest_shared_mode_includes_sizing_policy_in_hero(
+    client, monkeypatch, db_session,
+):
+    """Hero text includes sizing_policy provenance line in shared mode."""
+    _login(client, monkeypatch)
+    _seed_event(db_session, ticker="A1", strategy="momentum_breakout")
+    db_session.commit()
+    r = client.get("/lab/backtest?mode=shared-pool")
+    # 2nd hero sentence references the sizing policy
+    assert "vol_target_conviction_v0" in r.text

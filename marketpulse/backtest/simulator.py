@@ -470,16 +470,25 @@ def run_shared_pool_backtest(
     horizon: int = 5,
     since: date | None = None,
     initial_capital: float = 10_000.0,
-    position_size: float = 1_000.0,
+    base_position_size: float = 1_000.0,
     max_capital_in_use: float = 10_000.0,
     lookback_days: int = 60,
+    target_vol: float = 0.01,
+    min_position: float = 200.0,
+    max_position: float = 4_000.0,
+    sizing_enabled: bool = True,
 ) -> dict:
-    """Phase 5a orchestrator. Spec § 4.
+    """Phase 5a/5b orchestrator. Spec § 4 (Phase 5a), § 8 (Phase 5b).
 
     Returns {isolated, artifacts, shared}:
       - isolated: list[StrategyBacktestResult] — 6 strategies + SPY
       - artifacts: list[StrategyBacktestArtifacts] — parallel to isolated minus SPY
-      - shared: PortfolioBacktestResult — Phase 5a combined view
+      - shared: PortfolioBacktestResult — Phase 5a/5b combined view
+
+    Phase 5b: accepts sizing_enabled + sizing knobs (target_vol, min_position,
+    max_position). When sizing_enabled=True, positions are sized dynamically via
+    vol-target × conviction; when False, all positions use base_position_size
+    (Phase 5a regression mode).
     """
     from dataclasses import dataclass as _dataclass
     from dataclasses import replace
@@ -513,7 +522,7 @@ def run_shared_pool_backtest(
         result, art = simulate_strategy_with_artifacts(
             pairs=pairs,
             strategy=name, display_name=strat.display_name, horizon=horizon,
-            initial_capital=initial_capital, position_size=position_size,
+            initial_capital=initial_capital, position_size=base_position_size,
             max_capital_in_use=max_capital_in_use,
         )
         isolated.append(result)
@@ -539,9 +548,13 @@ def run_shared_pool_backtest(
         daily_curves=daily_curves,
         horizon=horizon,
         initial_capital=initial_capital,
-        position_size=position_size,
+        base_position_size=base_position_size,
         max_capital_in_use=max_capital_in_use,
         lookback_days=lookback_days,
+        target_vol=target_vol,
+        min_position=min_position,
+        max_position=max_position,
+        sizing_enabled=sizing_enabled,
     )
     shared = replace(
         shared,

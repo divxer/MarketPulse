@@ -46,9 +46,13 @@ def simulate_shared_pool(
     *,
     horizon: int,
     initial_capital: float = 10_000.0,
-    position_size: float = 1_000.0,
+    base_position_size: float = 1_000.0,
     max_capital_in_use: float = 10_000.0,
     lookback_days: int = 60,
+    target_vol: float = 0.01,
+    min_position: float = 200.0,
+    max_position: float = 4_000.0,
+    sizing_enabled: bool = True,
 ) -> PortfolioBacktestResult:
     """Phase 5a shared-pool simulator. See spec § 2 for algorithm.
 
@@ -56,8 +60,20 @@ def simulate_shared_pool(
     so dashboards and logs can distinguish runs that varied the lookback window.
     Default 60d matches spec § 8 decision #3; non-default lookbacks land in the
     result's bid_policy string so the source-of-truth window is never ambiguous.
+
+    Phase 5b: SIZE COMPUTE step inserted between WEIGHT and DEDUP (spec § 2).
+    Per-strategy size = base * (target_vol / σ_s) * (α_s / mean_α). When
+    sizing_enabled=False, every strategy uses base_position_size (5a regression
+    mode, sizing_policy='fixed_v0'). When True, sizing_policy='vol_target_conviction_v0'.
+
+    NOTE (staged delivery): Task 6 wires per-strategy variable sizes through
+    ALLOCATE (cap math + BidRecord position_size). Task 7 surfaces the
+    finalization telemetry (n_size_too_small_skipped, avg_position_size on
+    per-strategy contribution; max_strategy_exposure + hhi_concentration on
+    the pool-level result).
     """
     bid_policy = f"rolling_sharpe_{lookback_days}d_v0"
+    sizing_policy = "vol_target_conviction_v0" if sizing_enabled else "fixed_v0"
 
     if not bids:
         from datetime import date as _date
@@ -66,6 +82,8 @@ def simulate_shared_pool(
             n_trades=0,
             n_dedup_total=0,
             avg_capital_utilization=0.0,
+            max_strategy_exposure=0.0,
+            hhi_concentration=0.0,
             cumulative_return=0.0,
             annual_return=0.0,
             sharpe=None,
@@ -80,6 +98,7 @@ def simulate_shared_pool(
             per_strategy_stats={},
             bid_history=[],
             bid_policy=bid_policy,
+            sizing_policy=sizing_policy,
         )
 
     db_dates: set[date] = set()
@@ -105,10 +124,15 @@ def simulate_shared_pool(
     all_bid_records: list[BidRecord] = []
     n_trades_by_strategy: dict[str, int] = {}
     trade_returns_by_strategy: dict[str, list[float]] = {}
+    # Phase 5b: per-trade realized PnL (return × actual position size); the
+    # uniform `realized = sum(r * base) for r in returns` shortcut breaks once
+    # position sizes vary across trades within a strategy.
+    trade_realized_pnl_by_strategy: dict[str, list[float]] = {}
     n_dedup_skipped_by_strategy: dict[str, int] = {}
     n_capacity_skipped_by_strategy: dict[str, int] = {}
     n_cash_short_skipped_by_strategy: dict[str, int] = {}
     n_floor_hits_by_strategy: dict[str, int] = {}
+    n_size_too_small_by_strategy: dict[str, int] = {}
     n_bids_by_strategy: dict[str, int] = {}
     bid_weights_by_strategy: dict[str, list[float]] = {}
     capital_in_use_by_day: list[float] = []
@@ -122,6 +146,9 @@ def simulate_shared_pool(
                 realized_ret = (pos.horizon_price - pos.entry_price) / pos.entry_price
                 cash += pos.position_size * (1 + realized_ret)
                 trade_returns_by_strategy.setdefault(pos.strategy, []).append(realized_ret)
+                trade_realized_pnl_by_strategy.setdefault(pos.strategy, []).append(
+                    realized_ret * pos.position_size
+                )
             else:
                 still_open.append(pos)
         open_positions = still_open
@@ -147,6 +174,55 @@ def simulate_shared_pool(
         for s in floor_hits:
             n_floor_hits_by_strategy[s] = n_floor_hits_by_strategy.get(s, 0) + 1
 
+        # ─── SIZE COMPUTE ─── (Phase 5b step, spec § 2)
+        # Compute per-strategy position sizes BEFORE dedup so undersized
+        # strategies never win a dedup contest they wouldn't survive anyway.
+        # ALLOCATE consumes position_sizes[strategy] for cap arithmetic and
+        # records the requested size on every BidRecord outcome.
+        if sizing_enabled and strategies_today:
+            from marketpulse.backtest.sharpe import compute_position_sizes
+            position_sizes, raw_sizes_below_min = compute_position_sizes(
+                strategies_today, daily_curves,
+                as_of=d,
+                base=base_position_size,
+                target_vol=target_vol,
+                min_position=min_position,
+                max_position=max_position,
+                lookback_days=lookback_days,
+            )
+
+            # Strategies returning None → skip all their bids today;
+            # diagnostic log records the raw pre-clamp size.
+            strategies_skipped_by_size = {
+                s for s, sz in position_sizes.items() if sz is None
+            }
+            new_todays_bids = []
+            for b in todays_bids:
+                if b.strategy in strategies_skipped_by_size:
+                    all_bid_records.append(BidRecord(
+                        date=d, strategy=b.strategy, ticker=b.ticker,
+                        weight=weights[b.strategy],
+                        outcome="size_too_small",
+                        winner=None,
+                        position_size=raw_sizes_below_min[b.strategy],
+                    ))
+                    n_size_too_small_by_strategy[b.strategy] = (
+                        n_size_too_small_by_strategy.get(b.strategy, 0) + 1
+                    )
+                    n_bids_by_strategy[b.strategy] = (
+                        n_bids_by_strategy.get(b.strategy, 0) + 1
+                    )
+                else:
+                    new_todays_bids.append(b)
+            todays_bids = new_todays_bids
+            strategies_today = [
+                s for s in strategies_today
+                if s not in strategies_skipped_by_size
+            ]
+        else:
+            position_sizes = {s: base_position_size for s in strategies_today}
+            raw_sizes_below_min = {}
+
         # ─── DEDUP (same-day same-ticker collision) ───
         bids_by_ticker: dict[str, list] = {}
         for b in todays_bids:
@@ -164,6 +240,7 @@ def simulate_shared_pool(
                         date=d, strategy=loser.strategy, ticker=ticker,
                         weight=weights[loser.strategy],
                         outcome="dedup_loser", winner=best.strategy,
+                        position_size=position_sizes[loser.strategy],
                     ))
                     n_dedup_skipped_by_strategy[loser.strategy] = (
                         n_dedup_skipped_by_strategy.get(loser.strategy, 0) + 1
@@ -177,6 +254,8 @@ def simulate_shared_pool(
                     )
 
         # ─── ALLOCATE (capital-constrained, greedy by weight desc) ───
+        # Spec § 2: bids of the SAME strategy share the same per-strategy size
+        # (Phase 5b: variable per strategy; Phase 5a: uniform base).
         sorted_winners = sorted(
             winners.values(),
             key=lambda b: (-weights[b.strategy], b.event_time, b.strategy),
@@ -186,22 +265,25 @@ def simulate_shared_pool(
             bid_weights_by_strategy.setdefault(b.strategy, []).append(
                 weights[b.strategy]
             )
+            requested_size = position_sizes[b.strategy]
             capital_in_use = sum(p.position_size for p in open_positions)
-            if capital_in_use + position_size > max_capital_in_use:
+            if capital_in_use + requested_size > max_capital_in_use:
                 all_bid_records.append(BidRecord(
                     date=d, strategy=b.strategy, ticker=b.ticker,
                     weight=weights[b.strategy],
                     outcome="cap_full", winner=None,
+                    position_size=requested_size,
                 ))
                 n_capacity_skipped_by_strategy[b.strategy] = (
                     n_capacity_skipped_by_strategy.get(b.strategy, 0) + 1
                 )
                 continue
-            if cash < position_size:
+            if cash < requested_size:
                 all_bid_records.append(BidRecord(
                     date=d, strategy=b.strategy, ticker=b.ticker,
                     weight=weights[b.strategy],
                     outcome="cash_short", winner=None,
+                    position_size=requested_size,
                 ))
                 n_cash_short_skipped_by_strategy[b.strategy] = (
                     n_cash_short_skipped_by_strategy.get(b.strategy, 0) + 1
@@ -211,14 +293,15 @@ def simulate_shared_pool(
                 strategy=b.strategy, ticker=b.ticker,
                 entry_date=d, entry_price=b.event_price,
                 horizon_date=b.horizon_date, horizon_price=b.horizon_price,
-                position_size=position_size,
+                position_size=requested_size,
             ))
-            cash -= position_size
+            cash -= requested_size
             n_trades_by_strategy[b.strategy] = n_trades_by_strategy.get(b.strategy, 0) + 1
             all_bid_records.append(BidRecord(
                 date=d, strategy=b.strategy, ticker=b.ticker,
                 weight=weights[b.strategy],
                 outcome="won", winner=None,
+                position_size=requested_size,
             ))
 
         # ─── MTM ─── (linear interpolation per spec § 2 + Phase 4)
@@ -295,16 +378,30 @@ def simulate_shared_pool(
     # via dict semantics and would shuffle the strategy table).
     from marketpulse.strategies import load_strategies
     strategies_yaml = load_strategies()
+
+    # Phase 5b Task 7: per-strategy won-bid position_size lists drive
+    # avg_position_size telemetry. Built from BidRecords so the metric stays
+    # source-of-truth aligned with bid_history.
+    won_sizes_by_strategy: dict[str, list[float]] = {}
+    for rec in all_bid_records:
+        if rec.outcome == "won":
+            won_sizes_by_strategy.setdefault(rec.strategy, []).append(
+                rec.position_size
+            )
+
     per_strategy_stats: dict[str, StrategyContribution] = {}
     for s in sorted(daily_curves.keys()):
-        ret_list = trade_returns_by_strategy.get(s, [])
-        realized = sum(r * position_size for r in ret_list)
+        # Phase 5b: realized PnL uses per-trade actual position size (variable),
+        # not the uniform `base * return` shortcut (Phase 5a invariant).
+        realized = sum(trade_realized_pnl_by_strategy.get(s, []))
         unrealized = unrealized_pnl_by_strategy.get(s, 0.0)
         contrib_pnl = realized + unrealized
         exposures = exposure_by_strategy_by_day.get(s, [])
         avg_exposure = sum(exposures) / len(exposures) if exposures else 0.0
         bid_w_list = bid_weights_by_strategy.get(s, [])
         avg_bid_weight = sum(bid_w_list) / len(bid_w_list) if bid_w_list else 0.0
+        won_sizes = won_sizes_by_strategy.get(s, [])
+        avg_position_size = sum(won_sizes) / len(won_sizes) if won_sizes else 0.0
         per_strategy_stats[s] = StrategyContribution(
             strategy=s,
             display_name=(
@@ -314,12 +411,25 @@ def simulate_shared_pool(
             n_dedup_skipped=n_dedup_skipped_by_strategy.get(s, 0),
             n_capacity_skipped=n_capacity_skipped_by_strategy.get(s, 0),
             n_cash_short_skipped=n_cash_short_skipped_by_strategy.get(s, 0),
+            n_size_too_small_skipped=n_size_too_small_by_strategy.get(s, 0),
             contribution_pnl=contrib_pnl,
             avg_exposure=avg_exposure,
             avg_bid_weight=avg_bid_weight,
+            avg_position_size=avg_position_size,
             n_bids=n_bids_by_strategy.get(s, 0),
             n_floor_hits=n_floor_hits_by_strategy.get(s, 0),
         )
+
+    # Phase 5b Task 7: portfolio-level concentration telemetry.
+    # max_strategy_exposure = peak single-strategy avg_exposure across pool.
+    # hhi_concentration = Σ(exposure_s²) — Herfindahl-Hirschman Index.
+    if per_strategy_stats:
+        _exposures = [c.avg_exposure for c in per_strategy_stats.values()]
+        max_strategy_exposure = max(_exposures) if _exposures else 0.0
+        hhi_concentration = sum(e * e for e in _exposures)
+    else:
+        max_strategy_exposure = 0.0
+        hhi_concentration = 0.0
 
     # Last-100 slice of bid history (spec § 4: render-layer cap)
     bid_history = all_bid_records[-100:] if len(all_bid_records) > 100 else all_bid_records
@@ -329,6 +439,8 @@ def simulate_shared_pool(
         n_trades=n_trades,
         n_dedup_total=sum(n_dedup_skipped_by_strategy.values()),
         avg_capital_utilization=avg_util,
+        max_strategy_exposure=max_strategy_exposure,
+        hhi_concentration=hhi_concentration,
         cumulative_return=metrics.cumulative_return,
         annual_return=metrics.annual_return,
         sharpe=metrics.sharpe,
@@ -343,4 +455,5 @@ def simulate_shared_pool(
         per_strategy_stats=per_strategy_stats,
         bid_history=bid_history,
         bid_policy=bid_policy,
+        sizing_policy=sizing_policy,
     )

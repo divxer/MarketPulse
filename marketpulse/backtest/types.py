@@ -83,9 +83,11 @@ class StrategyContribution:
     n_dedup_skipped: int
     n_capacity_skipped: int
     n_cash_short_skipped: int
+    n_size_too_small_skipped: int  # NEW Phase 5b
     contribution_pnl: float
     avg_exposure: float
     avg_bid_weight: float
+    avg_position_size: float       # NEW Phase 5b
     n_bids: int
     n_floor_hits: int
 
@@ -97,8 +99,19 @@ class BidRecord:
     strategy: str
     ticker: str
     weight: float
-    outcome: Literal["won", "dedup_loser", "cap_full", "cash_short"]
+    outcome: Literal[
+        "won", "dedup_loser", "cap_full", "cash_short",
+        "size_too_small",  # NEW Phase 5b
+    ]
     winner: str | None
+    position_size: float  # NEW Phase 5b — model's REQUESTED size in dollars.
+                          # Preserves diagnostic value across all outcomes:
+                          #   won:           actual opened size (post-clamp)
+                          #   dedup_loser:   what this strategy would have opened
+                          #   cap_full:      what was requested but cap-blocked
+                          #   cash_short:    what was requested but cash-blocked
+                          #   size_too_small: raw pre-clamp size (e.g. $42)
+                          # See spec § 3 for the rationale.
 
 
 @dataclass(frozen=True)
@@ -114,6 +127,11 @@ class PortfolioBacktestResult:
 
     # Utilization (required)
     avg_capital_utilization: float
+
+    # NEW Phase 5b concentration telemetry (required) —
+    # observation-only in v0; Phase 5d will enforce risk budgets using these.
+    max_strategy_exposure: float
+    hhi_concentration: float
 
     # Performance metrics (required; sharpe/sortino/calmar may be None)
     cumulative_return: float
@@ -138,3 +156,4 @@ class PortfolioBacktestResult:
     display_name: str = "Shared Pool"
     mtm_model: str = "linear_interpolation_v0"
     bid_policy: str = "rolling_sharpe_60d_v0"
+    sizing_policy: str = "fixed_v0"  # NEW Phase 5b

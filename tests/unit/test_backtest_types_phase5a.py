@@ -37,9 +37,11 @@ def _contribution_kwargs(**overrides):
         "n_dedup_skipped": 1,
         "n_capacity_skipped": 0,
         "n_cash_short_skipped": 0,
+        "n_size_too_small_skipped": 0,  # NEW Phase 5b
         "contribution_pnl": 250.0,
         "avg_exposure": 0.30,
         "avg_bid_weight": 1.4,
+        "avg_position_size": 1450.0,  # NEW Phase 5b
         "n_bids": 6,
         "n_floor_hits": 0,
     }
@@ -53,6 +55,8 @@ def _portfolio_kwargs(**overrides):
         "n_trades": 30,
         "n_dedup_total": 4,
         "avg_capital_utilization": 0.55,
+        "max_strategy_exposure": 0.55,  # NEW Phase 5b
+        "hhi_concentration": 0.31,       # NEW Phase 5b
         "cumulative_return": 0.12,
         "annual_return": 0.24,
         "sharpe": 1.4,
@@ -79,6 +83,7 @@ def _bid_kwargs(**overrides):
         "weight": 1.2,
         "outcome": "won",
         "winner": None,
+        "position_size": 1000.0,  # NEW Phase 5b default
     }
     base.update(overrides)
     return base
@@ -202,3 +207,94 @@ def test_portfolio_result_can_carry_per_strategy_stats():
     r = PortfolioBacktestResult(**_portfolio_kwargs(per_strategy_stats=contribs))
     assert "momentum_breakout" in r.per_strategy_stats
     assert r.per_strategy_stats["momentum_breakout"].n_trades == 5
+
+
+# ─── Phase 5b extensions ───
+
+def test_bid_record_has_position_size_field():
+    """Phase 5b: BidRecord requires position_size (no default)."""
+    from datetime import date
+
+    from marketpulse.backtest.types import BidRecord
+    b = BidRecord(
+        date=date(2026, 5, 1), strategy="x", ticker="AAPL",
+        weight=1.0, outcome="won", winner=None,
+        position_size=1500.0,
+    )
+    assert b.position_size == 1500.0
+
+
+def test_bid_record_size_too_small_outcome_literal():
+    """Phase 5b: new 'size_too_small' outcome in the literal."""
+    from datetime import date
+
+    from marketpulse.backtest.types import BidRecord
+    b = BidRecord(
+        date=date(2026, 5, 1), strategy="x", ticker="AAPL",
+        weight=0.5, outcome="size_too_small", winner=None,
+        position_size=42.0,  # raw pre-clamp diagnostic value
+    )
+    assert b.outcome == "size_too_small"
+    assert b.position_size == 42.0
+
+
+def test_strategy_contribution_has_size_telemetry_fields():
+    """Phase 5b adds n_size_too_small_skipped + avg_position_size."""
+    from marketpulse.backtest.types import StrategyContribution
+    c = StrategyContribution(
+        strategy="x", display_name="X",
+        n_trades=5, n_dedup_skipped=1,
+        n_capacity_skipped=0, n_cash_short_skipped=0,
+        n_size_too_small_skipped=2,
+        contribution_pnl=250.0,
+        avg_exposure=0.25, avg_bid_weight=1.2,
+        avg_position_size=1450.0,
+        n_bids=8, n_floor_hits=0,
+    )
+    assert c.n_size_too_small_skipped == 2
+    assert c.avg_position_size == 1450.0
+
+
+def test_portfolio_result_has_concentration_telemetry():
+    """Phase 5b adds max_strategy_exposure + hhi_concentration + sizing_policy."""
+    from datetime import date
+
+    from marketpulse.backtest.types import PortfolioBacktestResult
+    r = PortfolioBacktestResult(
+        horizon=5,
+        n_trades=20, n_dedup_total=3,
+        avg_capital_utilization=0.42,
+        max_strategy_exposure=0.55,
+        hhi_concentration=0.31,
+        cumulative_return=0.08, annual_return=0.15,
+        sharpe=1.3, sortino=1.6, max_drawdown=-0.04, calmar=3.75,
+        win_rate=0.62, avg_win_pct=0.03, avg_loss_pct=-0.018,
+        daily_equity_curve=[(date(2026, 4, 1), 10_000.0)],
+        excess_vs_spy=0.04,
+        per_strategy_stats={},
+        bid_history=[],
+    )
+    assert r.max_strategy_exposure == 0.55
+    assert r.hhi_concentration == 0.31
+    # sizing_policy default = "fixed_v0" (Phase 5a backward compat)
+    assert r.sizing_policy == "fixed_v0"
+
+
+def test_portfolio_result_sizing_policy_overridable():
+    """Phase 5b runs set sizing_policy='vol_target_conviction_v0'."""
+    from datetime import date
+
+    from marketpulse.backtest.types import PortfolioBacktestResult
+    r = PortfolioBacktestResult(
+        horizon=5, n_trades=0, n_dedup_total=0,
+        avg_capital_utilization=0.0,
+        max_strategy_exposure=0.0, hhi_concentration=0.0,
+        cumulative_return=0.0, annual_return=0.0,
+        sharpe=None, sortino=None, max_drawdown=0.0, calmar=None,
+        win_rate=0.0, avg_win_pct=0.0, avg_loss_pct=0.0,
+        daily_equity_curve=[(date(2026, 4, 1), 10_000.0)],
+        excess_vs_spy=0.0,
+        per_strategy_stats={}, bid_history=[],
+        sizing_policy="vol_target_conviction_v0",
+    )
+    assert r.sizing_policy == "vol_target_conviction_v0"

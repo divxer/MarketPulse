@@ -9,6 +9,16 @@
         加权竞标分配。撞 ticker 时高 Sharpe 策略赢。
         <strong>bid_policy=rolling_sharpe_60d_v0</strong>。
       </p>
+      {% if sizing_policy == 'vol_target_conviction_v0' %}
+        <p class="mp-hero__desc">
+          仓位大小动态:vol-target 1.0% daily × alpha-conviction multiplier,
+          floor $200 / ceiling $4,000。<strong>sizing_policy=vol_target_conviction_v0</strong>。
+        </p>
+      {% else %}
+        <p class="mp-hero__desc">
+          固定 $1,000 每信号。<strong>sizing_policy=fixed_v0</strong>(Phase 5a 兼容模式)。
+        </p>
+      {% endif %}
     {% else %}
       <p class="mp-hero__desc">
         回放 Phase 3 的 6 个策略 + SPY 基准在过去 N 天内的策略级合成 PnL。

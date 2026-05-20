@@ -1180,3 +1180,20 @@ hr.mp-hr {
 .mp-bid-history-table tr.is-won { background: rgba(22, 163, 74, 0.04); }
 .mp-bid-history-table tr.is-loser { background: rgba(100, 116, 139, 0.04); }
 .mp-bid-history-table tr.is-skipped { background: rgba(220, 38, 38, 0.04); }
+
+/* Phase 5b: size distribution sparkline in bid history card header */
+.mp-bid-size-spark {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--ns-on-surface-variant);
+  margin-left: 12px;
+}
+.mp-bid-size-spark svg {
+  vertical-align: middle;
+}
+.mp-bid-size-spark__legend {
+  font-family: var(--ns-font-mono, monospace);
+  white-space: nowrap;
+}

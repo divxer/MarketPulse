@@ -75,3 +75,35 @@ def test_run_shared_pool_excess_vs_spy_is_pool_cum_minus_spy_cum(db_session):
     spy = next(r for r in out["isolated"] if r.strategy == "__spy_buyhold__")
     expected = out["shared"].cumulative_return - spy.cumulative_return
     assert abs(out["shared"].excess_vs_spy - expected) < 1e-9
+
+
+def test_run_shared_pool_with_sizing_enabled_default_true(db_session):
+    """Orchestrator defaults sizing_enabled=True (Phase 5b is default)."""
+    from marketpulse.backtest.simulator import run_shared_pool_backtest
+    _seed(db_session, ticker="AAA", strategy="momentum_breakout")
+    db_session.commit()
+
+    out = run_shared_pool_backtest(db_session, horizon=5)
+    assert out["shared"].sizing_policy == "vol_target_conviction_v0"
+
+
+def test_run_shared_pool_with_sizing_disabled_yields_phase5a_behavior(db_session):
+    """Orchestrator sizing_enabled=False → fixed_v0 (regression mode)."""
+    from marketpulse.backtest.simulator import run_shared_pool_backtest
+    _seed(db_session, ticker="AAA", strategy="momentum_breakout")
+    db_session.commit()
+
+    out = run_shared_pool_backtest(db_session, horizon=5, sizing_enabled=False)
+    assert out["shared"].sizing_policy == "fixed_v0"
+
+
+def test_run_shared_pool_sizing_policy_provenance(db_session):
+    """sizing_policy strings match the locked decisions in spec § 8."""
+    from marketpulse.backtest.simulator import run_shared_pool_backtest
+    _seed(db_session, ticker="AAA", strategy="momentum_breakout")
+    db_session.commit()
+
+    out_on = run_shared_pool_backtest(db_session, horizon=5, sizing_enabled=True)
+    out_off = run_shared_pool_backtest(db_session, horizon=5, sizing_enabled=False)
+    assert out_on["shared"].sizing_policy == "vol_target_conviction_v0"
+    assert out_off["shared"].sizing_policy == "fixed_v0"
