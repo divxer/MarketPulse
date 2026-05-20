@@ -250,6 +250,28 @@ def simulate_shared_pool(
     for s_returns in trade_returns_by_strategy.values():
         all_returns.extend(s_returns)
     n_trades = sum(n_trades_by_strategy.values())
+
+    # Unrealized MTM of positions still open at end of window — attribute to
+    # their strategy so Σ contribution_pnl == pool cumulative PnL.
+    last_day = calendar[-1] if calendar else None
+    unrealized_pnl_by_strategy: dict[str, float] = {}
+    for pos in open_positions:
+        if pos.entry_date == last_day:
+            # Newly opened on last day — no MTM yet (matches RECORD step)
+            unrealized = 0.0
+        else:
+            fraction = elapsed_fraction(
+                calendar, entry=pos.entry_date,
+                horizon=pos.horizon_date, current=last_day,
+            )
+            est_price = pos.entry_price + (
+                pos.horizon_price - pos.entry_price
+            ) * fraction
+            unrealized = pos.position_size * (est_price / pos.entry_price - 1.0)
+        unrealized_pnl_by_strategy[pos.strategy] = (
+            unrealized_pnl_by_strategy.get(pos.strategy, 0.0) + unrealized
+        )
+
     metrics = compute_metrics(
         equity_curve=equity_curve,
         n_trades=n_trades,
@@ -269,7 +291,9 @@ def simulate_shared_pool(
     per_strategy_stats: dict[str, StrategyContribution] = {}
     for s in set(daily_curves.keys()):
         ret_list = trade_returns_by_strategy.get(s, [])
-        contrib_pnl = sum(r * position_size for r in ret_list)
+        realized = sum(r * position_size for r in ret_list)
+        unrealized = unrealized_pnl_by_strategy.get(s, 0.0)
+        contrib_pnl = realized + unrealized
         exposures = exposure_by_strategy_by_day.get(s, [])
         avg_exposure = sum(exposures) / len(exposures) if exposures else 0.0
         bid_w_list = bid_weights_by_strategy.get(s, [])

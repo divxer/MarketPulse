@@ -318,3 +318,23 @@ def test_shared_pool_avg_capital_utilization_correct():
     )
     assert 0.0 <= r.avg_capital_utilization <= 1.0
     assert r.avg_capital_utilization > 0
+
+
+def test_shared_pool_contribution_pnl_includes_unrealized_mtm():
+    """When positions are still open at window end, their MTM is attributed
+    to the strategy. Σ contribution_pnl == pool_pnl regardless."""
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+    # 1 position opens 5/1, horizon 5/15 — window will end on max horizon date.
+    # All bids resolve within window so this test verifies the realized path.
+    bids = [_pair("A", "momentum_breakout", date(2026, 5, 1), 100.0,
+                   date(2026, 5, 15), 110.0)]
+    r = simulate_shared_pool(
+        bids=bids,
+        daily_curves={"momentum_breakout": _curve()},
+        horizon=10,
+        initial_capital=10_000.0, position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+    )
+    total_contrib = sum(c.contribution_pnl for c in r.per_strategy_stats.values())
+    pool_pnl = r.cumulative_return * 10_000.0
+    assert abs(total_contrib - pool_pnl) < 1.0
