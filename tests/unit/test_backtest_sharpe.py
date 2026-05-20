@@ -282,3 +282,73 @@ def test_rolling_sigma_pairs_with_rolling_sharpe_consistent_window():
     # Both should be non-None on the same dataset under the same window
     assert s is not None
     assert sharpe is not None
+
+
+def test_rolling_alpha_returns_positive_for_uptrend():
+    from datetime import date, timedelta
+
+    from marketpulse.backtest.sharpe import rolling_alpha
+    curve = [(date(2026, 4, 1) + timedelta(days=i), 10_000.0 * (1.005 ** i))
+             for i in range(30)]
+    a = rolling_alpha(curve, as_of=date(2026, 5, 1), lookback_days=60, min_events=5)
+    assert a is not None
+    assert a > 0
+    # ~0.5% daily growth → α ≈ 0.005 (small rounding from geometric vs arithmetic)
+    assert 0.003 < a < 0.007
+
+
+def test_rolling_alpha_returns_negative_for_downtrend():
+    from datetime import date, timedelta
+
+    from marketpulse.backtest.sharpe import rolling_alpha
+    curve = [(date(2026, 4, 1) + timedelta(days=i), 10_000.0 * (0.99 ** i))
+             for i in range(30)]
+    a = rolling_alpha(curve, as_of=date(2026, 5, 1), lookback_days=60, min_events=5)
+    assert a is not None
+    assert a < 0
+
+
+def test_rolling_alpha_returns_none_below_min_events():
+    from datetime import date, timedelta
+
+    from marketpulse.backtest.sharpe import rolling_alpha
+    curve = [(date(2026, 4, 1) + timedelta(days=i), 10_000.0 * (1.005 ** i))
+             for i in range(3)]
+    a = rolling_alpha(curve, as_of=date(2026, 5, 1), lookback_days=60, min_events=5)
+    assert a is None
+
+
+def test_rolling_alpha_excludes_dates_at_or_after_as_of():
+    """Causality: same window semantics as rolling_sigma."""
+    from datetime import date, timedelta
+
+    from marketpulse.backtest.sharpe import rolling_alpha
+    curve = [(date(2026, 4, 1) + timedelta(days=i), 10_000.0 * (1.005 ** i))
+             for i in range(30)]
+    a = rolling_alpha(curve, as_of=date(2026, 4, 15), lookback_days=60, min_events=5)
+    assert a is not None
+    assert a > 0
+
+
+def test_rolling_alpha_empty_curve_returns_none():
+    from datetime import date
+
+    from marketpulse.backtest.sharpe import rolling_alpha
+    a = rolling_alpha([], as_of=date(2026, 5, 1), lookback_days=60, min_events=5)
+    assert a is None
+
+
+def test_rolling_alpha_matches_numpy_mean_within_tolerance():
+    """Cross-check: rolling_alpha should match numpy.mean of diff'd returns."""
+    from datetime import date, timedelta
+
+    import numpy as np
+
+    from marketpulse.backtest.sharpe import rolling_alpha
+    values = [10_000.0, 10_050.0, 10_100.0, 10_080.0, 10_120.0, 10_150.0, 10_200.0]
+    curve = [(date(2026, 4, 1) + timedelta(days=i), v) for i, v in enumerate(values)]
+    a = rolling_alpha(curve, as_of=date(2026, 5, 1), lookback_days=60, min_events=5)
+    arr = np.array(values)
+    expected_returns = np.diff(arr) / arr[:-1]
+    expected_alpha = float(np.mean(expected_returns))
+    assert abs(a - expected_alpha) < 1e-9

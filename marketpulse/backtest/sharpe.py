@@ -79,6 +79,42 @@ def rolling_sigma(
     return s
 
 
+def rolling_alpha(
+    daily_curve: list[tuple[date, float]],
+    *,
+    as_of: date,
+    lookback_days: int = 60,
+    min_events: int = 5,
+) -> float | None:
+    """Daily-return MEAN (alpha) over curve points in [as_of - lookback, as_of).
+
+    Returns None when:
+      - Fewer than `min_events` qualifying points
+      - Non-finite mean (shouldn't happen with np.mean on finite input)
+
+    Used by Phase 5b's compute_position_sizes as the conviction signal.
+    Distinct from rolling_sharpe — alpha is raw mean return WITHOUT division
+    by σ. Using alpha (not Sharpe) for sizing conviction avoids the μ/σ²
+    double-count described in spec § 1.
+
+    Causality: identical window semantics to rolling_sigma.
+    """
+    if not daily_curve:
+        return None
+    window_start = as_of - timedelta(days=lookback_days)
+    sliced = [(d, v) for d, v in daily_curve if window_start <= d < as_of]
+    if len(sliced) < min_events:
+        return None
+    values = np.array([v for _, v in sliced], dtype=float)
+    if len(values) < 2:
+        return None
+    daily_returns = np.diff(values) / values[:-1]
+    a = float(np.mean(daily_returns))
+    if not math.isfinite(a):
+        return None
+    return a
+
+
 def compute_bid_weights(
     strategies_today: list[str],
     daily_curves: dict[str, list[tuple[date, float]]],
