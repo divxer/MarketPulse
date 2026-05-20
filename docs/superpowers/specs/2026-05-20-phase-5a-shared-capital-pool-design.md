@@ -846,3 +846,141 @@ for trade-semantic alignment, allow caching in decision #13) + 1 prose addition
 - §7: +5 new tests (now 43 total)
 
 13 locked decisions unchanged. Spec now reads more like a research engine than a dashboard.
+
+---
+
+## 11. Implementation Deltas (post-shipping)
+
+Phase 5a shipped as PR #69 on 2026-05-20. During implementation, four
+**meaningful contract refinements** emerged from code-review iterations
+that aren't captured above. Recording them here so future Phase 5b/5c
+spec writers (and anyone reading this file as a contract) see the true
+shipped behavior, not just the design-time intent.
+
+Listed in order of contract impact, most user-visible first.
+
+### Delta 1 — `compute_bid_weights` returns a 2-tuple
+
+**As designed (§ 3):**
+```python
+def compute_bid_weights(...) -> dict[str, float]:
+    """Returns dict[strategy_name, weight]."""
+```
+
+**As shipped:**
+```python
+def compute_bid_weights(...) -> tuple[dict[str, float], set[str]]:
+    """Returns (weights, floor_hits) — floor_hits is the set of strategies
+    whose raw Sharpe was below min_floor and got clipped up."""
+```
+
+**Why changed:** the original spec had the simulator re-running
+`rolling_sharpe` to detect floor hits for the `n_floor_hits` telemetry.
+That duplicated the magic constant `0.1`, miscounted strategies whose
+avg-fill happened to equal 0.1, and miscounted real Sharpe=0.1 as a
+floor hit. Cleaner: have the weight computation return the floor-hit
+set directly. Caller iterates it for telemetry, no second call.
+
+**Locked in PR #69 commit:** `ca3a7c7 fix(phase-5a): compute_bid_weights returns (weights, floor_hits) tuple`
+
+**Tests:** `test_compute_bid_weights_returns_floor_hits_set`, `test_compute_bid_weights_bootstrap_returns_empty_floor_hits`
+
+### Delta 2 — `bid_policy` reflects `lookback_days` dynamically
+
+**As designed (§ 4, § 8 decision #9):**
+> Every Phase 5a result carries `bid_policy="rolling_sharpe_60d_v0"`.
+
+**As shipped:**
+```python
+bid_policy = f"rolling_sharpe_{lookback_days}d_v0"
+```
+
+The default 60d still yields `"rolling_sharpe_60d_v0"`. But callers
+passing `lookback_days=90` now get `"rolling_sharpe_90d_v0"` in the
+result, instead of the spec's hardcoded "60d" lie.
+
+**Why changed:** code-review iteration 2 caught that the orchestrator
+threads `lookback_days` through but the result's provenance string
+never updated. Dashboards and logs would have misreported the lookback
+window for any non-default run. Trivial fix; preserves the provenance
+contract's value.
+
+**Locked in PR #69 commit:** `8a1a67d fix(phase-5a): bid_policy reflects lookback_days + deterministic per_strategy_stats order`
+
+**Tests:** `test_shared_pool_bid_policy_reflects_lookback_days`, `test_shared_pool_bid_policy_set_on_empty_bids_path`
+
+### Delta 3 — `per_strategy_stats` iteration is deterministic (alphabetical)
+
+**As designed (§ 4):** unspecified — `set(daily_curves.keys())`
+iteration leaves dict insertion order to Python's random hash seed.
+
+**As shipped:** `sorted(daily_curves.keys())`, so the dict's iteration
+order is locked to alphabetical strategy name.
+
+**Why changed:** templates iterate `per_strategy_stats.items()`. Set
+iteration is hash-randomized → strategy table rows render in different
+order across identical backtest runs, which looks like a bug to users
+diffing snapshots. One-character fix (`set` → `sorted`), but worth
+recording so Phase 5b doesn't accidentally re-introduce non-determinism
+when adding new strategies.
+
+**Locked in PR #69 commit:** `8a1a67d`
+
+**Tests:** `test_shared_pool_per_strategy_stats_iteration_is_sorted`
+
+### Delta 4 — `contribution_pnl` includes unrealized MTM at window end
+
+**As designed (§ 4):** `contribution_pnl: float` — described as "$
+this strategy's positions added to the pool." Implementation summed
+only realized trade returns.
+
+**As shipped:** `contribution_pnl = realized + unrealized_at_window_end`
+where unrealized = linear-interpolated MTM of any positions still open
+on the last calendar day (matching the RECORD step's per-day MTM).
+
+**Why changed:** without including unrealized MTM, the invariant
+`Σ contribution_pnl == pool_pnl` only holds when every position's
+horizon falls inside the window. Phase 5a tests happened to satisfy
+this by construction. Future Phase 5b/5c with arbitrary windows would
+break the invariant silently. Spec didn't anticipate.
+
+**Locked in PR #69 commit:** `8797b2a fix(phase-5a): contribution_pnl includes unrealized MTM of open positions`
+
+**Tests:** `test_shared_pool_contribution_pnl_includes_unrealized_mtm`, `test_shared_pool_contribution_pnl_sums_to_pool_pnl`
+
+### Delta 5 — `_simulate_strategy_daily` private helper extracted
+
+**As designed (§ 6):** plan had `simulate_strategy_with_artifacts`
+re-run the daily loop to grab the un-downsampled curve, as a "v0
+trade-off to keep Phase 4 hot path isolated."
+
+**As shipped:** code review iteration 2 caught this as a real
+maintenance hazard. Extracted `_simulate_strategy_daily` private helper
+that both `simulate_strategy_from_pairs` and
+`simulate_strategy_with_artifacts` consume. Single source of truth for
+the inner CLOSE/OPEN/MTM/RECORD loop.
+
+**Why noted here:** this is an **internal** refactor (no API change)
+so it doesn't belong in the §6 file structure or §4 data model. But
+future readers tracing why both public entry points return matching
+data should know it's by construction, not by accident.
+
+**Locked in PR #69 commit:** `4ac799c refactor(backtest): extract daily loop into _simulate_strategy_daily helper`
+
+### Decisions Still Locked
+
+The 13 decisions in § 8 remain unchanged. Deltas 1–4 above refine HOW
+those decisions are surfaced in the contract; none of them flip a
+decision. Specifically:
+
+- Decision #3 (60-day Sharpe lookback) — still default; just provenance string is now dynamic
+- Decision #9 (bid_policy provenance) — string format refined; pattern unchanged
+- Decision #4 (n<5 floor + bootstrap) — refactored detection, same behavior
+
+If Phase 5b changes any of these, write a fresh spec there. Don't edit
+this file's locked-decisions table.
+
+---
+
+**Phase 5a complete:** 17 commits on PR #69, 780 repo-wide tests pass,
+shipped 2026-05-20.
