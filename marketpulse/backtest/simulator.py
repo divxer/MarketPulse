@@ -36,44 +36,30 @@ class _OpenPosition:
     position_size: float
 
 
-def simulate_strategy_from_pairs(
+def _simulate_strategy_daily(
     pairs: list[EventOutcomePair],
     *,
-    strategy: str,
-    display_name: str,
-    horizon: int,
-    initial_capital: float = 10_000.0,
-    position_size: float = 1_000.0,
-    max_capital_in_use: float = 10_000.0,
-) -> StrategyBacktestResult:
-    """Simulate a long-only paper portfolio for ONE strategy.
-
-    Algorithm (spec § Portfolio Simulator Algorithm):
-      For each trading day d in [first_event_date, max_horizon_date]:
-        a) CLOSE positions whose horizon_date == d
-        b) OPEN new bullish events with event_time.date() == d
-        c) MTM open positions opened BEFORE today (linear interpolation)
-        d) RECORD equity[d] = cash + Σ position_values
-
-    Returns:
-        StrategyBacktestResult with downsampled daily_equity_curve.
+    position_size: float,
+    initial_capital: float,
+    max_capital_in_use: float,
+) -> tuple[
+    list[tuple[date, float]],  # full un-downsampled equity curve
+    int,                        # n_trades
+    int,                        # n_capacity_skipped
+    list[float],                # trade_returns
+    list[EventOutcomePair],     # executed_pairs
+    list[date],                 # calendar (for upstream metric slicing)
+    set[date],                  # db_dates (for upstream metric slicing)
+]:
+    """Inner shared daily-loop helper. Used by both simulate_strategy_from_pairs
+    (Phase 4 entry) and simulate_strategy_with_artifacts (Phase 5a entry).
+    Single source of truth for CLOSE/OPEN/MTM/RECORD per-strategy logic.
     """
-    if not pairs:
-        return _empty_result(strategy, display_name, horizon, initial_capital)
-
-    # Anchor dates: only event_time + horizon_date values that came from the
-    # DB (Phase 1's outcomes.py already aligned these to yfinance trading days).
-    # These are the dates Sharpe/Sortino/Calmar are computed against — they
-    # must NOT include US holidays or other gap-filled days, or daily-return
-    # series gets diluted with 0.0 returns that deflate vol and inflate Sharpe.
     db_dates: set[date] = set()
     for p in pairs:
         db_dates.add(p.event_time.date())
         db_dates.add(p.horizon_date)
 
-    # Equity-curve dates: densify by adding intermediate weekdays so the
-    # chart has smooth daily MTM marks even on sparse single-event windows.
-    # This is a chart-only concern; metrics use db_dates above.
     raw_dates: set[date] = set(db_dates)
     min_d, max_d = min(raw_dates), max(raw_dates)
     cur = min_d
@@ -92,88 +78,107 @@ def simulate_strategy_from_pairs(
     n_trades = 0
     n_capacity_skipped = 0
     trade_returns: list[float] = []
+    executed_pairs: list[EventOutcomePair] = []
     equity_curve: list[tuple[date, float]] = []
 
     for d in calendar:
-        # a) CLOSE
+        # CLOSE
         still_open: list[_OpenPosition] = []
         for pos in open_positions:
             if pos.horizon_date == d:
                 realized_ret = (pos.horizon_price - pos.entry_price) / pos.entry_price
-                realized_pnl = pos.position_size * realized_ret
-                cash += pos.position_size + realized_pnl
+                cash += pos.position_size * (1 + realized_ret)
                 trade_returns.append(realized_ret)
             else:
                 still_open.append(pos)
         open_positions = still_open
 
-        # b) OPEN
+        # OPEN
         for p in pairs_by_entry.get(d, []):
             capital_in_use = sum(pos.position_size for pos in open_positions)
             if capital_in_use + position_size > max_capital_in_use:
                 n_capacity_skipped += 1
                 log.info(
                     "backtest_signal_capacity_skipped",
-                    strategy=strategy, ticker=p.ticker, date=d.isoformat(),
+                    ticker=p.ticker, date=d.isoformat(),
                 )
                 continue
             if cash < position_size:
                 n_capacity_skipped += 1
                 log.info(
                     "backtest_cash_shortfall_skipped",
-                    strategy=strategy, ticker=p.ticker, date=d.isoformat(),
-                    cash=cash,
+                    ticker=p.ticker, date=d.isoformat(), cash=cash,
                 )
                 continue
             open_positions.append(_OpenPosition(
-                ticker=p.ticker,
-                entry_date=d,
-                entry_price=p.event_price,
-                horizon_date=p.horizon_date,
-                horizon_price=p.horizon_price,
-                position_size=position_size,
+                ticker=p.ticker, entry_date=d,
+                entry_price=p.event_price, horizon_date=p.horizon_date,
+                horizon_price=p.horizon_price, position_size=position_size,
             ))
             cash -= position_size
             n_trades += 1
+            executed_pairs.append(p)
 
-        # c) MTM
+        # MTM
         positions_value = 0.0
         for pos in open_positions:
             if pos.entry_date == d:
                 positions_value += pos.position_size
             else:
                 fraction = elapsed_fraction(
-                    calendar,
-                    entry=pos.entry_date,
-                    horizon=pos.horizon_date,
-                    current=d,
+                    calendar, entry=pos.entry_date,
+                    horizon=pos.horizon_date, current=d,
                 )
                 est_price = pos.entry_price + (
                     pos.horizon_price - pos.entry_price
                 ) * fraction
-                est_value = pos.position_size * (est_price / pos.entry_price)
-                positions_value += est_value
+                positions_value += pos.position_size * (est_price / pos.entry_price)
 
-        # d) RECORD
+        # RECORD
         equity_curve.append((d, cash + positions_value))
+
+    return (
+        equity_curve, n_trades, n_capacity_skipped,
+        trade_returns, executed_pairs, calendar, db_dates,
+    )
+
+
+def simulate_strategy_from_pairs(
+    pairs: list[EventOutcomePair],
+    *,
+    strategy: str,
+    display_name: str,
+    horizon: int,
+    initial_capital: float = 10_000.0,
+    position_size: float = 1_000.0,
+    max_capital_in_use: float = 10_000.0,
+) -> StrategyBacktestResult:
+    """Phase 4 isolated-portfolio simulator.
+
+    Public API unchanged. Delegates the daily loop to _simulate_strategy_daily,
+    then builds a downsampled curve + StrategyBacktestResult.
+    """
+    if not pairs:
+        return _empty_result(strategy, display_name, horizon, initial_capital)
+
+    (
+        equity_curve, n_trades, n_capacity_skipped,
+        trade_returns, executed_pairs, _calendar, db_dates,
+    ) = _simulate_strategy_daily(
+        pairs,
+        position_size=position_size,
+        initial_capital=initial_capital,
+        max_capital_in_use=max_capital_in_use,
+    )
 
     downsampled = downsample_equity_curve(equity_curve, target_points=120)
 
-    # Metrics use only the DB-anchored subset of the equity curve, NOT the
-    # weekday-densified one. Including gap-filled days would inject 0.0
-    # daily returns on US holidays / non-event days and inflate Sharpe.
     metrics_curve = [(d, v) for d, v in equity_curve if d in db_dates]
     metrics = compute_metrics(
         equity_curve=metrics_curve,
         n_trades=n_trades,
         trade_returns=trade_returns,
     )
-
-    # excess_vs_spy is set by the orchestrator (run_all_backtests) AFTER
-    # the SPY baseline is computed — that's the only point at which both
-    # strategy.cumulative_return and spy.cumulative_return are known.
-    # Per-strategy callers (tests / ad-hoc replay) get 0.0 here; the field
-    # is meaningless without a SPY counterpart in the same window.
 
     return StrategyBacktestResult(
         strategy=strategy,
@@ -343,91 +348,60 @@ def simulate_strategy_with_artifacts(
 ) -> tuple[StrategyBacktestResult, StrategyBacktestArtifacts]:
     """Phase 5a variant: returns (DTO, Artifacts) for shared-pool rolling Sharpe.
 
-    Same simulator logic as simulate_strategy_from_pairs — but ALSO returns
-    the un-downsampled internal equity_curve as a StrategyBacktestArtifacts
-    sibling. Phase 4 callers continue to use simulate_strategy_from_pairs
-    (which discards the artifact).
+    Delegates to the shared _simulate_strategy_daily helper, then builds
+    BOTH the public DTO and the un-downsampled artifacts side-by-side. No
+    duplicated daily loop.
     """
-    # Run the existing simulator (it already builds equity_curve internally).
-    result = simulate_strategy_from_pairs(
-        pairs=pairs,
-        strategy=strategy, display_name=display_name, horizon=horizon,
-        initial_capital=initial_capital, position_size=position_size,
-        max_capital_in_use=max_capital_in_use,
-    )
-    # Rebuild the un-downsampled curve by re-running the daily loop just for
-    # the equity series. This is duplicative but isolated — keeps Phase 4
-    # callers untouched.
     if not pairs:
         from datetime import date as _date
-        return result, StrategyBacktestArtifacts(
+        result = _empty_result(strategy, display_name, horizon, initial_capital)
+        artifacts = StrategyBacktestArtifacts(
             strategy=strategy,
             full_equity_curve=[(_date.today(), initial_capital)],
         )
+        return result, artifacts
 
-    # Replicate the calendar + daily loop just to grab the un-downsampled curve.
-    db_dates: set[date] = set()
-    for p in pairs:
-        db_dates.add(p.event_time.date())
-        db_dates.add(p.horizon_date)
-    raw_dates: set[date] = set(db_dates)
-    min_d, max_d = min(raw_dates), max(raw_dates)
-    cur = min_d
-    while cur <= max_d:
-        if cur.weekday() < 5:
-            raw_dates.add(cur)
-        cur += timedelta(days=1)
-    calendar = build_calendar(list(raw_dates))
-
-    pairs_by_entry: dict[date, list[EventOutcomePair]] = {}
-    for p in pairs:
-        pairs_by_entry.setdefault(p.event_time.date(), []).append(p)
-
-    cash: float = initial_capital
-    open_positions: list[_OpenPosition] = []
-    equity_curve: list[tuple[date, float]] = []
-    for d in calendar:
-        # CLOSE
-        still_open: list[_OpenPosition] = []
-        for pos in open_positions:
-            if pos.horizon_date == d:
-                realized_ret = (pos.horizon_price - pos.entry_price) / pos.entry_price
-                cash += pos.position_size * (1 + realized_ret)
-            else:
-                still_open.append(pos)
-        open_positions = still_open
-        # OPEN
-        for p in pairs_by_entry.get(d, []):
-            capital_in_use = sum(pos.position_size for pos in open_positions)
-            if capital_in_use + position_size > max_capital_in_use:
-                continue
-            if cash < position_size:
-                continue
-            open_positions.append(_OpenPosition(
-                ticker=p.ticker, entry_date=d,
-                entry_price=p.event_price, horizon_date=p.horizon_date,
-                horizon_price=p.horizon_price, position_size=position_size,
-            ))
-            cash -= position_size
-        # MTM
-        positions_value = 0.0
-        for pos in open_positions:
-            if pos.entry_date == d:
-                positions_value += pos.position_size
-            else:
-                fraction = elapsed_fraction(
-                    calendar, entry=pos.entry_date,
-                    horizon=pos.horizon_date, current=d,
-                )
-                est_price = pos.entry_price + (
-                    pos.horizon_price - pos.entry_price
-                ) * fraction
-                positions_value += pos.position_size * (est_price / pos.entry_price)
-        equity_curve.append((d, cash + positions_value))
-
-    return result, StrategyBacktestArtifacts(
-        strategy=strategy, full_equity_curve=equity_curve,
+    (
+        equity_curve, n_trades, n_capacity_skipped,
+        trade_returns, executed_pairs, _calendar, db_dates,
+    ) = _simulate_strategy_daily(
+        pairs,
+        position_size=position_size,
+        initial_capital=initial_capital,
+        max_capital_in_use=max_capital_in_use,
     )
+
+    downsampled = downsample_equity_curve(equity_curve, target_points=120)
+    metrics_curve = [(d, v) for d, v in equity_curve if d in db_dates]
+    metrics = compute_metrics(
+        equity_curve=metrics_curve,
+        n_trades=n_trades,
+        trade_returns=trade_returns,
+    )
+
+    result = StrategyBacktestResult(
+        strategy=strategy,
+        display_name=display_name,
+        horizon=horizon,
+        n_trades=n_trades,
+        n_capacity_skipped=n_capacity_skipped,
+        cumulative_return=metrics.cumulative_return,
+        annual_return=metrics.annual_return,
+        sharpe=metrics.sharpe,
+        sortino=metrics.sortino,
+        max_drawdown=metrics.max_drawdown,
+        calmar=metrics.calmar,
+        win_rate=metrics.win_rate,
+        avg_win_pct=metrics.avg_win_pct,
+        avg_loss_pct=metrics.avg_loss_pct,
+        daily_equity_curve=downsampled,
+        excess_vs_spy=0.0,
+    )
+    artifacts = StrategyBacktestArtifacts(
+        strategy=strategy,
+        full_equity_curve=equity_curve,
+    )
+    return result, artifacts
 
 
 def run_all_backtests(
