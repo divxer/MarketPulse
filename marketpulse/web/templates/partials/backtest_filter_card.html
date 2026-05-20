@@ -29,5 +29,15 @@
                 class="{% if filters.since_days == 'all' %}is-active{% endif %}">全部</button>
       </div>
     </div>
+
+    <div>
+      <span class="mp-eyebrow">View</span>
+      <div class="mp-seg" style="margin-top:6px;">
+        <button type="submit" name="mode" value="per-strategy"
+                class="{% if filters.mode == 'per-strategy' or not filters.mode %}is-active{% endif %}">单策略</button>
+        <button type="submit" name="mode" value="shared-pool"
+                class="{% if filters.mode == 'shared-pool' %}is-active{% endif %}">共享池</button>
+      </div>
+    </div>
   </form>
 </section>

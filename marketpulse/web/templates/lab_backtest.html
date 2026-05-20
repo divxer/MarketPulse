@@ -14,17 +14,28 @@
 {% include "partials/backtest_hero.html" ignore missing %}
 
 <section class="mp-backtest-kpi">
-  {% include "partials/backtest_kpi_strip.html" ignore missing %}
+  {% if mode == 'shared-pool' %}
+    {% include "partials/backtest_kpi_strip_shared.html" ignore missing %}
+  {% else %}
+    {% include "partials/backtest_kpi_strip.html" ignore missing %}
+  {% endif %}
 </section>
 
 <section class="mp-backtest-body">
   <div class="mp-backtest-main">
     {% include "partials/backtest_equity_chart.html" ignore missing %}
     {% include "partials/backtest_drawdown_chart.html" ignore missing %}
+    {% if mode == 'shared-pool' %}
+      {% include "partials/backtest_bid_history.html" ignore missing %}
+    {% endif %}
   </div>
   <aside class="mp-backtest-rail">
     {% include "partials/backtest_filter_card.html" ignore missing %}
-    {% include "partials/backtest_strategy_table.html" ignore missing %}
+    {% if mode == 'shared-pool' %}
+      {% include "partials/backtest_strategy_table_shared.html" ignore missing %}
+    {% else %}
+      {% include "partials/backtest_strategy_table.html" ignore missing %}
+    {% endif %}
   </aside>
 </section>
 
