@@ -1,0 +1,14 @@
+# Phase 5c-1: manual sector overrides for tickers where yfinance is wrong, missing,
+# or where the natural GICS sector doesn't capture meaningful exposure correlation.
+#
+# Use cases:
+# - Leveraged ETFs (3x bull / bear)
+# - Thematic ETFs without natural GICS sector
+# - Crypto / digital asset proxies
+#
+# Equity tickers (AAPL, GOOGL, AMSC, etc.) fall through to yfinance default.
+overrides:
+  TQQQ: leveraged_qqq
+  TNA: leveraged_small_cap
+  QBTS: quantum_compute
+  QUBT: quantum_compute

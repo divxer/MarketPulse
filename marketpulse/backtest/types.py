@@ -83,7 +83,9 @@ class StrategyContribution:
     n_dedup_skipped: int
     n_capacity_skipped: int
     n_cash_short_skipped: int
-    n_size_too_small_skipped: int  # NEW Phase 5b
+    n_size_too_small_skipped: int   # NEW Phase 5b
+    n_sector_cap_skipped: int       # NEW Phase 5c-1
+    n_correlation_cap_skipped: int  # NEW Phase 5c-2
     contribution_pnl: float
     avg_exposure: float
     avg_bid_weight: float
@@ -101,7 +103,9 @@ class BidRecord:
     weight: float
     outcome: Literal[
         "won", "dedup_loser", "cap_full", "cash_short",
-        "size_too_small",  # NEW Phase 5b
+        "size_too_small",          # NEW Phase 5b
+        "sector_cap_full",         # NEW Phase 5c-1
+        "correlation_cap_full",    # NEW Phase 5c-2
     ]
     winner: str | None
     position_size: float  # NEW Phase 5b — model's REQUESTED size in dollars.
@@ -112,6 +116,10 @@ class BidRecord:
                           #   cash_short:    what was requested but cash-blocked
                           #   size_too_small: raw pre-clamp size (e.g. $42)
                           # See spec § 3 for the rationale.
+    # NEW Phase 5c diagnostic fields (default empty; populated only for the
+    # matching outcome). Frozen-dataclass-safe — string and tuple are hashable.
+    blocked_by_sector: str | None = None
+    blocked_by_correlation_with: tuple[tuple[str, float], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -132,6 +140,15 @@ class PortfolioBacktestResult:
     # observation-only in v0; Phase 5d will enforce risk budgets using these.
     max_strategy_exposure: float
     hhi_concentration: float
+
+    # NEW Phase 5c-1 sector telemetry (required)
+    max_sector_exposure: float
+    max_sector_exposure_by_sector: dict[str, float]
+    sector_breakdown: dict[str, float]
+
+    # NEW Phase 5c-2 correlation telemetry (required)
+    max_neighbor_exposure: float
+    n_correlation_cap_events: int
 
     # Performance metrics (required; sharpe/sortino/calmar may be None)
     cumulative_return: float
@@ -157,3 +174,8 @@ class PortfolioBacktestResult:
     mtm_model: str = "linear_interpolation_v0"
     bid_policy: str = "rolling_sharpe_60d_v0"
     sizing_policy: str = "fixed_v0"  # NEW Phase 5b
+    sector_cap_policy: str = "uniform_40pct_v0"                  # NEW Phase 5c-1
+    correlation_cap_policy: str = "neighbor_sum_rho06_40pct_v0"  # NEW Phase 5c-2
+    sector_caps_enabled: bool = True                              # NEW Phase 5c-1
+    correlation_caps_enabled: bool = True                         # NEW Phase 5c-2
+    risk_policy: str = "cap40_corr06_enforced_v0"                 # NEW Phase 5c composite tag

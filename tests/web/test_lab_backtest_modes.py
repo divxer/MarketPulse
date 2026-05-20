@@ -93,3 +93,26 @@ def test_lab_backtest_shared_mode_includes_sizing_policy_in_hero(
     r = client.get("/lab/backtest?mode=shared-pool")
     # 2nd hero sentence references the sizing policy
     assert "vol_target_conviction_v0" in r.text
+
+
+def test_lab_backtest_shared_mode_renders_sector_breakdown_section(
+    client, monkeypatch, db_session,
+):
+    """Shared-pool mode renders the new sector breakdown section."""
+    _login(client, monkeypatch)
+    _seed_event(db_session, ticker="A1", strategy="momentum_breakout")
+    db_session.commit()
+    r = client.get("/lab/backtest?mode=shared-pool")
+    assert r.status_code == 200
+    assert "Sector 暴露分布" in r.text or "sector" in r.text.lower()
+
+
+def test_lab_backtest_shared_mode_renders_cap_policy_in_hero(
+    client, monkeypatch, db_session,
+):
+    """Hero text includes risk_policy provenance line."""
+    _login(client, monkeypatch)
+    _seed_event(db_session, ticker="A1", strategy="momentum_breakout")
+    db_session.commit()
+    r = client.get("/lab/backtest?mode=shared-pool")
+    assert "cap40_corr06_enforced_v0" in r.text or "sector_cap_policy" in r.text

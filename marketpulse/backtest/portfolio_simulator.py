@@ -11,9 +11,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, timedelta
+from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from marketpulse.backtest.correlation import PriceProvider
+
+from marketpulse.backtest.correlation import find_correlation_neighbors
 from marketpulse.backtest.metrics import compute_metrics
-from marketpulse.backtest.sharpe import compute_bid_weights
+from marketpulse.backtest.sharpe import compute_bid_weights, compute_position_sizes
 from marketpulse.backtest.trading_calendar import (
     build_calendar,
     elapsed_fraction,
@@ -53,6 +60,15 @@ def simulate_shared_pool(
     min_position: float = 200.0,
     max_position: float = 4_000.0,
     sizing_enabled: bool = True,
+    # NEW Phase 5c-1 sector cap (this task)
+    sector_caps_enabled: bool = True,
+    sector_cap_pct: float = 0.40,
+    sector_provider: Callable[[str], str] | None = None,
+    # NEW Phase 5c-2 correlation cap (reserved — wired in T7)
+    correlation_caps_enabled: bool = True,
+    correlation_cap_pct: float = 0.40,
+    correlation_threshold: float = 0.60,
+    price_provider: PriceProvider | None = None,
 ) -> PortfolioBacktestResult:
     """Phase 5a shared-pool simulator. See spec § 2 for algorithm.
 
@@ -75,6 +91,24 @@ def simulate_shared_pool(
     bid_policy = f"rolling_sharpe_{lookback_days}d_v0"
     sizing_policy = "vol_target_conviction_v0" if sizing_enabled else "fixed_v0"
 
+    # Phase 5c risk_policy composition (spec § 10b)
+    if sector_caps_enabled and correlation_caps_enabled:
+        risk_policy = "cap40_corr06_enforced_v0"
+    elif not sector_caps_enabled and not correlation_caps_enabled:
+        risk_policy = "caps_disabled_v0"
+    elif sector_caps_enabled:
+        risk_policy = "cap40_only_v0"
+    else:
+        risk_policy = "corr06_only_v0"
+
+    sector_cap_dollars = sector_cap_pct * initial_capital
+    correlation_cap_dollars = correlation_cap_pct * initial_capital
+
+    # Resolve sector_provider — default to real get_sector
+    if sector_provider is None:
+        from marketpulse.backtest.sector import get_sector as _real_get_sector
+        sector_provider = _real_get_sector
+
     if not bids:
         from datetime import date as _date
         return PortfolioBacktestResult(
@@ -84,6 +118,12 @@ def simulate_shared_pool(
             avg_capital_utilization=0.0,
             max_strategy_exposure=0.0,
             hhi_concentration=0.0,
+            # Phase 5c placeholders — real values land in Tasks 6-8
+            max_sector_exposure=0.0,
+            max_sector_exposure_by_sector={},
+            sector_breakdown={},
+            max_neighbor_exposure=0.0,
+            n_correlation_cap_events=0,
             cumulative_return=0.0,
             annual_return=0.0,
             sharpe=None,
@@ -99,6 +139,9 @@ def simulate_shared_pool(
             bid_history=[],
             bid_policy=bid_policy,
             sizing_policy=sizing_policy,
+            sector_caps_enabled=sector_caps_enabled,
+            correlation_caps_enabled=correlation_caps_enabled,
+            risk_policy=risk_policy,
         )
 
     db_dates: set[date] = set()
@@ -133,6 +176,12 @@ def simulate_shared_pool(
     n_cash_short_skipped_by_strategy: dict[str, int] = {}
     n_floor_hits_by_strategy: dict[str, int] = {}
     n_size_too_small_by_strategy: dict[str, int] = {}
+    # NEW Phase 5c counters
+    n_sector_cap_skipped_by_strategy: dict[str, int] = {}
+    n_correlation_cap_skipped_by_strategy: dict[str, int] = {}  # reserved for T7
+    # Phase 5c sector + correlation telemetry accumulators
+    sector_exposure_daily: list[dict[str, float]] = []
+    n_correlation_cap_events = 0
     n_bids_by_strategy: dict[str, int] = {}
     bid_weights_by_strategy: dict[str, list[float]] = {}
     capital_in_use_by_day: list[float] = []
@@ -180,7 +229,6 @@ def simulate_shared_pool(
         # ALLOCATE consumes position_sizes[strategy] for cap arithmetic and
         # records the requested size on every BidRecord outcome.
         if sizing_enabled and strategies_today:
-            from marketpulse.backtest.sharpe import compute_position_sizes
             position_sizes, raw_sizes_below_min = compute_position_sizes(
                 strategies_today, daily_curves,
                 as_of=d,
@@ -260,6 +308,19 @@ def simulate_shared_pool(
             winners.values(),
             key=lambda b: (-weights[b.strategy], b.event_time, b.strategy),
         )
+
+        # ─── ALLOCATE pre-warm: sector lookup + running exposure ───
+        sector_by_ticker: dict[str, str] = {}
+        for p in open_positions:
+            sector_by_ticker.setdefault(p.ticker, sector_provider(p.ticker))
+        for b in sorted_winners:
+            sector_by_ticker.setdefault(b.ticker, sector_provider(b.ticker))
+
+        sector_exposure: dict[str, float] = {}
+        for p in open_positions:
+            s = sector_by_ticker[p.ticker]
+            sector_exposure[s] = sector_exposure.get(s, 0.0) + p.position_size
+
         for b in sorted_winners:
             n_bids_by_strategy[b.strategy] = n_bids_by_strategy.get(b.strategy, 0) + 1
             bid_weights_by_strategy.setdefault(b.strategy, []).append(
@@ -289,12 +350,66 @@ def simulate_shared_pool(
                     n_cash_short_skipped_by_strategy.get(b.strategy, 0) + 1
                 )
                 continue
+            # ─── NEW Phase 5c-1: sector cap check ───
+            candidate_sector = sector_by_ticker[b.ticker]
+            if (
+                sector_caps_enabled
+                and sector_exposure.get(candidate_sector, 0.0) + requested_size
+                > sector_cap_dollars
+            ):
+                all_bid_records.append(BidRecord(
+                    date=d, strategy=b.strategy, ticker=b.ticker,
+                    weight=weights[b.strategy],
+                    outcome="sector_cap_full", winner=None,
+                    position_size=requested_size,
+                    blocked_by_sector=candidate_sector,
+                ))
+                n_sector_cap_skipped_by_strategy[b.strategy] = (
+                    n_sector_cap_skipped_by_strategy.get(b.strategy, 0) + 1
+                )
+                continue
+            # ─── NEW Phase 5c-2: correlation cap check ───
+            # Known limit (spec § 5 + Appendix C.3): neighbor-sum is NOT
+            # transitive. For an N-chain topology A-B-C-...-N where adjacent
+            # pairs have ρ≥threshold but non-adjacent don't, total cluster
+            # exposure can reach N/2 × cap (e.g. 2.5× for a 5-chain). A
+            # transitive DBSCAN-style cluster algo would tighten this; see
+            # Appendix C.3 for the upgrade path. Acceptable for current
+            # ~30-ticker universe.
+            if correlation_caps_enabled and price_provider is not None:
+                open_tickers = [p.ticker for p in open_positions]
+                neighbors, corr_diagnostics = find_correlation_neighbors(
+                    b.ticker, open_tickers,
+                    as_of=d, threshold=correlation_threshold,
+                    lookback_days=lookback_days,
+                    price_provider=price_provider,
+                )
+                cluster_exposure = requested_size + sum(
+                    p.position_size for p in open_positions
+                    if p.ticker in neighbors
+                )
+                if cluster_exposure > correlation_cap_dollars:
+                    all_bid_records.append(BidRecord(
+                        date=d, strategy=b.strategy, ticker=b.ticker,
+                        weight=weights[b.strategy],
+                        outcome="correlation_cap_full", winner=None,
+                        position_size=requested_size,
+                        blocked_by_correlation_with=corr_diagnostics,
+                    ))
+                    n_correlation_cap_skipped_by_strategy[b.strategy] = (
+                        n_correlation_cap_skipped_by_strategy.get(b.strategy, 0) + 1
+                    )
+                    n_correlation_cap_events += 1
+                    continue
             open_positions.append(_OpenPosition(
                 strategy=b.strategy, ticker=b.ticker,
                 entry_date=d, entry_price=b.event_price,
                 horizon_date=b.horizon_date, horizon_price=b.horizon_price,
                 position_size=requested_size,
             ))
+            sector_exposure[candidate_sector] = (
+                sector_exposure.get(candidate_sector, 0.0) + requested_size
+            )
             cash -= requested_size
             n_trades_by_strategy[b.strategy] = n_trades_by_strategy.get(b.strategy, 0) + 1
             all_bid_records.append(BidRecord(
@@ -303,6 +418,18 @@ def simulate_shared_pool(
                 outcome="won", winner=None,
                 position_size=requested_size,
             ))
+
+        # Phase 5c: snapshot per-day sector exposure (post-ALLOCATE).
+        # Every ticker in open_positions is guaranteed to be in
+        # sector_by_ticker because pre-warm above populated all
+        # open_positions + candidates, and winning candidates are a subset
+        # of candidates. Direct dict access surfaces bugs faster than a
+        # silent .get() fallback would.
+        day_snapshot: dict[str, float] = {}
+        for p in open_positions:
+            s = sector_by_ticker[p.ticker]
+            day_snapshot[s] = day_snapshot.get(s, 0.0) + p.position_size
+        sector_exposure_daily.append(day_snapshot)
 
         # ─── MTM ─── (linear interpolation per spec § 2 + Phase 4)
         positions_value = 0.0
@@ -412,6 +539,9 @@ def simulate_shared_pool(
             n_capacity_skipped=n_capacity_skipped_by_strategy.get(s, 0),
             n_cash_short_skipped=n_cash_short_skipped_by_strategy.get(s, 0),
             n_size_too_small_skipped=n_size_too_small_by_strategy.get(s, 0),
+            # Phase 5c: counters wired in T6/T7; full telemetry lands in T8
+            n_sector_cap_skipped=n_sector_cap_skipped_by_strategy.get(s, 0),
+            n_correlation_cap_skipped=n_correlation_cap_skipped_by_strategy.get(s, 0),
             contribution_pnl=contrib_pnl,
             avg_exposure=avg_exposure,
             avg_bid_weight=avg_bid_weight,
@@ -431,6 +561,38 @@ def simulate_shared_pool(
         max_strategy_exposure = 0.0
         hhi_concentration = 0.0
 
+    # Phase 5c-1 sector telemetry
+    if sector_exposure_daily:
+        max_sector_exposure = 0.0
+        max_sector_exposure_by_sector: dict[str, float] = {}
+        sector_sum_over_days: dict[str, float] = {}
+
+        for day_snapshot in sector_exposure_daily:
+            for s, dollars in day_snapshot.items():
+                frac = dollars / initial_capital
+                if frac > max_sector_exposure:
+                    max_sector_exposure = frac
+                if frac > max_sector_exposure_by_sector.get(s, 0.0):
+                    max_sector_exposure_by_sector[s] = frac
+                sector_sum_over_days[s] = sector_sum_over_days.get(s, 0.0) + frac
+
+        n_days = len(sector_exposure_daily)
+        sector_breakdown = {s: total / n_days for s, total in sector_sum_over_days.items()}
+    else:
+        max_sector_exposure = 0.0
+        max_sector_exposure_by_sector = {}
+        sector_breakdown = {}
+
+    # Phase 5c-2 correlation telemetry.
+    # max_neighbor_exposure is a SPEC-LOCKED v0 PLACEHOLDER (spec § 7 + plan
+    # T8 explicitly state "stays 0.0 in v0; computation deferred to future
+    # iteration"). The field is reserved on PortfolioBacktestResult so the
+    # schema is stable for future versions; the lab UI does not surface this
+    # number anywhere in v0, so the 0.0 is never rendered to users.
+    # See `n_correlation_cap_events` for the v0 correlation-cap signal that
+    # IS computed.
+    max_neighbor_exposure = 0.0
+
     # Last-100 slice of bid history (spec § 4: render-layer cap)
     bid_history = all_bid_records[-100:] if len(all_bid_records) > 100 else all_bid_records
 
@@ -441,6 +603,13 @@ def simulate_shared_pool(
         avg_capital_utilization=avg_util,
         max_strategy_exposure=max_strategy_exposure,
         hhi_concentration=hhi_concentration,
+        # Phase 5c-1 sector telemetry (Task 8)
+        max_sector_exposure=max_sector_exposure,
+        max_sector_exposure_by_sector=max_sector_exposure_by_sector,
+        sector_breakdown=sector_breakdown,
+        # Phase 5c-2 correlation telemetry (Task 8)
+        max_neighbor_exposure=max_neighbor_exposure,
+        n_correlation_cap_events=n_correlation_cap_events,
         cumulative_return=metrics.cumulative_return,
         annual_return=metrics.annual_return,
         sharpe=metrics.sharpe,
@@ -456,4 +625,7 @@ def simulate_shared_pool(
         bid_history=bid_history,
         bid_policy=bid_policy,
         sizing_policy=sizing_policy,
+        sector_caps_enabled=sector_caps_enabled,
+        correlation_caps_enabled=correlation_caps_enabled,
+        risk_policy=risk_policy,
     )

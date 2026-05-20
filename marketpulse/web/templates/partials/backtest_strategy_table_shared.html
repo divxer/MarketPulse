@@ -37,8 +37,9 @@
             </td>
             <td class="num mono tnum">{{ c.n_trades }}</td>
             <td class="num mono tnum">{{ c.n_dedup_skipped }}</td>
-            <td class="num mono tnum">
-              {{ c.n_capacity_skipped + c.n_cash_short_skipped + c.n_size_too_small_skipped }}
+            <td class="num mono tnum"
+                title="cap_full: {{ c.n_capacity_skipped }} · cash_short: {{ c.n_cash_short_skipped }} · size_too_small: {{ c.n_size_too_small_skipped }} · sector_cap: {{ c.n_sector_cap_skipped }} · correlation_cap: {{ c.n_correlation_cap_skipped }}">
+              {{ c.n_capacity_skipped + c.n_cash_short_skipped + c.n_size_too_small_skipped + c.n_sector_cap_skipped + c.n_correlation_cap_skipped }}
             </td>
             <td class="num mono tnum {% if c.contribution_pnl >= 0 %}up{% else %}down{% endif %}">
               {{ "{:+.2f}".format(c.contribution_pnl) }}

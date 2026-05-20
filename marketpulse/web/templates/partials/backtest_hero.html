@@ -19,6 +19,21 @@
           固定 $1,000 每信号。<strong>sizing_policy=fixed_v0</strong>(Phase 5a 兼容模式)。
         </p>
       {% endif %}
+      {% if shared_result and (shared_result.sector_caps_enabled or shared_result.correlation_caps_enabled) %}
+        <p class="mp-hero__desc">
+          多策略集中度治理:
+          {% if shared_result.sector_caps_enabled %}单一 sector ≤ 40% 池容量{% endif %}
+          {% if shared_result.sector_caps_enabled and shared_result.correlation_caps_enabled %} · {% endif %}
+          {% if shared_result.correlation_caps_enabled %}correlation cluster (ρ≥0.6) ≤ 40%{% endif %}。
+          <strong>sector_cap_policy={{ shared_result.sector_cap_policy }}</strong> ·
+          <strong>risk_policy={{ shared_result.risk_policy }}</strong>。
+        </p>
+      {% elif shared_result %}
+        <p class="mp-hero__desc">
+          集中度约束已停用(reproducing pre-5c benchmark)。
+          <strong>risk_policy={{ shared_result.risk_policy }}</strong>。
+        </p>
+      {% endif %}
     {% else %}
       <p class="mp-hero__desc">
         回放 Phase 3 的 6 个策略 + SPY 基准在过去 N 天内的策略级合成 PnL。

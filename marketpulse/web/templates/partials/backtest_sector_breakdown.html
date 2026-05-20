@@ -1,0 +1,36 @@
+{% if shared_result and shared_result.sector_breakdown %}
+<section class="mp-card">
+  <div class="mp-card__head">
+    <span class="mp-card__title">
+      <span class="material-symbols-outlined">pie_chart</span>Sector 暴露分布
+    </span>
+    <span class="mp-card__sub">时间加权 · cap = 40%</span>
+  </div>
+  <div class="mp-card__body" style="padding:0; overflow-x:auto;">
+    <table class="mp-table mp-sector-table">
+      <thead>
+        <tr><th>Sector</th><th class="num">时均</th><th class="num">峰值</th><th>状态</th></tr>
+      </thead>
+      <tbody>
+        {% for sector, avg_frac in shared_result.sector_breakdown.items()|sort(attribute=1, reverse=True) %}
+        <tr>
+          <td>{{ sector }}</td>
+          <td class="num mono tnum">{{ "{:.1%}".format(avg_frac) }}</td>
+          <td class="num mono tnum">
+            {{ "{:.1%}".format(shared_result.max_sector_exposure_by_sector.get(sector, 0.0)) }}
+          </td>
+          <td>
+            {% set sector_peak = shared_result.max_sector_exposure_by_sector.get(sector, 0.0) %}
+            {% if sector_peak > 0.39 %}<span class="mp-chip mp-chip--down">at cap</span>
+            {% elif avg_frac > 0.35 %}<span class="mp-chip mp-chip--down">near cap</span>
+            {% elif avg_frac > 0.2 %}<span class="mp-chip">heavy</span>
+            {% else %}<span class="mp-chip mp-chip--up">light</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}

@@ -20,3 +20,4 @@ htmlcov/
 /data/
 package-lock.json
 .claude/
+data/sector_cache.json

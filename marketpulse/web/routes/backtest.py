@@ -156,6 +156,14 @@ def lab_backtest(
             "min_position": 200.0,
             "max_position": 4_000.0,
             "sizing_policy": shared_result.sizing_policy if shared_result else None,
+            # Phase 5c: explicit aliases for template clarity
+            "sector_caps_enabled": (
+                shared_result.sector_caps_enabled if shared_result else False
+            ),
+            "correlation_caps_enabled": (
+                shared_result.correlation_caps_enabled if shared_result else False
+            ),
+            "risk_policy": shared_result.risk_policy if shared_result else None,
         },
     )
 
