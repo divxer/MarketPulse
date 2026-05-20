@@ -29,7 +29,17 @@ Default constants (locked in § 7):
 
 `σ_i` = rolling 60d std of strategy `i`'s daily-return diffs on its Phase 4 isolated equity curve. Same lookback + n<5 None-gate as Phase 5a's `rolling_sharpe`. Cold-start fallback: when σ is None or zero, `vol_scale = 1.0` — sizing reduces to pure conviction multiplier. This mirrors Phase 5a's equal-weight bootstrap philosophy.
 
-`bid_weight_i` comes directly from Phase 5a's `compute_bid_weights`. `mean_bid_weight = mean(bid_weights.values())`. Both are guaranteed positive (Phase 5a floors at 0.1), so no divide-by-zero.
+`bid_weight_i` comes directly from Phase 5a's `compute_bid_weights`. `mean_bid_weight = mean(bid_weights.values())` — note this averages over **today's firing strategies only**, NOT all 6 strategies pool-wide (consistent with Phase 5a's per-day weight computation). Both σ and bid_weight are guaranteed positive (Phase 5a floors at 0.1), so no divide-by-zero.
+
+**Joint-bootstrap behavior — important precision.** Two cold-start fallbacks compose multiplicatively:
+
+| State | σ status | bid_weight status | vol_scale | conv_scale | Effective size |
+|---|---|---|---|---|---|
+| Day 0-60 (early) | All None | All 1.0 (equal-weight) | All 1.0 | All 1.0 | **= base ($1000)** for every strategy |
+| Day 60+ (some validated) | Some have σ, others None | Mixed real + avg-fill | Real or 1.0 | Real or avg-fill | Hybrid |
+| Steady state | All have σ | All real | Real | Real | Full Hybrid math |
+
+The first row is the most important: **during true cold-start (days 0-60), every position size = $1000 = base**. Sizing collapses to "everything uniform" — not "pure vol-targeting" nor "pure conviction-driven", but the **product of both bootstraps**. Position size only starts to differentiate once *either* σ *or* bid_weight has real signal. This is intentional: when statistical estimates are unreliable on both axes, the model defaults to uniform allocation rather than amplifying noise.
 
 ### What this means in practice
 
@@ -108,30 +118,40 @@ def compute_position_sizes(
     max_position: float = 4_000.0,
     lookback_days: int = 60,
     min_events: int = 5,
-) -> dict[str, float | None]:
+) -> tuple[dict[str, float | None], dict[str, float]]:
     """Compute per-strategy position size (Hybrid: vol-target × conviction).
 
+    Returns (sizes, raw_sizes_below_min):
+      - sizes: dict[strategy, float | None]. None means raw was below
+        min_position → caller skips with outcome=size_too_small.
+      - raw_sizes_below_min: dict[strategy, float] capturing the RAW
+        pre-clamp computed size for each None-returning strategy. Used by
+        caller to log diagnostic position_size on size_too_small BidRecords
+        (so the bid history shows "model wanted $42" not just "blocked").
+
     Algorithm (spec § 2):
-      1. mean_w = mean(bid_weights.values()) — never zero (Phase 5a floors at 0.1)
+      1. mean_w = mean(bid_weights.values()) over TODAY'S FIRING STRATEGIES
+         only (not pool-wide all-6 strategies). Never zero (Phase 5a floors
+         all bid_weights at 0.1).
       2. For each s in strategies_today:
          σ = rolling_sigma(daily_curves[s], as_of=as_of, lookback_days=...)
          vol_scale = target_vol / σ if (σ is not None and σ > 0) else 1.0
          conv_scale = bid_weights[s] / mean_w
          raw = base * vol_scale * conv_scale
          if raw < min_position:
-             result[s] = None  # caller filters → outcome=size_too_small
+             sizes[s] = None
+             raw_sizes_below_min[s] = raw  # preserve for diagnostic log
          else:
-             result[s] = min(raw, max_position)  # clamp at top, never at bottom
-      3. Return dict
+             sizes[s] = min(raw, max_position)  # clamp at top, never at bottom
+      3. Return (sizes, raw_sizes_below_min)
 
     Contract:
       - Every entry of strategies_today MUST appear in bid_weights AND
         daily_curves. Raises KeyError on missing.
-      - Returns None for any strategy whose RAW size (pre-clamp) falls
-        below min_position. Caller treats None as "skip all of this
-        strategy's bids today with outcome=size_too_small".
       - max_position is a CEILING clamp (raw > max → max). min_position
         is a FLOOR DECISION (raw < min → None), not a clamp.
+      - raw_sizes_below_min only contains strategies where sizes[s] is None.
+        Strategies whose raw exceeds min do NOT appear in raw_sizes_below_min.
     """
 ```
 
@@ -152,19 +172,23 @@ for d in trading_calendar:
 
     # ─── SIZE COMPUTE ─── (NEW Phase 5b step)
     if sizing_enabled:
-        position_sizes = compute_position_sizes(
+        # compute_position_sizes returns BOTH the final-size dict AND the raw
+        # pre-clamp size for size_too_small strategies (for diagnostic logging)
+        position_sizes, raw_sizes_below_min = compute_position_sizes(
             strategies_today, daily_curves, weights,
             as_of=d, base=base_position_size, target_vol=target_vol,
             min_position=min_position, max_position=max_position,
             lookback_days=lookback_days,
         )
-        # Strategies returning None → skip all their bids today
+        # Strategies returning None → skip all their bids today, but log the
+        # raw computed size so diagnostics show WHY the bid was below floor.
         strategies_skipped_by_size = {s for s, sz in position_sizes.items() if sz is None}
         for b in [b for b in todays_bids if b.strategy in strategies_skipped_by_size]:
             all_bid_records.append(BidRecord(
                 date=d, strategy=b.strategy, ticker=b.ticker,
                 weight=weights[b.strategy], outcome="size_too_small",
-                winner=None, position_size=0.0,
+                winner=None,
+                position_size=raw_sizes_below_min[b.strategy],  # e.g., $42
             ))
             n_size_too_small_by_strategy[b.strategy] = ... + 1
             n_bids_by_strategy[b.strategy] = ... + 1
@@ -172,21 +196,40 @@ for d in trading_calendar:
     else:
         # Phase 5a behavior — every active strategy gets base_position_size
         position_sizes = {s: base_position_size for s in strategies_today}
+        raw_sizes_below_min = {}
 
     # DEDUP — unchanged (3-key tiebreaker)
     ...
 
     # ALLOCATE — uses position_sizes[b.strategy] instead of fixed position_size
+    # IMPORTANT — semantic change from Phase 5a:
+    #   In Phase 5a, every bid consumed $1k uniformly. ALLOC was greedy by
+    #   weight; cap exhaustion was bid-count-proportional.
+    #   In Phase 5b, bid consumption is STRATEGY-dependent. A strategy with
+    #   size=$3k blocks 3x more cap-budget than a $1k strategy per bid.
+    #   Sort key (-weight, event_time, strategy) is unchanged, but the
+    #   downstream cap-fill dynamics shift: high-conviction strategies
+    #   can crowd out more bids than they did in Phase 5a.
+    #   Example: momentum_breakout with 3 bids @ $3k each consumes $9k of
+    #   the $10k pool, leaving only $1k cap for the rest of the day's bids.
+    #   In Phase 5a same scenario consumed only $3k.
     for b in sorted_winners:
         size_for_this_bid = position_sizes[b.strategy]
         if capital_in_use + size_for_this_bid > max_capital_in_use:
-            outcome = "cap_full"  # logged with actual requested size
+            # cap_full: log the REQUESTED size (the model wanted this much
+            # but cap was full), not 0.0 or the base.
+            all_bid_records.append(BidRecord(
+                ..., outcome="cap_full", position_size=size_for_this_bid,
+            ))
             ...
         elif cash < size_for_this_bid:
-            outcome = "cash_short"
+            # cash_short: same — log requested size, not 0.0
+            all_bid_records.append(BidRecord(
+                ..., outcome="cash_short", position_size=size_for_this_bid,
+            ))
             ...
         else:
-            # open position at size_for_this_bid
+            # open position at size_for_this_bid; BidRecord logs same value
             ...
 
     # MTM, RECORD — unchanged
@@ -227,7 +270,16 @@ class BidRecord:
         "size_too_small",  # NEW in Phase 5b
     ]
     winner: str | None
-    position_size: float  # NEW — actual $ requested. 0.0 for size_too_small (no real size)
+    position_size: float  # NEW — model's REQUESTED size in dollars. Preserves
+                          # diagnostic value across all outcomes:
+                          #   won:           actual opened size (post-clamp)
+                          #   dedup_loser:   what this strategy would have opened
+                          #   cap_full:      what was requested but cap-blocked
+                          #   cash_short:    what was requested but cash-blocked
+                          #   size_too_small: raw computed size BEFORE the < min check
+                          #                   (e.g., $42 — the value tells the user
+                          #                   why the bid was below the floor)
+                          # Never 0.0 except for accidentally-misconstructed records.
 ```
 
 **Migration:** `position_size` is required (no default). Existing Phase 5a tests that constructed `BidRecord` directly need a `position_size=1000.0` kwarg added. This is intentional — making the field optional would let Phase 5b code silently report 0.0 for forgotten sets.
@@ -448,7 +500,7 @@ test_rolling_sigma_matches_numpy_std_within_tolerance
 test_rolling_sigma_pairs_with_rolling_sharpe_consistent_window
 ```
 
-### `compute_position_sizes` (10 tests)
+### `compute_position_sizes` (12 tests)
 
 ```
 test_size_high_conviction_low_vol_yields_max
@@ -461,9 +513,11 @@ test_size_zero_sigma_uses_target_vol_fallback
 test_size_negative_bid_weight_via_floor_still_normalizes
 test_size_all_strategies_below_min_returns_all_none
 test_compute_position_sizes_raises_on_missing_bid_weight
+test_compute_position_sizes_returns_raw_sizes_below_min_dict      # Review fix #2
+test_compute_position_sizes_raw_only_for_none_strategies          # Review fix #2
 ```
 
-### Simulator integration (8 tests)
+### Simulator integration (10 tests)
 
 ```
 test_shared_pool_sizing_skips_below_min_with_outcome
@@ -474,6 +528,8 @@ test_shared_pool_sizing_high_conviction_gets_bigger_position
 test_shared_pool_sizing_provenance_field_set
 test_shared_pool_avg_position_size_in_contribution
 test_shared_pool_n_size_too_small_in_contribution
+test_shared_pool_high_size_strategy_blocks_more_small_bids        # Review fix #3
+test_shared_pool_joint_bootstrap_yields_uniform_base_sizes        # Review fix #1
 ```
 
 ### Orchestrator + UI (5 tests)
@@ -534,6 +590,8 @@ test_lab_backtest_shared_mode_renders_size_sparkline
 | **Floor vs ceiling asymmetry confuses users** | Hero copy says "floor \$200 / ceiling \$4,000" without explaining the asymmetry — the asymmetry is intentional but invisible UX. Future doc page can elaborate. |
 | **Performance: extra `rolling_sigma` call per strategy per day** | Cheap — same data already in memory from `rolling_sharpe`; could share an inner helper if profiling shows it matters. v0 doesn't optimize. |
 | **Phase 5a tests need updating** | ~5 tests construct `BidRecord` directly without `position_size`. Implementation plan handles in the same task that adds the field. No silent regressions. |
+| **Cold-start tighter than Phase 5a (review fix #1 finding)** | When σ=None AND bid_weight=0.1 (floor), raw size = $1000 × 1.0 × (0.1/1.2) = $83 → skipped via size_too_small. Phase 5a let these bids open at $1k. Phase 5b's cold-start period will see fewer trades overall — quieter warm-up. Test `test_shared_pool_joint_bootstrap_yields_uniform_base_sizes` locks the uniform-base case. |
+| **ALLOC dynamics change unfaithful to Phase 5a (review fix #3 finding)** | Bids of high-conviction strategies consume more pool per bid → crowd out more downstream bids than in Phase 5a. Test `test_shared_pool_high_size_strategy_blocks_more_small_bids` locks the new behavior. Documented in § 2 ALLOCATE pseudocode as a "semantic change from Phase 5a." Acceptable — it's what dynamic sizing means. |
 
 ---
 
@@ -568,3 +626,10 @@ Every clause in § 1 (Identity) maps to a section:
 ---
 
 **Spec author:** Claude (brainstorming session 2026-05-20, ~25 min, 4 user-locked decisions + 4 derived locks)
+
+**Review iteration 1 (2026-05-20):** /review identified 3 Important + 7 Minor items. The 3 Important applied in this commit:
+- **#1 Joint-bootstrap clarity** — § 1 now includes a 3-row table showing the (σ status × bid_weight status) → effective behavior matrix. Cold-start = uniform $1000 base everywhere, NOT pure-vol-targeting or pure-conviction.
+- **#2 BidRecord diagnostic value** — `position_size` field semantics now preserve the model's REQUESTED size across all outcomes (won/dedup_loser/cap_full/cash_short/size_too_small). For size_too_small the value is the raw pre-clamp size (e.g. $42), enabling diagnostic "model wanted $X but floor was $Y". `compute_position_sizes` return signature changed to tuple `(sizes, raw_sizes_below_min)` to plumb the raw values.
+- **#3 ALLOC dynamics change documented** — § 2 ALLOCATE pseudocode now flags the semantic shift from Phase 5a (uniform $1k consumption) to Phase 5b (variable, conviction-proportional). Test `test_shared_pool_high_size_strategy_blocks_more_small_bids` locks the new behavior. § 8 Risks adds the cold-start-tighter caveat.
+
+Test count: 31 → 35 (+4 review-fix tests, +2 fix #2 contract tests). Spec line count: 570 → ~620. 8 locked decisions unchanged.
