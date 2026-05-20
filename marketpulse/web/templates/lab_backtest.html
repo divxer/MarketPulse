@@ -33,6 +33,7 @@
     {% include "partials/backtest_filter_card.html" ignore missing %}
     {% if mode == 'shared-pool' %}
       {% include "partials/backtest_strategy_table_shared.html" ignore missing %}
+      {% include "partials/backtest_sector_breakdown.html" ignore missing %}
     {% else %}
       {% include "partials/backtest_strategy_table.html" ignore missing %}
     {% endif %}
