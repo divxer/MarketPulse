@@ -49,7 +49,7 @@ Phase 5d introduces a soft **contribution-adjusted** bid weight: the same `rolli
 - **DEDUP 3-key tiebreak**: still `(-weight, event_time, strategy_name)`. When enabled, `weight` is `adjusted_bid_weight`; when disabled, `weight` is `raw_bid_weight`. The tuple structure is unchanged — only the first key's source value swaps
 - **`rewarded_for_negative_corr` precondition**: `pool_corr is not None AND pool_corr < 0 AND multiplier > 1.0`. The combination is non-trivial because clip[0.5, 1.2] caps the reward even when ρ is strongly negative
 - **`would_change_rank` per-bid**: True iff the strategy's rank in `sorted(strategies_today, key=-weights_raw[s])` differs from its rank in `sorted(strategies_today, key=-weights_adjusted[s])`. Computed in the WEIGHT step, populated on every BidRecord that strategy emits today. Same value across the strategy's bids on that day (a strategy's rank is a per-day per-strategy property, not per-bid)
-- **Observation-only telemetry is always recorded** regardless of `contribution_enabled`. The toggle only swaps `weights = weights_raw` vs `weights = weights_adjusted` for DEDUP/ALLOC. BidRecord `raw_bid_weight`, `pool_corr`, `contribution_multiplier`, `adjusted_bid_weight`, `effective_corr_window`, `rewarded_for_negative_corr` are populated either way. `would_change_rank` is only populated when enabled (the rank delta concept doesn't apply when only one weight is in use)
+- **Observation-only telemetry is always recorded** regardless of `contribution_enabled`. The toggle only swaps `weights = weights_raw` vs `weights = weights_adjusted` for DEDUP/ALLOC. **All 8 BidRecord 5d fields including `would_change_rank` are populated either way** — both rankings are always computable (we always run `pool_corr_excluding_self` and `compute_adjusted_bid_weight` for every strategy in WEIGHT). `would_change_rank=True` when disabled means "if you flipped contribution_enabled to True, this bid's rank in DEDUP/ALLOC would change". This is the killer observation-mode KPI — the user audits `would_change_rank` and `n_would_change_rank` before deciding to enable
 
 ### Out of scope (explicit deferrals)
 
@@ -275,10 +275,10 @@ class PortfolioBacktestResult:
 
 - **`weight`**: still the DEDUP/ALLOC driver. Equals `adjusted_bid_weight` when enabled, `raw_bid_weight` when disabled
 - **`raw_bid_weight`**: ALWAYS populated. Makes A/B analysis trivial — read both columns
-- **`adjusted_bid_weight`**: populated even when disabled, equal to `raw_bid_weight × 1.0` (still useful as the explicit name)
+- **`adjusted_bid_weight`**: `float | None`. Only `None` when `raw_bid_weight is None` (Phase 5a n<5 floor — there is nothing to adjust). When `raw_sharpe ≤ 0` or `pool_corr is None`, the multiplier short-circuits to `1.0` and `adjusted_bid_weight = raw_bid_weight` (a real float, NOT None). When disabled, `adjusted_bid_weight == raw_bid_weight × 1.0` (still a real float when raw is real)
 - **`pool_corr`**: `None` when cold-start (overlap < `min_overlap=30`) OR when either return series has zero variance
 - **`contribution_multiplier`**: `1.0` when cold-start, when `pool_corr is None`, or when `contribution_enabled=False`. Strictly within `[clip_min, clip_max] = [0.5, 1.2]` otherwise
-- **`effective_corr_window`**: actual days of overlap used. Zero when below `min_overlap`. Capped at `lookback_days=60`. Telemetry-only — does not affect math
+- **`effective_corr_window`**: actual days of overlap used. **Always returns the actual count**, even when below `min_overlap` (e.g., 12 means "we had 12 overlapping days but didn't compute corr because < 30"). Capped at `lookback_days=60`. Telemetry-only — does not affect math. Zero only when there is literally no overlap (strategy never traded in the window)
 - **`pool_corr_excludes_self`**: `True` in v0. The field exists as a forward-compat flag for hypothetical future variants where the denominator changes (e.g., a full-pool option for A/B)
 - **`rewarded_for_negative_corr`**: derived field, but persisted for tooltip rendering and audit. Computed at WEIGHT step, copied to every BidRecord that strategy emits today
 - **`would_change_rank`**: per-strategy per-day flag (same value across all of that strategy's bids that day). Computed at WEIGHT step. `False` when `contribution_enabled=False`
@@ -295,7 +295,7 @@ class PortfolioBacktestResult:
 
 ## 5. Daily Loop Integration
 
-The Phase 5b daily loop ORDER LOCK remains: `CLOSE → BID → WEIGHT → SIZE → DEDUP → ALLOC → MTM → RECORD`. Phase 5d injects per-day strategy contribution decomposition between CLOSE and BID, and replaces the WEIGHT-step body. DEDUP, SIZE (5b), ALLOC, sector + correlation cap checks (5c), MTM, RECORD are untouched.
+The Phase 5b daily loop ORDER LOCK remains: `CLOSE → BID → WEIGHT → SIZE → DEDUP → ALLOC → MTM → RECORD`. Phase 5d injects per-day strategy contribution decomposition between CLOSE and BID, and replaces the WEIGHT-step body. SIZE (5b), DEDUP, ALLOC, sector + correlation cap checks (5c), MTM, RECORD are untouched.
 
 ### Top-of-function additions
 
@@ -306,28 +306,37 @@ daily_pool_returns: list[tuple[date, float]] = []
 pool_corr_by_strategy: dict[str, list[float | None]] = {}
 # n_would_change_rank counted from all_bid_records at finalization (see § 5 Finalization)
 
-# Provenance
+# NEW Phase 5d per-day accumulators populated during CLOSE + RECORD
+# (Phase 5b's trade_realized_pnl_by_strategy is run-wide-flat; Phase 5d
+# needs per-day per-strategy buckets to drive the LOO subtraction.)
+realized_pnl_today_by_strategy: dict[str, float] = {}   # reset each day in CLOSE
+mtm_prev_by_strategy: dict[str, float] = {}             # snapshot before RECORD's MTM loop
+
+# Provenance — preserves lookback_days in the string (Phase 5a pattern)
 bid_policy = (
-    "contribution_adjusted_sharpe_60d_v0" if contribution_enabled
-    else "rolling_sharpe_60d_v0"
+    f"contribution_adjusted_sharpe_{lookback_days}d_v0" if contribution_enabled
+    else f"rolling_sharpe_{lookback_days}d_v0"
 )
-contribution_policy = "contribution_adjusted_sharpe_60d_v0"
+contribution_policy = f"contribution_adjusted_sharpe_{lookback_days}d_v0"
 ```
 
 ### Per-day CLOSE → contribution decomposition
 
-After CLOSE (positions whose horizon hit today are closed and realized PnL booked), aggregate today's per-strategy PnL into contribution returns:
+**Required new accumulator plumbing** (Phase 5b's `trade_realized_pnl_by_strategy` is run-wide-flat; Phase 5d adds the per-day per-strategy buckets the LOO math consumes):
+
+1. **In the CLOSE step**, initialize `realized_pnl_today_by_strategy: dict[str, float] = {}` at day start. As each position closes (horizon hit), credit its realized PnL (`size × (horizon_price − entry_price) / entry_price`) to its strategy's bucket. Existing CLOSE-step code attributes the same value to `trade_realized_pnl_by_strategy`; the new dict is a parallel per-day accumulator
+2. **Just before the RECORD step's per-position MTM loop**, snapshot the current per-strategy unrealized MTM: `mtm_prev_by_strategy = {s: sum(p.position_size * (p.entry_price + ... fraction × ...) ... for p in open_positions if p.strategy == s) for s in all_known_strategies}`. After the MTM loop runs (positions' marks update), recompute `mtm_today_by_strategy` and derive `mtm_delta_today = mtm_today − mtm_prev`
+3. After CLOSE + ALLOC + MTM, aggregate today's per-strategy PnL into contribution returns:
 
 ```python
 pool_equity_prev = equity_curve[-1][1] if equity_curve else initial_capital
 
 for s in all_known_strategies:
-    realized_today_s = sum(
-        ret * size for ret, size in trade_realized_pnl_today_by_strategy.get(s, [])
+    pnl_today_s = (
+        realized_pnl_today_by_strategy.get(s, 0.0)        # from CLOSE step
+        + (mtm_today_by_strategy.get(s, 0.0)
+           - mtm_prev_by_strategy.get(s, 0.0))             # MTM delta from RECORD step
     )
-    unrealized_today_s = unrealized_mtm_delta_today_by_strategy.get(s, 0.0)
-    pnl_today_s = realized_today_s + unrealized_today_s
-
     contrib_ret = (
         pnl_today_s / pool_equity_prev if pool_equity_prev > 0.0 else 0.0
     )
@@ -341,7 +350,7 @@ pool_ret_today = sum(
 daily_pool_returns.append((d, pool_ret_today))
 ```
 
-The two intermediate dicts `trade_realized_pnl_today_by_strategy` and `unrealized_mtm_delta_today_by_strategy` are Phase 5b accumulators; the day-level slicing here is the only addition.
+The Σ contribution_pnl == pool_pnl invariant (Phase 5b T6 lock) is preserved by construction: each position's realized PnL is attributed exactly once (in CLOSE) and each open position's MTM delta is attributed exactly once (in RECORD). The day-level decomposition sums to the actual pool return.
 
 ### WEIGHT step replacement
 
@@ -350,7 +359,9 @@ weights_raw, floor_hits = compute_bid_weights(
     daily_curves, as_of=d, lookback_days=lookback_days,
 )
 
-bid_weight_metadata: dict[str, BidWeightMetadata] = {}  # NamedTuple defined in contribution.py
+bid_weight_metadata: dict[str, BidWeightMetadata] = {}  # @dataclass(frozen=True) in contribution.py
+# Use dataclasses.replace(meta, would_change_rank=True) to flip the per-day flag
+# (matches surrounding @dataclass(frozen=True) BidRecord/StrategyContribution convention)
 
 for s in strategies_today:
     raw = weights_raw[s]
@@ -377,29 +388,33 @@ for s in strategies_today:
     )
     pool_corr_by_strategy.setdefault(s, []).append(pool_corr)
 
-# Choose driver and compute rank-delta only when enabled
+# Always compute both rankings so would_change_rank is meaningful telemetry
+# regardless of whether contribution_enabled is True. This is the
+# killer observation-mode KPI: "how often would Phase 5d have changed
+# this bid's rank if enabled?"
+sorted_raw = sorted(
+    strategies_today,
+    key=lambda s: (-(weights_raw[s] or 0.0), s),
+)
+sorted_adj = sorted(
+    strategies_today,
+    key=lambda s: (-(bid_weight_metadata[s].adjusted or 0.0), s),
+)
+rank_raw = {s: i for i, s in enumerate(sorted_raw)}
+rank_adj = {s: i for i, s in enumerate(sorted_adj)}
+
+for s in strategies_today:
+    if rank_raw[s] != rank_adj[s]:
+        # Flip the per-day flag on the metadata. n_would_change_rank
+        # is counted at finalization by scanning all_bid_records,
+        # which gives a per-BID count (matches § 4 field semantics).
+        bid_weight_metadata[s] = dataclasses.replace(
+            bid_weight_metadata[s], would_change_rank=True,
+        )
+
+# The toggle only chooses WHICH weight drives DEDUP/ALLOC.
 if contribution_enabled:
     weights = {s: bid_weight_metadata[s].adjusted for s in strategies_today}
-
-    sorted_raw = sorted(
-        strategies_today,
-        key=lambda s: (-(weights_raw[s] or 0.0), s),
-    )
-    sorted_adj = sorted(
-        strategies_today,
-        key=lambda s: (-(weights[s] or 0.0), s),
-    )
-    rank_raw = {s: i for i, s in enumerate(sorted_raw)}
-    rank_adj = {s: i for i, s in enumerate(sorted_adj)}
-
-    for s in strategies_today:
-        if rank_raw[s] != rank_adj[s]:
-            # Flip the per-day flag on the metadata. n_would_change_rank
-            # is counted at finalization by scanning all_bid_records,
-            # which gives a per-BID count (matches § 4 field semantics).
-            bid_weight_metadata[s] = bid_weight_metadata[s]._replace(
-                would_change_rank=True,
-            )
 else:
     weights = weights_raw
 ```
@@ -545,6 +560,9 @@ Phase 5d touches three existing partials; no `backtest_*.html` is created. CSS r
 | **`avg_pool_corr` denominator zero when all ρ are None** | Returns `None`. UI displays `—`. Tested |
 | **Observation-period analysis says "enable" but enabling regresses live performance** | Inherent to observation→enforcement transitions. Mitigation: A/B by running two backtests with `contribution_enabled=True/False` and comparing aggregate KPIs. Lab UI does NOT include a built-in A/B card; users do this comparison externally |
 | **Self-bias if `pool_corr` included A** | Avoided by design (leave-one-out). The `pool_corr_excludes_self=True` flag is persisted as a forward-compat marker — if future versions add a "full pool" variant, the flag distinguishes data sources |
+| **Historical self-bias** (LOO ≠ counterfactual A-less pool) | LOO subtraction `pool_minus_A_return[d] = pool_total[d] − A_contribution[d]` is exact for the **day-level decomposition** but NOT identical to "what the pool would have realized without A". Without A competing for capacity, ALLOC outcomes for B/C/D on day d would differ. The ρ measured by Phase 5d is therefore "co-movement of A's daily contribution with the rest of the pool's actual realized contribution", NOT "ρ vs counterfactual A-less pool". This is signal degradation, not a correctness bug — the metric is still useful and interpretable, just not the strict marginal-contribution measure. Documented in Appendix A |
+| **Pool equity negative (future leverage)** | Phase 4 forbids negative pool equity (long-only $10k pool). If future leverage allows it, `pool_equity_prev_day < 0` → `contrib_ret` sign flips. The current guard returns 0.0 only when `pool_equity_prev_day == 0`. Forward-compat: when leverage lands, decide whether ρ semantics still apply with negative equity (probably renormalize to abs(equity)) |
+| **`contribution.py` module-level state** | None. All three functions are pure. No process-level cache like Phase 5c's `_SECTOR_CACHE`. No `_reset_caches_for_testing` helper needed. Verified in module isolation tests |
 
 ### Migration & Reproducibility
 
@@ -582,12 +600,21 @@ The `contribution_policy` provenance string is always populated; `contribution_e
 
 ### Backward-compat audit (Phase 5c Group B pattern)
 
-Default `contribution_enabled=False` means existing Phase 5a/5b/5c tests should pass without modification. The only risk is fixtures or assertions that:
+Default `contribution_enabled=False` + f-string `bid_policy` preserves the Phase 5a string format. Existing tests in our own codebase that hardcode the policy string must continue to pass:
 
-- Hard-code `BidRecord(..., weight=X)` and assert downstream `b.weight == X` — these still work because `weight` is set from the metadata at construction time and equals `raw_bid_weight` when disabled
+- `tests/unit/test_backtest_types_phase5a.py:198` — asserts `bid_policy == "rolling_sharpe_60d_v0"` on a default-constructed `PortfolioBacktestResult`. **Passes**: dataclass default `bid_policy = "rolling_sharpe_60d_v0"` is literal-assigned (not computed), and Phase 5d does not change the dataclass default
+- `tests/unit/test_backtest_portfolio_simulator.py:373` — asserts `r90.bid_policy == "rolling_sharpe_90d_v0"` when `lookback_days=90`. **Passes**: the f-string at simulator runtime substitutes the actual `lookback_days` parameter; Phase 5d preserves this f-string for both branches (`f"rolling_sharpe_{lookback_days}d_v0"` and `f"contribution_adjusted_sharpe_{lookback_days}d_v0"`)
+
+Other risks:
+- Hard-coded `BidRecord(..., weight=X)` followed by `assert b.weight == X` — these still work; `weight` is set from the metadata at construction time and equals `raw_bid_weight` when disabled
 - Pre-built `BidRecord` fixtures in tests that don't pass the new fields — all 8 new fields default, so kwargs are optional
+- Pre-built `PortfolioBacktestResult` / `StrategyContribution` fixtures — all 5 new fields (3 + 2) default, so kwargs are optional
 
-The plan enumerates concrete test files that may need migration after the type extension lands.
+The plan adds one regression test verifying both hardcoded `bid_policy` assertions pass with the Phase 5d f-string substitution.
+
+### Toggling `contribution_enabled` mid-test
+
+`contribution.py` exposes three pure functions with no module-level state. `simulate_shared_pool` is functional (takes all knobs as kwargs, returns a result). Two sequential calls with different `contribution_enabled` values produce independent results with no leak. No fixture cleanup required.
 
 ---
 
@@ -610,6 +637,9 @@ Each scenario must land as at least one test in the plan. Pattern requirement: a
 11. `test_compute_adjusted_bid_weight_extreme_clip_max` — `raw=1.0, ρ=−1.0, λ=1.0` → `multiplier=1.2` (capped, NOT 2.0)
 12. `test_compute_adjusted_bid_weight_negative_sharpe_unchanged` — `raw=−0.5, ρ=0.5` → `(−0.5, 1.0, False)` (no adjustment to losers)
 13. `test_compute_adjusted_bid_weight_none_sharpe_unchanged` — `raw=None, ρ=0.5` → `(None, 1.0, False)`
+14. `test_compute_adjusted_bid_weight_zero_sharpe_boundary` — `raw=0.0, ρ=−0.5` → `(0.0, 1.0, False)`. Zero is not "positive"; treat same as negative — no adjustment
+15. `test_pool_corr_excluding_self_empty_intersection` — `as_of` before any strategy contribution exists → `(None, 0)`. Pure cold-start with zero overlap
+16. `test_pool_corr_excluding_self_returns_actual_count_below_threshold` — 15 overlap days, `min_overlap=30` → `(None, 15)` not `(None, 0)`. The actual count is informative telemetry
 
 ### `tests/unit/test_backtest_portfolio_simulator.py` (~8 new tests)
 
@@ -619,8 +649,12 @@ Each scenario must land as at least one test in the plan. Pattern requirement: a
 4. `test_phase5d_subtraction_matches_independent_recomputation` — synthetic 4-strategy pool. Compute `pool_corr_excluding_self` for one strategy via subtraction. Independently rebuild a 3-strategy pool excluding that strategy, recompute ρ on the rebuilt pool returns. Assert both ρ values within 1e-9
 5. `test_phase5d_cold_start_neutral_multiplier` — pool runs for only 10 days. All BidRecords have `multiplier=1.0`, `pool_corr=None`, `effective_corr_window<=10`
 6. `test_phase5d_avg_pool_corr_in_contribution` — strategy with mixed bids (some cold-start, some warm). `avg_pool_corr` is the mean of non-None values
-7. `test_phase5d_would_change_rank_count_in_contribution` — known scenario where strategy A's rank changes on 3 of its 5 bid days. Assert `n_would_change_rank == 3`
+7. `test_phase5d_would_change_rank_count_per_bid` — strategy A has 5 bid-days, on 3 of them rank flips. Each day produces exactly 1 BidRecord. Assert `n_would_change_rank == 3`. If a day produces 2 BidRecords (multiple tickers), both carry the same flag and both count, so `n_would_change_rank == 6` in that variant. Test the per-bid counting explicitly with one variant of each
 8. `test_phase5d_pool_pnl_invariant_preserved` — synthetic 3-strategy pool. Assert `sum(StrategyContribution.contribution_pnl) == pool_final_equity − initial_capital` within 0.01
+9. `test_phase5d_metadata_copied_to_sector_cap_full_bidrecord` — verify a `sector_cap_full` outcome BidRecord (Phase 5c site) carries all 8 Phase 5d fields populated. Easy to miss in mechanical copy
+10. `test_phase5d_metadata_copied_to_correlation_cap_full_bidrecord` — same for `correlation_cap_full` site
+11. `test_phase5d_would_change_rank_populated_when_disabled` — `contribution_enabled=False` but pool has run long enough for ρ to be defined. Assert at least one BidRecord has `would_change_rank=True` when raw and adjusted rankings differ. This is the killer observation-mode test
+12. `test_phase5d_lookback_days_threaded_to_bid_policy` — run with `lookback_days=90, contribution_enabled=True`. Assert `result.bid_policy == "contribution_adjusted_sharpe_90d_v0"`. Mirror of the existing Phase 5a `r90` test
 
 ### `tests/integration/test_backtest_shared_pool.py` (+3)
 
@@ -641,7 +675,7 @@ Each scenario must land as at least one test in the plan. Pattern requirement: a
 - **Raw bid weight** — `rolling_sharpe_60d` value, unchanged from Phase 5a. Always populated in BidRecord
 - **Adjusted bid weight** — `raw_bid_weight × multiplier`. When `contribution_enabled=True`, this is the value `weights[s]` takes
 - **Multiplier** — `clip(1 − λ × ρ, 0.5, 1.2)`. Strictly within `[0.5, 1.2]` when ρ is defined; `1.0` otherwise (cold-start, zero variance, raw_sharpe None, etc.)
-- **Leave-one-out (LOO)** — when computing strategy A's correlation with the pool, exclude A's own contribution from the pool denominator. Implementation in v0: `pool_minus_A_return[d] = pool_total_return[d] − A_contribution_return[d]`
+- **Leave-one-out (LOO)** — when computing strategy A's correlation with the pool, exclude A's own contribution from the pool denominator. Implementation in v0: `pool_minus_A_return[d] = pool_total_return[d] − A_contribution_return[d]`. **Important distinction**: this is NOT identical to "what the pool would have returned if A had never traded" (a counterfactual A-less pool). Without A's competition for capacity, ALLOC outcomes for other strategies on day d would have differed (B might have won the slot A took, with a different position size). The LOO subtraction gives an exact decomposition of the realized pool, not a counterfactual reconstruction. The ρ value therefore measures "co-movement of A's daily contribution with the other strategies' realized contribution given that A was competing", which is a useful and interpretable signal but not the strict marginal-contribution measure. For Phase 7+ true marginal Sharpe, one would need O(N) extra sims
 - **Contribution return** — `strategy_pnl_today / pool_equity_prev_day`. Per-day pool decomposition. Sums to `pool_return` by construction
 - **Cold-start** — overlap of pool history with strategy contribution history is less than `min_overlap=30` days. Triggers `pool_corr=None, multiplier=1.0`
 - **Observation-only** — `contribution_enabled=False`. All Phase 5d telemetry is computed and persisted to BidRecord and StrategyContribution; only the `weights[s]` driver is unchanged from raw. Lets the user audit `would_change_rank` and `avg_pool_corr` before flipping the switch
