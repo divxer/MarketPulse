@@ -16,6 +16,7 @@
           <th class="num">PnL ($)</th>
           <th class="num">avg exposure</th>
           <th class="num">avg bid w</th>
+          <th class="num">avg size</th>
         </tr>
       </thead>
       <tbody>
@@ -37,13 +38,22 @@
             <td class="num mono tnum">{{ c.n_trades }}</td>
             <td class="num mono tnum">{{ c.n_dedup_skipped }}</td>
             <td class="num mono tnum">
-              {{ c.n_capacity_skipped + c.n_cash_short_skipped }}
+              {{ c.n_capacity_skipped + c.n_cash_short_skipped + c.n_size_too_small_skipped }}
             </td>
             <td class="num mono tnum {% if c.contribution_pnl >= 0 %}up{% else %}down{% endif %}">
               {{ "{:+.2f}".format(c.contribution_pnl) }}
             </td>
             <td class="num mono tnum">{{ "{:.1%}".format(c.avg_exposure) }}</td>
             <td class="num mono tnum">{{ "{:.2f}".format(c.avg_bid_weight) }}</td>
+            <td class="num mono tnum">
+              {% if c.n_trades == 0 and c.n_size_too_small_skipped > 0 %}
+                <span class="mp-chip mp-chip--down" title="所有 bids 均 < min_position">sub-min</span>
+              {% elif c.n_trades == 0 %}
+                —
+              {% else %}
+                ${{ "{:,.0f}".format(c.avg_position_size) }}
+              {% endif %}
+            </td>
           </tr>
           {% endfor %}
         {% endif %}
