@@ -246,3 +246,47 @@ def test_downsample_single_point_returns_unchanged():
     from marketpulse.backtest.simulator import downsample_equity_curve
     curve = [(_date(2026, 5, 1), 10_000.0)]
     assert downsample_equity_curve(curve, target_points=120) == curve
+
+
+def test_simulate_strategy_with_artifacts_returns_full_curve():
+    """Phase 5a: artifacts variant returns both DTO + un-downsampled curve."""
+    from marketpulse.backtest.simulator import simulate_strategy_with_artifacts
+    from marketpulse.backtest.types import StrategyBacktestArtifacts
+    pairs = [_pair("AAA", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0)]
+    result, artifacts = simulate_strategy_with_artifacts(
+        pairs=pairs,
+        strategy="momentum_breakout", display_name="动量突破", horizon=5,
+        initial_capital=10_000.0, position_size=1_000.0,
+        max_capital_in_use=10_000.0,
+    )
+    assert result.strategy == "momentum_breakout"
+    assert isinstance(artifacts, StrategyBacktestArtifacts)
+    assert artifacts.strategy == "momentum_breakout"
+    assert len(artifacts.full_equity_curve) >= 6
+
+
+def test_simulate_strategy_with_artifacts_curve_matches_record_step():
+    """Artifacts curve is the un-downsampled equity_curve internal to the simulator."""
+    from marketpulse.backtest.simulator import simulate_strategy_with_artifacts
+    pairs = [_pair("A", date(2026, 5, 1), 100.0, date(2026, 5, 8), 110.0)]
+    _, artifacts = simulate_strategy_with_artifacts(
+        pairs=pairs, strategy="x", display_name="X", horizon=5,
+        initial_capital=10_000.0, position_size=1_000.0,
+        max_capital_in_use=10_000.0,
+    )
+    assert artifacts.full_equity_curve[0][1] == pytest.approx(10_000.0, abs=1e-3)
+    assert artifacts.full_equity_curve[-1][1] > 10_000.0
+
+
+def test_simulate_strategy_from_pairs_unchanged_signature():
+    """Phase 4 regression: original function still returns single result."""
+    from marketpulse.backtest.simulator import simulate_strategy_from_pairs
+    pairs = [_pair("A", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0)]
+    r = simulate_strategy_from_pairs(
+        pairs=pairs,
+        strategy="momentum_breakout", display_name="动量突破", horizon=5,
+        initial_capital=10_000.0, position_size=1_000.0,
+        max_capital_in_use=10_000.0,
+    )
+    assert hasattr(r, "strategy")
+    assert not isinstance(r, tuple)

@@ -16,7 +16,10 @@ from marketpulse.backtest.trading_calendar import (
     build_calendar,
     elapsed_fraction,
 )
-from marketpulse.backtest.types import StrategyBacktestResult
+from marketpulse.backtest.types import (
+    StrategyBacktestArtifacts,
+    StrategyBacktestResult,
+)
 from marketpulse.logging import get_logger
 
 log = get_logger(__name__)
@@ -326,6 +329,105 @@ def downsample_equity_curve(
     if out[-1] != curve[-1]:
         out.append(curve[-1])
     return out
+
+
+def simulate_strategy_with_artifacts(
+    pairs: list[EventOutcomePair],
+    *,
+    strategy: str,
+    display_name: str,
+    horizon: int,
+    initial_capital: float = 10_000.0,
+    position_size: float = 1_000.0,
+    max_capital_in_use: float = 10_000.0,
+) -> tuple[StrategyBacktestResult, StrategyBacktestArtifacts]:
+    """Phase 5a variant: returns (DTO, Artifacts) for shared-pool rolling Sharpe.
+
+    Same simulator logic as simulate_strategy_from_pairs — but ALSO returns
+    the un-downsampled internal equity_curve as a StrategyBacktestArtifacts
+    sibling. Phase 4 callers continue to use simulate_strategy_from_pairs
+    (which discards the artifact).
+    """
+    # Run the existing simulator (it already builds equity_curve internally).
+    result = simulate_strategy_from_pairs(
+        pairs=pairs,
+        strategy=strategy, display_name=display_name, horizon=horizon,
+        initial_capital=initial_capital, position_size=position_size,
+        max_capital_in_use=max_capital_in_use,
+    )
+    # Rebuild the un-downsampled curve by re-running the daily loop just for
+    # the equity series. This is duplicative but isolated — keeps Phase 4
+    # callers untouched.
+    if not pairs:
+        from datetime import date as _date
+        return result, StrategyBacktestArtifacts(
+            strategy=strategy,
+            full_equity_curve=[(_date.today(), initial_capital)],
+        )
+
+    # Replicate the calendar + daily loop just to grab the un-downsampled curve.
+    db_dates: set[date] = set()
+    for p in pairs:
+        db_dates.add(p.event_time.date())
+        db_dates.add(p.horizon_date)
+    raw_dates: set[date] = set(db_dates)
+    min_d, max_d = min(raw_dates), max(raw_dates)
+    cur = min_d
+    while cur <= max_d:
+        if cur.weekday() < 5:
+            raw_dates.add(cur)
+        cur += timedelta(days=1)
+    calendar = build_calendar(list(raw_dates))
+
+    pairs_by_entry: dict[date, list[EventOutcomePair]] = {}
+    for p in pairs:
+        pairs_by_entry.setdefault(p.event_time.date(), []).append(p)
+
+    cash: float = initial_capital
+    open_positions: list[_OpenPosition] = []
+    equity_curve: list[tuple[date, float]] = []
+    for d in calendar:
+        # CLOSE
+        still_open: list[_OpenPosition] = []
+        for pos in open_positions:
+            if pos.horizon_date == d:
+                realized_ret = (pos.horizon_price - pos.entry_price) / pos.entry_price
+                cash += pos.position_size * (1 + realized_ret)
+            else:
+                still_open.append(pos)
+        open_positions = still_open
+        # OPEN
+        for p in pairs_by_entry.get(d, []):
+            capital_in_use = sum(pos.position_size for pos in open_positions)
+            if capital_in_use + position_size > max_capital_in_use:
+                continue
+            if cash < position_size:
+                continue
+            open_positions.append(_OpenPosition(
+                ticker=p.ticker, entry_date=d,
+                entry_price=p.event_price, horizon_date=p.horizon_date,
+                horizon_price=p.horizon_price, position_size=position_size,
+            ))
+            cash -= position_size
+        # MTM
+        positions_value = 0.0
+        for pos in open_positions:
+            if pos.entry_date == d:
+                positions_value += pos.position_size
+            else:
+                fraction = elapsed_fraction(
+                    calendar, entry=pos.entry_date,
+                    horizon=pos.horizon_date, current=d,
+                )
+                est_price = pos.entry_price + (
+                    pos.horizon_price - pos.entry_price
+                ) * fraction
+                positions_value += pos.position_size * (est_price / pos.entry_price)
+        equity_curve.append((d, cash + positions_value))
+
+    return result, StrategyBacktestArtifacts(
+        strategy=strategy, full_equity_curve=equity_curve,
+    )
 
 
 def run_all_backtests(
