@@ -132,3 +132,96 @@ def test_shared_pool_bootstrap_period_uses_equal_weight():
         max_capital_in_use=10_000.0, lookback_days=60,
     )
     assert r.n_trades == 2
+
+
+def test_shared_pool_dedup_picks_highest_sharpe_winner():
+    """Two strategies bid same ticker same day → highest-Sharpe wins."""
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+    bids = [
+        _pair("AAPL", "momentum_breakout", date(2026, 5, 1), 100.0,
+               date(2026, 5, 8), 105.0),
+        _pair("AAPL", "news_event", date(2026, 5, 1), 100.0,
+               date(2026, 5, 8), 105.0),
+    ]
+    r = simulate_shared_pool(
+        bids=bids,
+        daily_curves={
+            "momentum_breakout": _curve(daily_return=0.01, n_days=30),
+            "news_event": _curve(daily_return=0.001, n_days=30),
+        },
+        horizon=5,
+        initial_capital=10_000.0, position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+    )
+    assert r.n_trades == 1
+    assert r.n_dedup_total == 1
+    assert len([b for b in r.bid_history if b.outcome == "dedup_loser"]) == 1
+
+
+def test_shared_pool_dedup_loser_records_bid_loss():
+    """The losing bid is logged with outcome='dedup_loser' and winner=<name>."""
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+    bids = [
+        _pair("AAPL", "momentum_breakout", date(2026, 5, 1), 100.0,
+               date(2026, 5, 8), 105.0),
+        _pair("AAPL", "news_event", date(2026, 5, 1), 100.0,
+               date(2026, 5, 8), 105.0),
+    ]
+    r = simulate_shared_pool(
+        bids=bids,
+        daily_curves={
+            "momentum_breakout": _curve(daily_return=0.01, n_days=30),
+            "news_event": _curve(daily_return=0.001, n_days=30),
+        },
+        horizon=5,
+        initial_capital=10_000.0, position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+    )
+    losers = [b for b in r.bid_history if b.outcome == "dedup_loser"]
+    assert len(losers) == 1
+    assert losers[0].strategy == "news_event"
+    assert losers[0].winner == "momentum_breakout"
+
+
+def test_shared_pool_greedy_alloc_respects_max_cap():
+    """11 same-day distinct-ticker bids in $10k pool → 10 open, 1 cap_full."""
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+    bids = [
+        _pair(f"T{i}", "momentum_breakout", date(2026, 5, 1), 100.0,
+               date(2026, 5, 8), 101.0)
+        for i in range(11)
+    ]
+    r = simulate_shared_pool(
+        bids=bids,
+        daily_curves={"momentum_breakout": _curve()},
+        horizon=5,
+        initial_capital=10_000.0, position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+    )
+    assert r.n_trades == 10
+    cap_full = [b for b in r.bid_history if b.outcome == "cap_full"]
+    assert len(cap_full) == 1
+
+
+def test_equal_weight_tiebreak_uses_event_time_then_alpha():
+    """Tiebreaker chain: weight → event_time → strategy name."""
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+    # Both bids have identical event_time (date-only construction → midnight),
+    # so the tiebreaker degenerates to alphabetical strategy.
+    # momentum_breakout < news_event lexicographically → momentum_breakout wins.
+    bids = [
+        _pair("AAPL", "news_event", date(2026, 5, 1), 100.0,
+               date(2026, 5, 8), 105.0),
+        _pair("AAPL", "momentum_breakout", date(2026, 5, 1), 100.0,
+               date(2026, 5, 8), 105.0),
+    ]
+    r = simulate_shared_pool(
+        bids=bids,
+        daily_curves={"news_event": [], "momentum_breakout": []},
+        horizon=5,
+        initial_capital=10_000.0, position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+    )
+    won = [b for b in r.bid_history if b.outcome == "won"]
+    assert len(won) == 1
+    assert won[0].strategy == "momentum_breakout"

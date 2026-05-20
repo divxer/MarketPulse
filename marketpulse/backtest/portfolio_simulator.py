@@ -97,11 +97,11 @@ def simulate_shared_pool(
     n_trades_by_strategy: dict[str, int] = {}
     trade_returns_by_strategy: dict[str, list[float]] = {}
     n_dedup_skipped_by_strategy: dict[str, int] = {}
-    n_capacity_skipped_by_strategy: dict[str, int] = {}  # noqa: F841  (T5 ALLOC)
-    n_cash_short_skipped_by_strategy: dict[str, int] = {}  # noqa: F841  (T5 ALLOC)
+    n_capacity_skipped_by_strategy: dict[str, int] = {}
+    n_cash_short_skipped_by_strategy: dict[str, int] = {}
     n_floor_hits_by_strategy: dict[str, int] = {}
-    n_bids_by_strategy: dict[str, int] = {}  # noqa: F841  (T6 RECORD)
-    bid_weights_by_strategy: dict[str, list[float]] = {}  # noqa: F841  (T6 RECORD)
+    n_bids_by_strategy: dict[str, int] = {}
+    bid_weights_by_strategy: dict[str, list[float]] = {}
     capital_in_use_by_day: list[float] = []
     exposure_by_strategy_by_day: dict[str, list[float]] = {}
 
@@ -143,12 +143,88 @@ def simulate_shared_pool(
                 if raw is not None and raw < 0.1:
                     n_floor_hits_by_strategy[s] = n_floor_hits_by_strategy.get(s, 0) + 1
 
-        # ─── DEDUP, ALLOC, MTM, RECORD — Tasks 5+6 ───
-        # Stub: just record equity (cash, no positions) so curve is populated.
-        equity_curve.append((d, cash))
-        capital_in_use_by_day.append(0.0)
+        # ─── DEDUP (same-day same-ticker collision) ───
+        bids_by_ticker: dict[str, list] = {}
+        for b in todays_bids:
+            bids_by_ticker.setdefault(b.ticker, []).append(b)
+        winners: dict[str, object] = {}
+        for ticker, group in bids_by_ticker.items():
+            # 3-key composite: (-weight, event_time, strategy_name)
+            best = min(group, key=lambda b: (
+                -weights[b.strategy], b.event_time, b.strategy,
+            ))
+            winners[ticker] = best
+            for loser in group:
+                if loser is not best:
+                    all_bid_records.append(BidRecord(
+                        date=d, strategy=loser.strategy, ticker=ticker,
+                        weight=weights[loser.strategy],
+                        outcome="dedup_loser", winner=best.strategy,
+                    ))
+                    n_dedup_skipped_by_strategy[loser.strategy] = (
+                        n_dedup_skipped_by_strategy.get(loser.strategy, 0) + 1
+                    )
+                    # Loser still counts as a bid (for n_bids + avg_bid_weight)
+                    n_bids_by_strategy[loser.strategy] = (
+                        n_bids_by_strategy.get(loser.strategy, 0) + 1
+                    )
+                    bid_weights_by_strategy.setdefault(loser.strategy, []).append(
+                        weights[loser.strategy]
+                    )
+
+        # ─── ALLOCATE (capital-constrained, greedy by weight desc) ───
+        sorted_winners = sorted(
+            winners.values(),
+            key=lambda b: (-weights[b.strategy], b.event_time, b.strategy),
+        )
+        for b in sorted_winners:
+            n_bids_by_strategy[b.strategy] = n_bids_by_strategy.get(b.strategy, 0) + 1
+            bid_weights_by_strategy.setdefault(b.strategy, []).append(
+                weights[b.strategy]
+            )
+            capital_in_use = sum(p.position_size for p in open_positions)
+            if capital_in_use + position_size > max_capital_in_use:
+                all_bid_records.append(BidRecord(
+                    date=d, strategy=b.strategy, ticker=b.ticker,
+                    weight=weights[b.strategy],
+                    outcome="cap_full", winner=None,
+                ))
+                n_capacity_skipped_by_strategy[b.strategy] = (
+                    n_capacity_skipped_by_strategy.get(b.strategy, 0) + 1
+                )
+                continue
+            if cash < position_size:
+                all_bid_records.append(BidRecord(
+                    date=d, strategy=b.strategy, ticker=b.ticker,
+                    weight=weights[b.strategy],
+                    outcome="cash_short", winner=None,
+                ))
+                n_cash_short_skipped_by_strategy[b.strategy] = (
+                    n_cash_short_skipped_by_strategy.get(b.strategy, 0) + 1
+                )
+                continue
+            open_positions.append(_OpenPosition(
+                strategy=b.strategy, ticker=b.ticker,
+                entry_date=d, entry_price=b.event_price,
+                horizon_date=b.horizon_date, horizon_price=b.horizon_price,
+                position_size=position_size,
+            ))
+            cash -= position_size
+            n_trades_by_strategy[b.strategy] = n_trades_by_strategy.get(b.strategy, 0) + 1
+            all_bid_records.append(BidRecord(
+                date=d, strategy=b.strategy, ticker=b.ticker,
+                weight=weights[b.strategy],
+                outcome="won", winner=None,
+            ))
+
+        # ─── MTM, RECORD — Task 6 fills proper MTM. Stub: cash + raw positions. ───
+        equity_curve.append((d, cash + sum(p.position_size for p in open_positions)))
+        capital_in_use_by_day.append(sum(p.position_size for p in open_positions))
         for s in strategies_today:
-            exposure_by_strategy_by_day.setdefault(s, []).append(0.0)
+            exposure_by_strategy_by_day.setdefault(s, []).append(
+                sum(p.position_size for p in open_positions if p.strategy == s)
+                / initial_capital
+            )
 
     n_trades = sum(n_trades_by_strategy.values())
     return PortfolioBacktestResult(
