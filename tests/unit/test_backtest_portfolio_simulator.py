@@ -1127,3 +1127,107 @@ def test_correlation_cap_cold_start_bypassed():
     won = [b for b in r.bid_history if b.outcome == "won"]
     # Both should land — cold-start failsafe-open
     assert len(won) == 2
+
+
+def test_finalization_populates_max_sector_exposure():
+    """Pool-wide peak: max over sectors of (sector_total / pool) across all days."""
+    from datetime import date, timedelta
+
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+
+    good = [(date(2026, 4, 1) + timedelta(days=i), 10_000.0 * (1.005 ** i))
+            for i in range(30)]
+
+    def fake_sector(ticker: str) -> str:
+        return {"AAPL": "Technology", "MSFT": "Technology", "XOM": "Energy"}.get(ticker, "unknown")
+
+    bids = [
+        _pair("AAPL", "s1", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0),
+        _pair("MSFT", "s2", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0),
+        _pair("XOM", "s3", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0),
+    ]
+    daily_curves = {"s1": good, "s2": good, "s3": good}
+
+    r = simulate_shared_pool(
+        bids=bids, daily_curves=daily_curves,
+        horizon=5, initial_capital=10_000.0, base_position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=False, sector_caps_enabled=True, sector_cap_pct=0.40,
+        correlation_caps_enabled=False, sector_provider=fake_sector,
+    )
+    # Tech = 2*$1k=$2k → 20%; Energy = $1k → 10%; max = 20%
+    assert abs(r.max_sector_exposure - 0.20) < 0.01
+    # Per-sector dict populated
+    assert "Technology" in r.max_sector_exposure_by_sector
+    assert abs(r.max_sector_exposure_by_sector["Technology"] - 0.20) < 0.01
+    assert abs(r.max_sector_exposure_by_sector["Energy"] - 0.10) < 0.01
+
+
+def test_finalization_populates_sector_breakdown_time_average():
+    """sector_breakdown averages each sector's daily fraction over ALL calendar days."""
+    from datetime import date, timedelta
+
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+
+    good = [(date(2026, 4, 1) + timedelta(days=i), 10_000.0 * (1.005 ** i))
+            for i in range(30)]
+
+    def fake_sector(_t: str) -> str:
+        return "Technology"
+
+    bids = [_pair("AAPL", "s1", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0)]
+    daily_curves = {"s1": good}
+
+    r = simulate_shared_pool(
+        bids=bids, daily_curves=daily_curves,
+        horizon=5, initial_capital=10_000.0, base_position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=False, sector_caps_enabled=True, sector_cap_pct=0.40,
+        correlation_caps_enabled=False, sector_provider=fake_sector,
+    )
+    # Single position $1k for ~5 days out of 7 calendar day window
+    assert "Technology" in r.sector_breakdown
+    assert r.sector_breakdown["Technology"] > 0.0
+    assert r.sector_breakdown["Technology"] <= 1.0
+
+
+def test_finalization_n_correlation_cap_events_counted():
+    """n_correlation_cap_events counts bids rejected by correlation cap."""
+    from datetime import date, timedelta
+
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+
+    # Window: as_of=2026-05-01 lookback=60d → seed [2026-03-02, 2026-05-01)
+    base_prices = [(date(2026, 3, 2) + timedelta(days=i), 100.0 + i) for i in range(60)]
+    correlated_tickers = {"AAPL1", "AAPL2", "AAPL3", "AAPL4", "GOOGL"}
+
+    class FakePriceProvider:
+        def get_daily_closes(self, ticker, start, end):
+            if ticker in correlated_tickers:
+                return [(d, v) for d, v in base_prices if start <= d < end]
+            return []
+
+    def neutral_sector(_t: str) -> str:
+        return "unknown"
+
+    good = [(date(2026, 4, 1) + timedelta(days=i), 10_000.0 * (1.005 ** i))
+            for i in range(30)]
+    bids = [
+        _pair(f"AAPL{i}", f"s{i}", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0)
+        for i in range(1, 5)
+    ] + [_pair("GOOGL", "s5", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0)]
+    daily_curves = {f"s{i}": good for i in range(1, 6)}
+
+    r = simulate_shared_pool(
+        bids=bids, daily_curves=daily_curves,
+        horizon=5, initial_capital=10_000.0, base_position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=False,
+        sector_caps_enabled=False,
+        correlation_caps_enabled=True,
+        correlation_cap_pct=0.40, correlation_threshold=0.60,
+        sector_provider=neutral_sector, price_provider=FakePriceProvider(),
+    )
+    blocked = [b for b in r.bid_history if b.outcome == "correlation_cap_full"]
+    assert r.n_correlation_cap_events == len(blocked)
+    assert r.n_correlation_cap_events >= 1

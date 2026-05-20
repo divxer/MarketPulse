@@ -178,6 +178,9 @@ def simulate_shared_pool(
     # NEW Phase 5c counters
     n_sector_cap_skipped_by_strategy: dict[str, int] = {}
     n_correlation_cap_skipped_by_strategy: dict[str, int] = {}  # reserved for T7
+    # Phase 5c sector + correlation telemetry accumulators
+    sector_exposure_daily: list[dict[str, float]] = []
+    n_correlation_cap_events = 0
     n_bids_by_strategy: dict[str, int] = {}
     bid_weights_by_strategy: dict[str, list[float]] = {}
     capital_in_use_by_day: list[float] = []
@@ -393,6 +396,7 @@ def simulate_shared_pool(
                     n_correlation_cap_skipped_by_strategy[b.strategy] = (
                         n_correlation_cap_skipped_by_strategy.get(b.strategy, 0) + 1
                     )
+                    n_correlation_cap_events += 1
                     continue
             open_positions.append(_OpenPosition(
                 strategy=b.strategy, ticker=b.ticker,
@@ -411,6 +415,16 @@ def simulate_shared_pool(
                 outcome="won", winner=None,
                 position_size=requested_size,
             ))
+
+        # Phase 5c: snapshot per-day sector exposure (post-ALLOCATE)
+        day_snapshot: dict[str, float] = {}
+        for p in open_positions:
+            s = sector_by_ticker.get(p.ticker)
+            if s is None:
+                s = sector_provider(p.ticker)
+                sector_by_ticker[p.ticker] = s
+            day_snapshot[s] = day_snapshot.get(s, 0.0) + p.position_size
+        sector_exposure_daily.append(day_snapshot)
 
         # ─── MTM ─── (linear interpolation per spec § 2 + Phase 4)
         positions_value = 0.0
@@ -542,6 +556,31 @@ def simulate_shared_pool(
         max_strategy_exposure = 0.0
         hhi_concentration = 0.0
 
+    # Phase 5c-1 sector telemetry
+    if sector_exposure_daily:
+        max_sector_exposure = 0.0
+        max_sector_exposure_by_sector: dict[str, float] = {}
+        sector_sum_over_days: dict[str, float] = {}
+
+        for day_snapshot in sector_exposure_daily:
+            for s, dollars in day_snapshot.items():
+                frac = dollars / initial_capital
+                if frac > max_sector_exposure:
+                    max_sector_exposure = frac
+                if frac > max_sector_exposure_by_sector.get(s, 0.0):
+                    max_sector_exposure_by_sector[s] = frac
+                sector_sum_over_days[s] = sector_sum_over_days.get(s, 0.0) + frac
+
+        n_days = len(sector_exposure_daily)
+        sector_breakdown = {s: total / n_days for s, total in sector_sum_over_days.items()}
+    else:
+        max_sector_exposure = 0.0
+        max_sector_exposure_by_sector = {}
+        sector_breakdown = {}
+
+    # Phase 5c-2 correlation telemetry — max_neighbor_exposure deferred to future iteration
+    max_neighbor_exposure = 0.0
+
     # Last-100 slice of bid history (spec § 4: render-layer cap)
     bid_history = all_bid_records[-100:] if len(all_bid_records) > 100 else all_bid_records
 
@@ -552,12 +591,13 @@ def simulate_shared_pool(
         avg_capital_utilization=avg_util,
         max_strategy_exposure=max_strategy_exposure,
         hhi_concentration=hhi_concentration,
-        # Phase 5c placeholders — real values land in Tasks 6-8
-        max_sector_exposure=0.0,
-        max_sector_exposure_by_sector={},
-        sector_breakdown={},
-        max_neighbor_exposure=0.0,
-        n_correlation_cap_events=0,
+        # Phase 5c-1 sector telemetry (Task 8)
+        max_sector_exposure=max_sector_exposure,
+        max_sector_exposure_by_sector=max_sector_exposure_by_sector,
+        sector_breakdown=sector_breakdown,
+        # Phase 5c-2 correlation telemetry (Task 8)
+        max_neighbor_exposure=max_neighbor_exposure,
+        n_correlation_cap_events=n_correlation_cap_events,
         cumulative_return=metrics.cumulative_return,
         annual_return=metrics.annual_return,
         sharpe=metrics.sharpe,
