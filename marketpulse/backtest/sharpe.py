@@ -55,8 +55,13 @@ def compute_bid_weights(
     lookback_days: int = 60,
     min_floor: float = 0.1,
     min_events: int = 5,
-) -> dict[str, float]:
+) -> tuple[dict[str, float], set[str]]:
     """Compute per-strategy bid weights using rolling Sharpe.
+
+    Returns (weights, floor_hits):
+      - weights: dict[strategy_name, float] — final weight (post-floor, post-bootstrap)
+      - floor_hits: set[strategy] whose raw Sharpe was below min_floor and
+        was clipped up. Used by the simulator for n_floor_hits telemetry.
 
     Algorithm (spec § 3):
       1. rolling_sharpe per strategy on its slice of daily_curves.
@@ -78,10 +83,16 @@ def compute_bid_weights(
 
     known = [w for w in raw.values() if w is not None]
     if not known:
-        return {s: 1.0 for s in raw}
+        return {s: 1.0 for s in raw}, set()
 
     avg_known = sum(known) / len(known)
-    return {
-        s: max(w if w is not None else avg_known, min_floor)
-        for s, w in raw.items()
-    }
+    weights: dict[str, float] = {}
+    floor_hits: set[str] = set()
+    for s, w in raw.items():
+        unfloored = w if w is not None else avg_known
+        if unfloored < min_floor:
+            weights[s] = min_floor
+            floor_hits.add(s)
+        else:
+            weights[s] = unfloored
+    return weights, floor_hits

@@ -70,7 +70,7 @@ def test_bid_weight_equal_when_all_strategies_below_threshold():
     """All None Sharpes → all weights = 1.0 (bootstrap)."""
     from marketpulse.backtest.sharpe import compute_bid_weights
     daily_curves = {"momentum_breakout": [], "general": []}
-    weights = compute_bid_weights(
+    weights, _ = compute_bid_weights(
         ["momentum_breakout", "general"], daily_curves,
         as_of=date(2026, 5, 1), lookback_days=60,
     )
@@ -84,7 +84,7 @@ def test_bid_weight_avg_fill_when_some_below_threshold():
         "momentum_breakout": _curve(daily_return=0.01, n_days=30),
         "news_event": [],
     }
-    weights = compute_bid_weights(
+    weights, _ = compute_bid_weights(
         ["momentum_breakout", "news_event"], daily_curves,
         as_of=date(2026, 5, 1), lookback_days=60,
     )
@@ -99,7 +99,7 @@ def test_bid_weight_floors_negative_sharpe_at_0_1():
         "loser": _curve(daily_return=-0.01, n_days=30),
         "winner": _curve(daily_return=0.01, n_days=30),
     }
-    weights = compute_bid_weights(
+    weights, _ = compute_bid_weights(
         ["loser", "winner"], daily_curves,
         as_of=date(2026, 5, 1), lookback_days=60,
     )
@@ -111,7 +111,7 @@ def test_bid_weight_does_not_floor_high_positive_sharpe():
     """Sharpe >> 0.1 passes through unchanged."""
     from marketpulse.backtest.sharpe import compute_bid_weights
     daily_curves = {"winner": _curve(daily_return=0.01, n_days=30)}
-    weights = compute_bid_weights(
+    weights, _ = compute_bid_weights(
         ["winner"], daily_curves,
         as_of=date(2026, 5, 1), lookback_days=60,
     )
@@ -125,7 +125,7 @@ def test_bid_weight_all_negative_degenerates_to_fifo():
         "loser1": _curve(daily_return=-0.01, n_days=30),
         "loser2": _curve(daily_return=-0.005, n_days=30),
     }
-    weights = compute_bid_weights(
+    weights, _ = compute_bid_weights(
         ["loser1", "loser2"], daily_curves,
         as_of=date(2026, 5, 1), lookback_days=60,
     )
@@ -137,7 +137,7 @@ def test_bid_weight_deep_negative_sharpe_still_floored_at_0_1():
     """Sharpe = -10 still gets 0.1 floor (not lower)."""
     from marketpulse.backtest.sharpe import compute_bid_weights
     daily_curves = {"catastrophic": _curve(daily_return=-0.05, n_days=30)}
-    weights = compute_bid_weights(
+    weights, _ = compute_bid_weights(
         ["catastrophic"], daily_curves,
         as_of=date(2026, 5, 1), lookback_days=60,
     )
@@ -161,8 +161,36 @@ def test_bid_weight_empty_curve_in_daily_curves_returns_bootstrap():
     """Empty curve for a strategy → n=0 < 5 → None → bootstrap."""
     from marketpulse.backtest.sharpe import compute_bid_weights
     daily_curves = {"empty_strategy": []}
-    weights = compute_bid_weights(
+    weights, _ = compute_bid_weights(
         ["empty_strategy"], daily_curves,
         as_of=date(2026, 5, 1), lookback_days=60,
     )
     assert weights == {"empty_strategy": 1.0}
+
+
+def test_compute_bid_weights_returns_floor_hits_set():
+    """Floor hits set tracks strategies whose raw Sharpe was below min_floor."""
+    from marketpulse.backtest.sharpe import compute_bid_weights
+    daily_curves = {
+        "loser": _curve(daily_return=-0.01, n_days=30),    # negative Sharpe → floored
+        "winner": _curve(daily_return=0.01, n_days=30),    # high Sharpe → unfloored
+    }
+    weights, floor_hits = compute_bid_weights(
+        ["loser", "winner"], daily_curves,
+        as_of=date(2026, 5, 1), lookback_days=60,
+    )
+    assert "loser" in floor_hits
+    assert "winner" not in floor_hits
+    assert weights["loser"] == 0.1
+    assert weights["winner"] > 0.1
+
+
+def test_compute_bid_weights_bootstrap_returns_empty_floor_hits():
+    """All-None bootstrap → no floor hits (all 1.0, above any floor)."""
+    from marketpulse.backtest.sharpe import compute_bid_weights
+    weights, floor_hits = compute_bid_weights(
+        ["a", "b"], {"a": [], "b": []},
+        as_of=date(2026, 5, 1), lookback_days=60,
+    )
+    assert floor_hits == set()
+    assert weights == {"a": 1.0, "b": 1.0}

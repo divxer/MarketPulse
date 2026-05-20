@@ -127,21 +127,16 @@ def simulate_shared_pool(
         # ─── WEIGHT COMPUTE ───
         strategies_today = sorted({b.strategy for b in todays_bids})
         weights: dict[str, float] = {}
+        floor_hits: set[str] = set()
         if strategies_today:
-            weights = compute_bid_weights(
+            weights, floor_hits = compute_bid_weights(
                 strategies_today, daily_curves,
                 as_of=d, lookback_days=lookback_days,
             )
 
-        # Track n_floor_hits (weights at 0.1 came from a negative-Sharpe floor)
-        for s in strategies_today:
-            if weights.get(s) == 0.1:
-                from marketpulse.backtest.sharpe import rolling_sharpe
-                raw = rolling_sharpe(
-                    daily_curves[s], as_of=d, lookback_days=lookback_days,
-                )
-                if raw is not None and raw < 0.1:
-                    n_floor_hits_by_strategy[s] = n_floor_hits_by_strategy.get(s, 0) + 1
+        # n_floor_hits telemetry (post-floor-hit set is the source of truth)
+        for s in floor_hits:
+            n_floor_hits_by_strategy[s] = n_floor_hits_by_strategy.get(s, 0) + 1
 
         # ─── DEDUP (same-day same-ticker collision) ───
         bids_by_ticker: dict[str, list] = {}
