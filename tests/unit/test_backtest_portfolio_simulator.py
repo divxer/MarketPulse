@@ -656,3 +656,191 @@ def test_shared_pool_cap_full_records_requested_size():
         # not 0.0 and not base_position_size hardcoded
         for record in cap_full:
             assert record.position_size > 0.0  # real value
+
+
+def test_shared_pool_avg_position_size_in_contribution():
+    """avg_position_size = mean(position_size) over won bids per strategy."""
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+
+    good = [(date(2026, 4, 1) + timedelta(days=i), 10_000.0 * (1.005 ** i))
+            for i in range(30)]
+
+    # 3 bids for the same strategy
+    bids = [_pair(f"T{i}", "x", date(2026, 5, 1), 100.0,
+                   date(2026, 5, 8), 105.0)
+            for i in range(3)]
+    r = simulate_shared_pool(
+        bids=bids,
+        daily_curves={"x": good},
+        horizon=5,
+        initial_capital=10_000.0, base_position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=True,
+    )
+    if "x" in r.per_strategy_stats:
+        won = [b for b in r.bid_history
+               if b.outcome == "won" and b.strategy == "x"]
+        if won:
+            expected_avg = sum(b.position_size for b in won) / len(won)
+            assert abs(r.per_strategy_stats["x"].avg_position_size - expected_avg) < 1e-6
+
+
+def test_shared_pool_n_size_too_small_in_contribution():
+    """n_size_too_small_skipped counts the strategy's filtered bids."""
+    import random
+
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+
+    random.seed(20)
+    bad = []
+    v = 10_000.0
+    for i in range(30):
+        d = date(2026, 4, 1) + timedelta(days=i)
+        bad.append((d, v))
+        v *= (1 + 0.00005 + random.gauss(0, 0.05))
+
+    bids = [_pair(f"T{i}", "bad", date(2026, 5, 1), 100.0,
+                   date(2026, 5, 8), 105.0) for i in range(3)]
+    r = simulate_shared_pool(
+        bids=bids,
+        daily_curves={"bad": bad},
+        horizon=5,
+        initial_capital=10_000.0, base_position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=True,
+    )
+    if "bad" in r.per_strategy_stats:
+        size_skipped = [b for b in r.bid_history
+                        if b.outcome == "size_too_small" and b.strategy == "bad"]
+        assert r.per_strategy_stats["bad"].n_size_too_small_skipped == len(size_skipped)
+
+
+def test_shared_pool_max_strategy_exposure_computed():
+    """max_strategy_exposure = peak single-strategy avg-exposure value."""
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+
+    good = [(date(2026, 4, 1) + timedelta(days=i), 10_000.0 * (1.005 ** i))
+            for i in range(30)]
+    bids = [_pair(f"T{i}", "x", date(2026, 5, 1), 100.0,
+                   date(2026, 5, 8), 105.0) for i in range(5)]
+    r = simulate_shared_pool(
+        bids=bids,
+        daily_curves={"x": good},
+        horizon=5,
+        initial_capital=10_000.0, base_position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=True,
+    )
+    # Single strategy → max_strategy_exposure equals its own avg_exposure
+    if r.per_strategy_stats:
+        max_expected = max(c.avg_exposure for c in r.per_strategy_stats.values())
+        assert abs(r.max_strategy_exposure - max_expected) < 1e-9
+
+
+def test_shared_pool_hhi_concentration_computed():
+    """hhi_concentration = Σ(exposure_s²) — Herfindahl-Hirschman Index."""
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+
+    good_a = [(date(2026, 4, 1) + timedelta(days=i), 10_000.0 * (1.005 ** i))
+              for i in range(30)]
+    good_b = [(date(2026, 4, 1) + timedelta(days=i), 10_000.0 * (1.006 ** i))
+              for i in range(30)]
+
+    bids = [
+        _pair("A", "a", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0),
+        _pair("B", "b", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0),
+    ]
+    r = simulate_shared_pool(
+        bids=bids,
+        daily_curves={"a": good_a, "b": good_b},
+        horizon=5,
+        initial_capital=10_000.0, base_position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=True,
+    )
+    # Two strategies → HHI = sum of squares of exposures
+    if r.per_strategy_stats:
+        exposures = [c.avg_exposure for c in r.per_strategy_stats.values()]
+        expected_hhi = sum(e * e for e in exposures)
+        assert abs(r.hhi_concentration - expected_hhi) < 1e-9
+
+
+def test_shared_pool_joint_bootstrap_yields_uniform_base_sizes():
+    """ALL strategies n<5 → all sizes = base_position_size (uniform). Review iter 1 fix #1."""
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+
+    # All strategies have 3 events (below min_events=5)
+    def tiny(_seed_offset):
+        return [
+            (date(2026, 4, 28) + timedelta(days=i), 10_000.0 * (1.01 ** i))
+            for i in range(3)
+        ]
+    daily_curves = {"a": tiny(1), "b": tiny(2)}
+    bids = [
+        _pair("X", "a", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0),
+        _pair("Y", "b", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0),
+    ]
+    r = simulate_shared_pool(
+        bids=bids,
+        daily_curves=daily_curves,
+        horizon=5,
+        initial_capital=10_000.0, base_position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=True,
+    )
+    # Both bids should open at base (no scaling)
+    won = [b for b in r.bid_history if b.outcome == "won"]
+    for w in won:
+        assert w.position_size == 1000.0
+
+
+def test_size_formula_not_double_rewarding_low_vol():
+    """Review iter 2 fix #1: regression test for the σ² double-count.
+
+    Strategy with σ = 0.5%, α = 0.5% (Sharpe = 1.0)
+    Strategy with σ = 1.0%, α = 1.5% (Sharpe = 1.5)
+    With double-count (size ∝ μ/σ²): A gets bigger size despite lower α.
+    Without (size ∝ μ/σ): B gets bigger size (correctly).
+    """
+    import random
+
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+
+    # Construct A: low σ (0.5% daily), modest α (≈0.5%)
+    random.seed(100)
+    a_curve = []
+    v_a = 10_000.0
+    for i in range(30):
+        d = date(2026, 4, 1) + timedelta(days=i)
+        a_curve.append((d, v_a))
+        v_a *= (1 + 0.005 + random.gauss(0, 0.005))
+
+    # Construct B: higher σ (1% daily), higher α (≈1.5%)
+    random.seed(200)
+    b_curve = []
+    v_b = 10_000.0
+    for i in range(30):
+        d = date(2026, 4, 1) + timedelta(days=i)
+        b_curve.append((d, v_b))
+        v_b *= (1 + 0.015 + random.gauss(0, 0.010))
+
+    bids = [
+        _pair("A_T", "a", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0),
+        _pair("B_T", "b", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0),
+    ]
+    r = simulate_shared_pool(
+        bids=bids,
+        daily_curves={"a": a_curve, "b": b_curve},
+        horizon=5,
+        initial_capital=10_000.0, base_position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=True,
+    )
+    won = {b.strategy: b.position_size for b in r.bid_history if b.outcome == "won"}
+    if "a" in won and "b" in won:
+        # B's higher α should give it a larger size despite higher σ.
+        assert won["b"] > won["a"], (
+            f"Higher-α strategy B should get bigger size; "
+            f"A={won['a']}, B={won['b']}. "
+            f"If A > B, the σ² double-count has regressed."
+        )

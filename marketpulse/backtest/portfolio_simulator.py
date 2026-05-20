@@ -67,9 +67,10 @@ def simulate_shared_pool(
     mode, sizing_policy='fixed_v0'). When True, sizing_policy='vol_target_conviction_v0'.
 
     NOTE (staged delivery): Task 6 wires per-strategy variable sizes through
-    ALLOCATE (cap math + BidRecord position_size). Task 7 will surface the
-    finalization telemetry (n_size_too_small_skipped, avg_position_size,
-    max_strategy_exposure, hhi_concentration).
+    ALLOCATE (cap math + BidRecord position_size). Task 7 surfaces the
+    finalization telemetry (n_size_too_small_skipped, avg_position_size on
+    per-strategy contribution; max_strategy_exposure + hhi_concentration on
+    the pool-level result).
     """
     bid_policy = f"rolling_sharpe_{lookback_days}d_v0"
     sizing_policy = "vol_target_conviction_v0" if sizing_enabled else "fixed_v0"
@@ -377,6 +378,17 @@ def simulate_shared_pool(
     # via dict semantics and would shuffle the strategy table).
     from marketpulse.strategies import load_strategies
     strategies_yaml = load_strategies()
+
+    # Phase 5b Task 7: per-strategy won-bid position_size lists drive
+    # avg_position_size telemetry. Built from BidRecords so the metric stays
+    # source-of-truth aligned with bid_history.
+    won_sizes_by_strategy: dict[str, list[float]] = {}
+    for rec in all_bid_records:
+        if rec.outcome == "won":
+            won_sizes_by_strategy.setdefault(rec.strategy, []).append(
+                rec.position_size
+            )
+
     per_strategy_stats: dict[str, StrategyContribution] = {}
     for s in sorted(daily_curves.keys()):
         # Phase 5b: realized PnL uses per-trade actual position size (variable),
@@ -388,6 +400,8 @@ def simulate_shared_pool(
         avg_exposure = sum(exposures) / len(exposures) if exposures else 0.0
         bid_w_list = bid_weights_by_strategy.get(s, [])
         avg_bid_weight = sum(bid_w_list) / len(bid_w_list) if bid_w_list else 0.0
+        won_sizes = won_sizes_by_strategy.get(s, [])
+        avg_position_size = sum(won_sizes) / len(won_sizes) if won_sizes else 0.0
         per_strategy_stats[s] = StrategyContribution(
             strategy=s,
             display_name=(
@@ -397,14 +411,25 @@ def simulate_shared_pool(
             n_dedup_skipped=n_dedup_skipped_by_strategy.get(s, 0),
             n_capacity_skipped=n_capacity_skipped_by_strategy.get(s, 0),
             n_cash_short_skipped=n_cash_short_skipped_by_strategy.get(s, 0),
-            n_size_too_small_skipped=0,  # Phase 5b placeholder; Task 7 computes real value
+            n_size_too_small_skipped=n_size_too_small_by_strategy.get(s, 0),
             contribution_pnl=contrib_pnl,
             avg_exposure=avg_exposure,
             avg_bid_weight=avg_bid_weight,
-            avg_position_size=0.0,  # Phase 5b placeholder; Task 7 computes real value
+            avg_position_size=avg_position_size,
             n_bids=n_bids_by_strategy.get(s, 0),
             n_floor_hits=n_floor_hits_by_strategy.get(s, 0),
         )
+
+    # Phase 5b Task 7: portfolio-level concentration telemetry.
+    # max_strategy_exposure = peak single-strategy avg_exposure across pool.
+    # hhi_concentration = Σ(exposure_s²) — Herfindahl-Hirschman Index.
+    if per_strategy_stats:
+        _exposures = [c.avg_exposure for c in per_strategy_stats.values()]
+        max_strategy_exposure = max(_exposures) if _exposures else 0.0
+        hhi_concentration = sum(e * e for e in _exposures)
+    else:
+        max_strategy_exposure = 0.0
+        hhi_concentration = 0.0
 
     # Last-100 slice of bid history (spec § 4: render-layer cap)
     bid_history = all_bid_records[-100:] if len(all_bid_records) > 100 else all_bid_records
@@ -414,8 +439,8 @@ def simulate_shared_pool(
         n_trades=n_trades,
         n_dedup_total=sum(n_dedup_skipped_by_strategy.values()),
         avg_capital_utilization=avg_util,
-        max_strategy_exposure=0.0,  # Phase 5b placeholder; Task 7 computes real value
-        hhi_concentration=0.0,      # Phase 5b placeholder; Task 7 computes real value
+        max_strategy_exposure=max_strategy_exposure,
+        hhi_concentration=hhi_concentration,
         cumulative_return=metrics.cumulative_return,
         annual_return=metrics.annual_return,
         sharpe=metrics.sharpe,
