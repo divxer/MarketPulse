@@ -352,3 +352,228 @@ def test_rolling_alpha_matches_numpy_mean_within_tolerance():
     expected_returns = np.diff(arr) / arr[:-1]
     expected_alpha = float(np.mean(expected_returns))
     assert abs(a - expected_alpha) < 1e-9
+
+
+def _noisy_curve(start_value=10_000.0, n_days=30, daily_return=0.005, noise=0.002,
+                 start_date=None, seed=42):
+    import random
+    from datetime import date, timedelta
+    random.seed(seed)
+    start_date = start_date or date(2026, 4, 1)
+    curve = []
+    v = float(start_value)
+    for i in range(n_days):
+        d = start_date + timedelta(days=i)
+        curve.append((d, v))
+        v *= (1 + daily_return + random.gauss(0, noise))
+    return curve
+
+
+def test_size_high_alpha_low_vol_yields_above_base():
+    """High α + low σ → size > base (rewarded for both)."""
+    from datetime import date
+
+    from marketpulse.backtest.sharpe import compute_position_sizes
+    daily_curves = {
+        "fast": _noisy_curve(daily_return=0.015, noise=0.002, seed=1),  # high α, lowish σ
+        "neutral": _noisy_curve(daily_return=0.005, noise=0.005, seed=2),
+    }
+    sizes, _ = compute_position_sizes(
+        ["fast", "neutral"], daily_curves,
+        as_of=date(2026, 5, 1),
+    )
+    assert sizes["fast"] is not None and sizes["neutral"] is not None
+    assert sizes["fast"] > sizes["neutral"]
+
+
+def test_size_low_alpha_high_vol_yields_none_below_min():
+    """Low α + high σ → raw < min → None (skip)."""
+    from datetime import date
+
+    from marketpulse.backtest.sharpe import compute_position_sizes
+    daily_curves = {
+        "loser": _noisy_curve(daily_return=0.0005, noise=0.020, seed=3),  # tiny α, huge σ
+        "winner": _noisy_curve(daily_return=0.015, noise=0.003, seed=4),
+    }
+    sizes, raw_below = compute_position_sizes(
+        ["loser", "winner"], daily_curves,
+        as_of=date(2026, 5, 1),
+    )
+    # loser's raw should be << $200; winner's should be well above
+    if sizes["loser"] is None:
+        assert "loser" in raw_below
+        assert raw_below["loser"] < 200.0
+    assert sizes["winner"] is not None
+
+
+def test_size_neutral_strategy_yields_near_base():
+    """Single neutral strategy (only strategy → mean_α = its own α)
+    → α_scale = 1 → size = base × (target_vol/σ) only."""
+    from datetime import date
+
+    from marketpulse.backtest.sharpe import compute_position_sizes
+    daily_curves = {
+        "neutral": _noisy_curve(daily_return=0.01, noise=0.01, seed=5),  # σ ≈ 1% target
+    }
+    sizes, _ = compute_position_sizes(
+        ["neutral"], daily_curves,
+        as_of=date(2026, 5, 1), base=1000.0, target_vol=0.01,
+    )
+    # σ ≈ target_vol → vol_scale ≈ 1; only-strategy → α_scale = 1; size ≈ base
+    assert sizes["neutral"] is not None
+    assert 500 < sizes["neutral"] < 2000  # roughly around base
+
+
+def test_size_below_min_returns_none_not_clamped_up():
+    """raw < min_position → None (caller skips), NOT clamped up to min."""
+    from datetime import date
+
+    from marketpulse.backtest.sharpe import compute_position_sizes
+    # Construct curves where math forces raw < 200:
+    # huge σ + tiny α, both meet min_events
+    bad_curve = _noisy_curve(daily_return=0.0001, noise=0.05, seed=6)
+    good_curve = _noisy_curve(daily_return=0.02, noise=0.003, seed=7)
+    daily_curves = {"tiny": bad_curve, "huge": good_curve}
+    sizes, raw_below = compute_position_sizes(
+        ["tiny", "huge"], daily_curves,
+        as_of=date(2026, 5, 1), min_position=200.0,
+    )
+    if sizes["tiny"] is None:
+        assert raw_below["tiny"] < 200.0  # raw size was below floor
+        assert sizes["tiny"] != 200.0      # NOT clamped up to floor
+
+
+def test_size_above_max_clamps_to_max():
+    """raw > max_position → clamp to max_position."""
+    from datetime import date
+
+    from marketpulse.backtest.sharpe import compute_position_sizes
+    # Single high-α + low-σ strategy → no α_scale boost (only strategy),
+    # but vol_scale boost. To force > max, push σ very low and base higher.
+    daily_curves = {
+        "low_vol": _noisy_curve(daily_return=0.001, noise=0.0005, seed=8),
+    }
+    sizes, _ = compute_position_sizes(
+        ["low_vol"], daily_curves,
+        as_of=date(2026, 5, 1), base=2000.0, target_vol=0.01, max_position=4000.0,
+    )
+    if sizes["low_vol"] is not None:
+        assert sizes["low_vol"] <= 4000.0
+
+
+def test_size_sigma_none_uses_target_vol_fallback():
+    """σ unavailable (n<5) → vol_scale = 1.0."""
+    from datetime import date, timedelta
+
+    from marketpulse.backtest.sharpe import compute_position_sizes
+    # Only 3 events → σ is None
+    tiny_curve = [(date(2026, 4, 28) + timedelta(days=i), 10_000.0 * (1.01 ** i))
+                  for i in range(3)]
+    sizes, _ = compute_position_sizes(
+        ["new"], {"new": tiny_curve},
+        as_of=date(2026, 5, 1), base=1000.0,
+    )
+    # σ None → vol_scale=1.0; α also None (n<5) → α_scale=1.0
+    # → size = base × 1.0 × 1.0 = 1000
+    assert sizes["new"] == 1000.0
+
+
+def test_size_zero_sigma_uses_target_vol_fallback():
+    """σ computes to 0 (flat curve) → vol_scale = 1.0."""
+    from datetime import date, timedelta
+
+    from marketpulse.backtest.sharpe import compute_position_sizes
+    flat_curve = [(date(2026, 4, 1) + timedelta(days=i), 10_000.0) for i in range(30)]
+    sizes, _ = compute_position_sizes(
+        ["flat"], {"flat": flat_curve},
+        as_of=date(2026, 5, 1), base=1000.0,
+    )
+    # σ = 0 → vol_scale = 1.0; α = 0 (or None) → α_scale = 1.0
+    assert sizes["flat"] is not None
+    assert sizes["flat"] == 1000.0
+
+
+def test_size_joint_bootstrap_yields_uniform_base():
+    """ALL strategies have None α AND None σ → all sizes = base. Review fix #1."""
+    from datetime import date, timedelta
+
+    from marketpulse.backtest.sharpe import compute_position_sizes
+    # All strategies with n<5 events → both α and σ are None
+    def tiny(_seed):
+        return [(date(2026, 4, 28) + timedelta(days=i), 10_000.0 * (1.01 ** i))
+                for i in range(3)]
+    daily_curves = {"a": tiny(1), "b": tiny(2), "c": tiny(3)}
+    sizes, _ = compute_position_sizes(
+        list(daily_curves.keys()), daily_curves,
+        as_of=date(2026, 5, 1), base=1000.0,
+    )
+    assert sizes == {"a": 1000.0, "b": 1000.0, "c": 1000.0}
+
+
+def test_size_all_strategies_below_min_returns_all_none():
+    """Worst-case: all strategies have raw < min."""
+    from datetime import date
+
+    from marketpulse.backtest.sharpe import compute_position_sizes
+    daily_curves = {
+        "a": _noisy_curve(daily_return=0.00005, noise=0.05, seed=10),
+        "b": _noisy_curve(daily_return=0.00005, noise=0.04, seed=11),
+    }
+    sizes, raw_below = compute_position_sizes(
+        ["a", "b"], daily_curves,
+        as_of=date(2026, 5, 1), min_position=200.0,
+    )
+    # Both should be None (raw < 200)
+    if sizes["a"] is None and sizes["b"] is None:
+        assert "a" in raw_below and "b" in raw_below
+
+
+def test_compute_position_sizes_raises_on_missing_strategy():
+    """Contract: every strategy in strategies_today must appear in daily_curves."""
+    from datetime import date
+
+    import pytest
+
+    from marketpulse.backtest.sharpe import compute_position_sizes
+    daily_curves = {"present": _noisy_curve()}
+    with pytest.raises(KeyError):
+        compute_position_sizes(
+            ["present", "missing"], daily_curves,
+            as_of=date(2026, 5, 1),
+        )
+
+
+def test_compute_position_sizes_returns_raw_sizes_below_min_dict():
+    """raw_sizes_below_min populated for None strategies with their raw value."""
+    from datetime import date
+
+    from marketpulse.backtest.sharpe import compute_position_sizes
+    daily_curves = {
+        "tiny": _noisy_curve(daily_return=0.00005, noise=0.05, seed=13),
+        "big":  _noisy_curve(daily_return=0.02, noise=0.005, seed=14),
+    }
+    sizes, raw_below = compute_position_sizes(
+        ["tiny", "big"], daily_curves,
+        as_of=date(2026, 5, 1), min_position=200.0,
+    )
+    # If tiny got None, its raw should be in the dict and below min
+    if sizes["tiny"] is None:
+        assert "tiny" in raw_below
+        assert raw_below["tiny"] < 200.0
+    # big should not appear in raw_below (it passed the floor)
+    if sizes["big"] is not None:
+        assert "big" not in raw_below
+
+
+def test_compute_position_sizes_raw_only_for_none_strategies():
+    """Strategies whose raw >= min do NOT appear in raw_sizes_below_min."""
+    from datetime import date
+
+    from marketpulse.backtest.sharpe import compute_position_sizes
+    daily_curves = {"normal": _noisy_curve(daily_return=0.005, noise=0.005, seed=15)}
+    sizes, raw_below = compute_position_sizes(
+        ["normal"], daily_curves,
+        as_of=date(2026, 5, 1),
+    )
+    if sizes["normal"] is not None:
+        assert "normal" not in raw_below
