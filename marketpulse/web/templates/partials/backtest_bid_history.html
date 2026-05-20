@@ -4,6 +4,20 @@
     <span class="mp-card__title">
       <span class="material-symbols-outlined">history</span>近 100 次 bid 决策
     </span>
+    {% if size_distribution %}
+      <span class="mp-bid-size-spark">
+        <svg viewBox="0 0 120 24" width="120" height="24" aria-label="size distribution">
+          {% for h in size_distribution %}
+            <rect x="{{ loop.index0 * 17 }}" y="{{ 24 - (h * 24)|round(1) }}"
+                  width="15" height="{{ (h * 24)|round(1) }}"
+                  fill="var(--ns-on-surface-variant)" opacity="0.7"/>
+          {% endfor %}
+        </svg>
+        <span class="mp-bid-size-spark__legend">
+          ${{ "{:.0f}".format(min_position) }} → ${{ "{:,.0f}".format(max_position) }}
+        </span>
+      </span>
+    {% endif %}
     <span class="mp-card__sub">诊断用 · 最新在上</span>
   </div>
   <div class="mp-card__body" style="padding:0; max-height:400px; overflow-y:auto;">
@@ -14,21 +28,30 @@
           <th>策略</th>
           <th>Ticker</th>
           <th class="num">权重</th>
+          <th class="num">Size</th>
           <th>结果</th>
         </tr>
       </thead>
       <tbody>
         {% for b in shared_result.bid_history|reverse %}
-        <tr class="{% if b.outcome == 'won' %}is-won{% elif b.outcome == 'dedup_loser' %}is-loser{% else %}is-skipped{% endif %}">
+        <tr class="{% if b.outcome == 'won' %}is-won{% elif b.outcome == 'dedup_loser' %}is-loser{% elif b.outcome == 'size_too_small' %}is-skipped{% else %}is-skipped{% endif %}">
           <td class="mono tnum">{{ b.date.isoformat() }}</td>
           <td>{{ b.strategy }}</td>
           <td>{{ b.ticker }}</td>
           <td class="num mono tnum">{{ "{:.2f}".format(b.weight) }}</td>
+          <td class="num mono tnum">
+            {% if b.outcome == 'size_too_small' %}
+              <span title="raw size = ${{ '{:.0f}'.format(b.position_size) }} (below ${{ '{:.0f}'.format(min_position) }} floor)">—</span>
+            {% else %}
+              ${{ "{:,.0f}".format(b.position_size) }}
+            {% endif %}
+          </td>
           <td>
             {% if b.outcome == 'won' %}<span class="mp-chip mp-chip--up">✓ won</span>
             {% elif b.outcome == 'dedup_loser' %}<span class="mp-chip" title="ceded to {{ b.winner }}">→ {{ b.winner }}</span>
             {% elif b.outcome == 'cap_full' %}<span class="mp-chip mp-chip--down">cap full</span>
             {% elif b.outcome == 'cash_short' %}<span class="mp-chip mp-chip--down">cash short</span>
+            {% elif b.outcome == 'size_too_small' %}<span class="mp-chip mp-chip--down">size too small</span>
             {% endif %}
           </td>
         </tr>
