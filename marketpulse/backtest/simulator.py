@@ -488,3 +488,110 @@ def run_all_backtests(
 
     results.append(spy)
     return results
+
+
+def run_shared_pool_backtest(
+    db,
+    *,
+    horizon: int = 5,
+    since: date | None = None,
+    initial_capital: float = 10_000.0,
+    position_size: float = 1_000.0,
+    max_capital_in_use: float = 10_000.0,
+    lookback_days: int = 60,
+) -> dict:
+    """Phase 5a orchestrator. Spec § 4.
+
+    Returns {isolated, artifacts, shared}:
+      - isolated: list[StrategyBacktestResult] — 6 strategies + SPY
+      - artifacts: list[StrategyBacktestArtifacts] — parallel to isolated minus SPY
+      - shared: PortfolioBacktestResult — Phase 5a combined view
+    """
+    from dataclasses import dataclass as _dataclass
+    from dataclasses import replace
+
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+    from marketpulse.backtest.queries import get_bullish_events_with_outcomes
+    from marketpulse.strategies import load_strategies
+
+    @_dataclass(frozen=True)
+    class _BidInput:
+        strategy: str
+        ticker: str
+        event_time: object
+        event_price: float
+        horizon_price: float
+        horizon_date: object
+        forward_return: float
+        benchmark_forward_return: float
+
+    strategies = load_strategies()
+    isolated: list[StrategyBacktestResult] = []
+    artifacts: list = []
+    all_bids: list = []
+    all_pairs = []
+
+    for name, strat in strategies.items():
+        pairs = get_bullish_events_with_outcomes(
+            db, strategy=name, horizon=horizon, since=since,
+        )
+        all_pairs.extend(pairs)
+        result, art = simulate_strategy_with_artifacts(
+            pairs=pairs,
+            strategy=name, display_name=strat.display_name, horizon=horizon,
+            initial_capital=initial_capital, position_size=position_size,
+            max_capital_in_use=max_capital_in_use,
+        )
+        isolated.append(result)
+        artifacts.append(art)
+        for p in pairs:
+            all_bids.append(_BidInput(
+                strategy=name,
+                ticker=p.ticker, event_time=p.event_time,
+                event_price=p.event_price, horizon_price=p.horizon_price,
+                horizon_date=p.horizon_date,
+                forward_return=p.forward_return,
+                benchmark_forward_return=p.benchmark_forward_return,
+            ))
+
+    # SPY appended last for backward compatibility with run_all_backtests
+    spy = simulate_spy_buyhold(pairs=all_pairs, initial_capital=initial_capital)
+    isolated.append(spy)
+
+    # Run shared pool, then patch excess_vs_spy
+    daily_curves = {a.strategy: a.full_equity_curve for a in artifacts}
+    shared = simulate_shared_pool(
+        bids=all_bids,
+        daily_curves=daily_curves,
+        horizon=horizon,
+        initial_capital=initial_capital,
+        position_size=position_size,
+        max_capital_in_use=max_capital_in_use,
+        lookback_days=lookback_days,
+    )
+    shared = replace(
+        shared,
+        excess_vs_spy=shared.cumulative_return - spy.cumulative_return,
+    )
+
+    # Annotate isolated results with Phase 5a hooks (strategy_exposure + capital_bid_score)
+    enriched_isolated: list[StrategyBacktestResult] = []
+    for r in isolated:
+        if r.strategy == "__spy_buyhold__":
+            enriched_isolated.append(r)
+            continue
+        contrib = shared.per_strategy_stats.get(r.strategy)
+        if contrib is None:
+            enriched_isolated.append(r)
+            continue
+        enriched_isolated.append(replace(
+            r,
+            strategy_exposure=contrib.avg_exposure,
+            capital_bid_score=contrib.avg_bid_weight,
+        ))
+
+    return {
+        "isolated": enriched_isolated,
+        "artifacts": artifacts,
+        "shared": shared,
+    }
