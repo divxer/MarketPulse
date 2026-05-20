@@ -107,3 +107,42 @@ def test_run_shared_pool_sizing_policy_provenance(db_session):
     out_off = run_shared_pool_backtest(db_session, horizon=5, sizing_enabled=False)
     assert out_on["shared"].sizing_policy == "vol_target_conviction_v0"
     assert out_off["shared"].sizing_policy == "fixed_v0"
+
+
+def test_run_shared_pool_default_caps_enabled(db_session):
+    """Orchestrator defaults to caps enabled (Phase 5c is default)."""
+    from marketpulse.backtest.simulator import run_shared_pool_backtest
+    _seed(db_session, ticker="AAA", strategy="momentum_breakout")
+    db_session.commit()
+
+    out = run_shared_pool_backtest(db_session, horizon=5)
+    assert out["shared"].sector_caps_enabled is True
+    assert out["shared"].correlation_caps_enabled is True
+    assert out["shared"].risk_policy == "cap40_corr06_enforced_v0"
+
+
+def test_run_shared_pool_caps_disabled_via_kwargs(db_session):
+    """Both caps disabled → risk_policy = 'caps_disabled_v0'."""
+    from marketpulse.backtest.simulator import run_shared_pool_backtest
+    _seed(db_session, ticker="AAA", strategy="momentum_breakout")
+    db_session.commit()
+
+    out = run_shared_pool_backtest(
+        db_session, horizon=5,
+        sector_caps_enabled=False,
+        correlation_caps_enabled=False,
+    )
+    assert out["shared"].sector_caps_enabled is False
+    assert out["shared"].correlation_caps_enabled is False
+    assert out["shared"].risk_policy == "caps_disabled_v0"
+
+
+def test_run_shared_pool_sector_breakdown_populated(db_session):
+    """sector_breakdown field is a dict, even when empty."""
+    from marketpulse.backtest.simulator import run_shared_pool_backtest
+    _seed(db_session, ticker="AAA", strategy="momentum_breakout")
+    db_session.commit()
+
+    out = run_shared_pool_backtest(db_session, horizon=5)
+    assert isinstance(out["shared"].sector_breakdown, dict)
+    assert isinstance(out["shared"].max_sector_exposure_by_sector, dict)
