@@ -35,7 +35,7 @@ Both are gated by independent toggle flags (`sector_caps_enabled`, `correlation_
 | 5 | **Correlation cap**: ρ ≥ 0.6 Pearson threshold, 40% × `pool_capital`, "neighbor sum" algorithm (no transitive clustering) | LOCKED |
 | 6 | **New BidRecord outcomes**: `sector_cap_full`, `correlation_cap_full` (parallel to existing `cap_full`) | LOCKED |
 | 7 | **Mode scope**: shared-pool mode only. Per-strategy mode is unaffected | LOCKED |
-| 8 | **Correlation data**: 60d daily Pearson on `price_cache` returns (identical window to Phase 5b `rolling_sigma` / `rolling_alpha`) | LOCKED |
+| 8 | **Correlation data**: 60d daily Pearson, **window duration identical** to Phase 5b `rolling_sigma`/`rolling_alpha` (60 days), but **data source is `price_cache`** (raw OHLC close prices per ticker), not the per-strategy equity curves Phase 5b uses for σ/α. Different denominators — see §5 for the rationale | LOCKED |
 | 9 | **No new DB tables, no Alembic migration**. Sector cache lives in `data/sector_cache.json`; correlation results are LRU-cached in-memory per backtest run | LOCKED |
 
 ### Derived locks (not user-decided but spec-locked)
@@ -188,6 +188,23 @@ overrides:
 ### Public API (`marketpulse/backtest/correlation.py`)
 
 ```python
+from typing import Protocol
+
+class PriceProvider(Protocol):
+    """Read-only price interface consumed by correlation calculations.
+
+    Implementations: the simulator's normal yfinance-backed price_cache wrapper
+    in production; a deterministic in-memory dict-backed fake in tests.
+    """
+    def get_daily_closes(
+        self,
+        ticker: str,
+        start: date,
+        end: date,
+    ) -> list[tuple[date, float]]:
+        """Return (date, close) tuples for ticker, dates in [start, end). Sorted ascending."""
+
+
 def compute_pairwise_correlation(
     ticker_a: str,
     ticker_b: str,
@@ -203,8 +220,15 @@ def compute_pairwise_correlation(
       - Either ticker missing from price_cache for the window
       - Overlapping days < min_overlap (cold-start protection)
       - Computed corr is NaN (zero variance in either series)
+      - ticker_a == ticker_b (self-pair short-circuit; see contract below)
 
-    Causality: window is identical to rolling_sigma / rolling_alpha (Phase 5b lock).
+    Contract:
+      - Causality: window is [as_of - lookback_days, as_of); outcomes after
+        as_of are excluded. Same window duration as Phase 5b rolling_sigma.
+      - Data source: PriceProvider.get_daily_closes (price_cache mirror),
+        NOT per-strategy equity curves.
+      - Self-pair: ticker_a == ticker_b returns None (NOT 1.0). The caller
+        does not want a position to be its own "neighbor".
     """
 
 
@@ -216,15 +240,29 @@ def find_correlation_neighbors(
     threshold: float = 0.6,
     lookback_days: int = 60,
     price_provider: PriceProvider,
-) -> tuple[list[str], dict[str, float | None]]:
+) -> tuple[list[str], tuple[tuple[str, float], ...]]:
     """For a candidate bid, return:
       - neighbors: list of open-position tickers whose pairwise corr >= threshold
-      - diagnostics: dict[ticker -> corr value or None] for ALL pairs checked
+      - diagnostics: tuple of (ticker, corr_value) pairs for ALL pairs checked
+        where corr is not None. Sorted by corr descending. Hashable, frozen-safe
+        for embedding in BidRecord.
 
-    The diagnostics map is preserved for bid history display:
+    Self-pair exclusion: if candidate_ticker appears in open_position_tickers
+    (e.g., two strategies bidding the same ticker on adjacent days, or a stale
+    position from yesterday), it is filtered out of the input list before
+    pairing. Self-correlation is never a meaningful signal.
+
+    The diagnostics tuple is preserved by the simulator and embedded in the
+    BidRecord.blocked_by_correlation_with field for tooltip rendering:
     'blocked because AAPL ρ=0.72, GOOGL ρ=0.68 already at 38% of pool'.
     """
 ```
+
+### Why `price_cache` not equity curves for correlation data
+
+Phase 5b's `rolling_sigma`/`rolling_alpha` consume each strategy's per-strategy equity curve (the Phase 4 isolated-pool curve). That curve embeds both strategy timing and position sizing, which is fine for measuring **strategy-level** σ/α.
+
+Correlation, by contrast, is a **ticker-level** property. We want "how correlated are AAPL and GOOGL price moves?" — not "how correlated are AAPL-bid trades and GOOGL-bid trades after strategy filtering?" The raw close-to-close return series from `price_cache` is the right denominator. Two completely separate strategies that happen to trade highly correlated tickers should both feel the correlation cap; this only happens if we measure at ticker level.
 
 ### Algorithm (neighbor sum)
 
@@ -240,7 +278,14 @@ This is **not** transitive. If A↔B has ρ=0.7 and B↔C has ρ=0.7 but A↔C h
 - Candidate C finds neighbors {B} (not A)
 - Each cluster is computed independently per candidate
 
-The simplification avoids transitive closure complexity. The cost: A and C might both be opened even though they share B as a common driver. In practice the cap on (A+B) and (B+C) separately already constrains exposure within ~2x of the cluster cap.
+The simplification avoids transitive closure complexity. The cost: A and C might both be opened even though they share B as a common driver.
+
+**Worked example of the 2× bound.** Cap = $4000, B already open at $3000:
+
+- Candidate A: cluster={A,B}; A_size + 3000 must ≤ 4000 → A_size ≤ 1000
+- Candidate C (later same day): cluster={C,B}; C_size + 3000 must ≤ 4000 → C_size ≤ 1000
+
+After both fire: total in {A,B,C} = A_size + 3000 + C_size ≤ 1000 + 3000 + 1000 = 5000 (peak), or 5/4 = **1.25× the cluster cap**, not 2×. The reviewer's earlier "~2× upper bound" was conservative; in practice it's lower because each pairwise check binds the size of the new entrant tightly. Worst case is when the shared driver (B) is small relative to A+C, which yields the 2× ceiling.
 
 ### Cold-start (failsafe-open)
 
@@ -271,6 +316,15 @@ This means the first ~30 trading days of any new ticker effectively bypass corre
 ## 6. Daily Loop — ALLOCATE Step Internal Flow
 
 The Phase 5b 8-step loop is unchanged. Inside ALLOCATE:
+
+### Interaction with Phase 5b SIZE COMPUTE step
+
+Phase 5b's SIZE COMPUTE step (positioned between WEIGHT and DEDUP) filters out strategies whose `compute_position_sizes` returns None — those bids exit with outcome `size_too_small` and **never reach ALLOCATE**. Consequently:
+
+- `size_too_small` bids are **not** subject to sector cap or correlation cap
+- The cap pre-warm loop (`sector_by_ticker` and `sector_exposure` dicts) skips strategies that did not survive SIZE COMPUTE
+- `position_sizes[b.strategy]` is guaranteed to be a real float (not None) for every bid in `sorted_winners` — no KeyError risk
+- In the bid history table, a strategy can appear with at most one of `{size_too_small, sector_cap_full, correlation_cap_full, cap_full, cash_short, won, dedup_loser}` per (date, ticker) — the outcomes are mutually exclusive per bid
 
 ```python
 # ─── ALLOCATE (capital + sector + correlation constrained) ───
@@ -318,7 +372,7 @@ for b in sorted_winners:
     # ── NEW: Phase 5c-2 correlation cap ──
     if correlation_caps_enabled:
         open_tickers = [p.ticker for p in open_positions]
-        neighbors, _ = find_correlation_neighbors(
+        neighbors, corr_diagnostics = find_correlation_neighbors(
             b.ticker, open_tickers,
             as_of=d, threshold=correlation_threshold,
             price_provider=price_provider,
@@ -333,7 +387,7 @@ for b in sorted_winners:
                 outcome="correlation_cap_full",
                 winner=None,
                 position_size=requested_size,
-                blocked_by_correlation_with=tuple(neighbors),
+                blocked_by_correlation_with=corr_diagnostics,
             ))
             n_correlation_cap_skipped_by_strategy[b.strategy] = (
                 n_correlation_cap_skipped_by_strategy.get(b.strategy, 0) + 1
@@ -355,12 +409,22 @@ for b in sorted_winners:
     ))
 ```
 
-### Order of checks (cheapest first)
+### Order of checks (cheapest first — deliberate trade-off)
 
 1. **cap_full** — O(1) sum + compare against constant
 2. **cash_short** — O(1) compare
 3. **sector_cap_full** — O(1) dict lookup
 4. **correlation_cap_full** — O(N) pairwise corr (with LRU cache, mostly O(1) on hit)
+
+This is a **deliberate priority order** that trades diagnostic clarity for runtime cost. Consider: a $4000 candidate, pool already at $7000 with $6000 of that in Technology sector. cap_full fires first (`$7k + $4k > $10k`). The bid history shows `cap_full`, even though the deeper signal is "Tech is at 60% of pool, well past the 40% cap."
+
+**Why this is acceptable for v0**:
+- `cap_full` and `cash_short` are nearly free; running them first costs ~zero
+- When the pool is below the global cap, `cap_full` cannot fire, so sector/correlation diagnoses get full visibility
+- A bid that's `cap_full` AND would also trigger `sector_cap_full` is a "double squeeze" — both signals would be useful but the pool itself is the primary constraint
+- An advanced UI can render a tooltip like "blocked by cap_full; would also have hit sector cap (Tech at 60%)" by re-checking the sector dict at bid_history render time. Deferred to plan if needed
+
+**Future option**: reorder to `sector → correlation → cap → cash` for richer diagnostics, paying ~10× the per-bid cost. Not committed to v0; flagged in the open questions.
 
 ### Sector exposure tracker invariants
 
@@ -394,8 +458,10 @@ class BidRecord:
     winner: str | None
     position_size: float
     # NEW Phase 5c diagnostic fields (default empty; populated only for matching outcome)
-    blocked_by_sector: str | None = None              # only for "sector_cap_full"
-    blocked_by_correlation_with: tuple[str, ...] = () # only for "correlation_cap_full"
+    blocked_by_sector: str | None = None                                 # only for "sector_cap_full"
+    blocked_by_correlation_with: tuple[tuple[str, float], ...] = ()      # only for "correlation_cap_full"
+                                                                          # each pair = (ticker, corr_value)
+                                                                          # sorted by corr desc
 ```
 
 ### `StrategyContribution`
@@ -476,9 +542,15 @@ class PortfolioBacktestResult:
 ### Field semantics
 
 - **`blocked_by_sector`**: the sector string that was already at-or-near cap when this bid was rejected. Format matches `get_sector()` output (e.g., `"Technology"`, `"leveraged_qqq"`, `"unknown"`)
-- **`blocked_by_correlation_with`**: tuple of ticker symbols (from `open_positions`) whose pairwise ρ ≥ 0.6 with the candidate. Stored as tuple (immutable, dataclass-frozen-compatible)
-- **`max_sector_exposure`**: peak single-day single-sector fraction. Computed daily and `max()`-reduced over the backtest window
-- **`sector_breakdown`**: time-averaged. Each sector's value = mean over all days of `Σ(positions in sector) / pool_capital`. Sums to ≤ 1.0 (typically less, since positions don't fill the pool every day)
+- **`blocked_by_correlation_with`**: tuple of `(ticker, corr_value)` pairs from `open_positions` whose pairwise ρ ≥ 0.6 with the candidate. Sorted by corr descending. Stored as tuple-of-tuples (immutable, frozen-dataclass-safe, hashable). Example: `(("AAPL", 0.72), ("GOOGL", 0.68))`
+- **`max_sector_exposure`**: peak single-day single-sector fraction. Computed daily as `max over sectors of (Σ positions in sector / pool_capital)` and `max()`-reduced over the backtest window
+- **`sector_breakdown`**: time-averaged fractional exposure per sector. **Concrete semantics**:
+  - Computed during finalization (not maintained as running state)
+  - Iterate every calendar day in the backtest window (including days with empty pool)
+  - For each day, for each open position at end-of-day, contribute `position_size / pool_capital` to that position's sector
+  - Average over **the count of calendar days in the window** (denominator is fixed, NOT "days with positions"). This deliberately includes empty-pool days, so the average reflects deployment intensity, not just allocation mix
+  - Result: `dict[sector_str, float]` where each value is in `[0.0, 1.0]`. The sum of values is `≤ avg_capital_utilization ≤ 1.0` (proven by linearity of expectation over the same calendar days)
+  - Empty backtest (no positions ever opened) → `{}` (empty dict)
 - **`max_cluster_exposure`**: similar to `max_sector_exposure` but computed at the candidate-cluster level. Tracked only when correlation caps are enabled
 - **`n_correlation_cap_events`**: simple counter, used for hero dashboard or sanity check
 
@@ -609,7 +681,6 @@ The 5 existing KPIs (Pool Sharpe / Cum Ret / MaxDD / vs SPY / N dedup) are not t
 | `sector_overrides.yaml` malformed or typo'd | Schema validation at load: each value must be non-empty str. Failure logs ERROR and returns `{}` (no overrides). Never crashes simulator |
 | Sector cap too tight blocks too many bids | Telemetry `max_sector_exposure` + `n_sector_cap_skipped` per strategy expose this. Strategy table tooltip shows the breakdown. User can lower threshold or disable via toggle |
 | Correlation matrix degenerate (zero variance in one ticker) | `compute_pairwise_correlation` returns None. `find_correlation_neighbors` treats as not-a-neighbor. Equivalent to failsafe-open |
-| Cap fields leak into Phase 4 per-strategy result via shared dataclass | Phase 4 uses `StrategyBacktestResult`, not `PortfolioBacktestResult`. Different dataclasses, no contamination |
 | Phase 5b `position_size` semantics change | Unchanged. `sector_cap_full` and `correlation_cap_full` use the REQUESTED size (same as `cap_full`, `cash_short`) — preserves diagnostic value |
 | PR review pattern: vacuous `if X: assert Y` tests | Spec requires for every cap-related test: **assert precondition first** (e.g., `assert sector_exposure_before > 3000`), **then assert outcome** (`assert b.outcome == "sector_cap_full"`). No `if X: assert Y` style allowed |
 | LRU cache poisoning between tests | `compute_pairwise_correlation` LRU is at module level. Test fixtures clear it via `compute_pairwise_correlation.cache_clear()` in setup |
@@ -647,19 +718,100 @@ Some Phase 5a/5b invariant tests use synthetic curves that may trigger sector or
 - `test_shared_pool_greedy_alloc_respects_max_cap` (Phase 5a) — tests greedy allocation order; sector cap could reorder which bids land
 - `test_shared_pool_high_size_strategy_blocks_more_small_bids` (Phase 5b) — tests `cap_full` ordering; without isolating the cap dimension, sector cap might fire first
 
-The plan will list the exact test files and the toggle additions in a dedicated migration task.
+**Group C — Phase 5b telemetry tests requiring audit:**
+
+These tests assert specific values for `max_strategy_exposure`, `hhi_concentration`, `avg_position_size`, or `n_size_too_small_skipped`. Default-on sector/correlation caps could pre-empt bids that those tests expect to land, changing the asserted values:
+
+- `test_shared_pool_max_strategy_exposure_computed` — single-strategy single-sector setup; should be safe but audit for cluster cap
+- `test_shared_pool_hhi_concentration_computed` — two-strategy two-ticker setup; if both tickers share a sector under yfinance default, sector cap could fire. Audit needed
+- `test_shared_pool_avg_position_size_in_contribution` — 3 bids same strategy same ticker (via stub fixture); if AAPL is "Technology" and all 3 bids open, $3k Tech is fine. But if bids increase to 5+, sector cap could fire. Audit
+- `test_shared_pool_n_size_too_small_in_contribution` — designed to fail at SIZE COMPUTE, so caps never fire. Safe by construction
+
+The plan will list the exact test files and the toggle additions in a dedicated migration task. The audit pattern: run each test with default-on caps; if it fails, either (a) add the toggle flags to the test, or (b) verify the new behavior is correct and update the expected values.
 
 ---
 
 ## 11. Open Questions for Plan-Writing Phase
 
-These should be resolved during plan-writing, not in the spec:
+These have specific implementation flexibility but do not change semantics. The plan resolves each with a concrete choice:
 
-- Exact `_compute_sector_breakdown` daily collection: per-day snapshot dict, then mean at finalize? Or running EMA?
-- Where to inject `price_provider` into the simulator signature — through `simulate_shared_pool` kwarg or via DI?
-- Test fixture: a deterministic ticker→sector lookup function for unit tests (avoids real yfinance calls)
-- CSS: does the existing `.mp-chip--down` style work for both new outcomes, or should `correlation_cap_full` get its own visual treatment?
-- Hero template — should the new 3rd paragraph hide entirely when both caps are disabled, or show a neutral "caps disabled" line?
+- **`price_provider` injection point**: through `simulate_shared_pool(price_provider=...)` kwarg with a default of the existing `data_service.price_cache` wrapper, OR via attribute on the simulator class. Plan picks one
+- **Test fixture for sector lookup**: a deterministic `FakeSectorProvider` in `tests/conftest.py` that monkey-patches `get_sector` to avoid real yfinance calls. Plan specifies fixture name and scope
+- **Test fixture for correlation LRU clearing**: `compute_pairwise_correlation.cache_clear()` should run at module-scope teardown OR in a `pytest.fixture(autouse=True)` in the correlation test file. Plan picks one
+- **CSS for `correlation_cap_full` chip**: reuse `.mp-chip--down` (red tint) OR add a new `.mp-chip--corr` (e.g., purple/desaturated). Plan picks based on visual hierarchy preference
+- **Hero template when both caps disabled**: hide the 3rd paragraph entirely, OR render a neutral line "caps disabled — running unconstrained shared-pool simulation". Plan picks based on cumulative UI density
+
+### Resolved (no longer open)
+
+- `_compute_sector_breakdown` semantics — resolved in §7 (per-day snapshot, denominator = total calendar days, sum ≤ `avg_capital_utilization`)
+- Self-pair handling in correlation — resolved in §5 (`compute_pairwise_correlation` returns None when `a == b`; `find_correlation_neighbors` filters self before pairing)
+- Diagnostic-dict plumbing — resolved in §5 / §7 (`tuple[tuple[str, float], ...]` embedded in `BidRecord.blocked_by_correlation_with`)
+- `size_too_small` × cap interaction — resolved in §6 (size_too_small bids exit before ALLOCATE, never subject to caps)
+- Cap-check order — resolved in §6 (cheapest-first, deliberate trade-off documented)
+
+---
+
+## 12. Required Test Scenarios
+
+Each enumerated scenario MUST land as at least one test in the plan. Test names are illustrative; plan can rename. Pattern requirement: **assert preconditions explicitly, then assert outcome.** No `if X: assert Y` style.
+
+### `tests/unit/test_backtest_sector.py` (sector.py — ~10 tests)
+
+1. `test_get_sector_returns_yfinance_sector_for_normal_equity` — AAPL via stubbed yfinance returns `"Technology"`. Assert exact string match
+2. `test_get_sector_override_wins_over_yfinance` — load YAML with `TQQQ: leveraged_qqq`; yfinance returns `"Financial Services"`. Assert override wins
+3. `test_get_sector_returns_unknown_when_yfinance_fails` — yfinance stub raises; `get_sector` returns `"unknown"`. Assert string match + log captured WARNING
+4. `test_get_sector_returns_unknown_when_yfinance_returns_none_sector` — yfinance returns `{"sector": None}`. Assert `"unknown"`
+5. `test_get_sector_caches_within_process` — call `get_sector("AAPL")` twice with a stub that increments a call counter. Assert counter == 1
+6. `test_load_sector_overrides_handles_missing_file` — file absent. Assert returns `{}`, no exception
+7. `test_load_sector_overrides_rejects_non_string_values` — YAML `TQQQ: 42`. Assert returns `{}` and logs ERROR (validation rejection)
+8. `test_load_sector_overrides_strips_empty_strings` — YAML `TQQQ: ""`. Assert that entry filtered out (still returns `{}` for that key, falls through to yfinance)
+9. `test_sector_cache_json_round_trips_via_save_and_load` — save then load. Assert dict equality
+10. `test_sector_cache_json_handles_corrupt_file` — write invalid JSON; load. Assert returns `{}`, no exception, logs WARNING
+
+### `tests/unit/test_backtest_correlation.py` (correlation.py — ~10 tests)
+
+1. `test_pairwise_correlation_perfectly_correlated_series_returns_1` — two identical price series, `as_of` at end. Assert corr > 0.999
+2. `test_pairwise_correlation_inverse_series_returns_negative_1` — one series is the reverse of the other. Assert corr < -0.999
+3. `test_pairwise_correlation_returns_none_below_min_overlap` — 10 days of data, min_overlap=30. Assert returns None
+4. `test_pairwise_correlation_returns_none_for_self_pair` — `a == b == "AAPL"`. Assert returns None (NOT 1.0). Critical: self-pair contract
+5. `test_pairwise_correlation_returns_none_for_zero_variance_series` — one ticker has flat prices. Assert returns None
+6. `test_pairwise_correlation_excludes_dates_at_or_after_as_of` — synthetic data extends past `as_of`; assert returned corr uses only pre-as_of data
+7. `test_find_correlation_neighbors_returns_only_above_threshold` — 3 tickers with ρ=0.7, 0.5, 0.4 to candidate. Assert only first is in neighbors list
+8. `test_find_correlation_neighbors_filters_self_from_input` — pass `open_position_tickers=["AAPL", "GOOGL"]` with `candidate="AAPL"`. Assert AAPL filtered out of pairing
+9. `test_find_correlation_neighbors_diagnostics_sorted_desc` — pairs with ρ=0.5, 0.8, 0.6 (none above threshold for simplicity). Assert diagnostics tuple sorted: `(("X", 0.8), ("Y", 0.6), ("Z", 0.5))`
+10. `test_find_correlation_neighbors_cold_start_returns_empty` — `price_provider` has 10 days of data, min_overlap=30. Assert returns `([], ())` — fail-safe-open
+
+### `tests/unit/test_backtest_portfolio_simulator.py` (ALLOCATE cap enforcement — ~10 new tests)
+
+Each test pre-loads 30-60 days of price data into a fake `PriceProvider`, then asserts a specific outcome:
+
+1. `test_sector_cap_fires_at_boundary` — pool $10k, $3000 in Tech, $1000 Tech candidate. **Precondition assert**: sector_exposure["Technology"] == 3000. **Outcome assert**: candidate outcome == "won" AND new exposure == 4000 (exactly at boundary, NOT rejected)
+2. `test_sector_cap_fires_when_crossed` — pool $10k, $3500 in Tech, $1000 Tech candidate. Precondition: 3500. Outcome: "sector_cap_full" AND blocked_by_sector == "Technology"
+3. `test_sector_cap_does_not_fire_below_threshold` — pool $10k, $2000 Tech, $1500 Tech candidate. Outcome: "won". Sector exposure now 3500
+4. `test_sector_cap_unknown_sector_obeys_same_cap` — ticker with no yfinance entry → sector "unknown"; 5 unknown bids of $1000 each, 4 should land, 5th blocked
+5. `test_correlation_cap_fires_when_cluster_exceeds` — AAPL+GOOGL ρ=0.7; pool already has $3000 AAPL, $1500 GOOGL candidate. Cluster = AAPL+GOOGL = 4500 > 4000. Outcome: "correlation_cap_full" AND blocked_by_correlation_with == `(("AAPL", ~0.7),)`
+6. `test_correlation_cap_does_not_fire_below_threshold` — AAPL+TNA ρ=0.4 (below 0.6); pool has $3000 AAPL, $1500 TNA candidate. Outcome: "won" (no neighbor)
+7. `test_correlation_cap_cold_start_bypassed` — TNA has only 10 days of data, min_overlap=30. Pool has $3000 AAPL. TNA candidate. Outcome: "won" (correlation returns None → no neighbor → no cap)
+8. `test_caps_disabled_via_toggle_bypassed` — set `sector_caps_enabled=False, correlation_caps_enabled=False`. Pool $3500 Tech, $1000 Tech candidate. Outcome: "won" (caps inactive)
+9. `test_size_too_small_bids_not_subject_to_caps` — strategy with raw size = $50 < min_position. Strategy → size_too_small at SIZE COMPUTE. Pool $4000 Tech already, candidate is Tech ticker. Outcome: "size_too_small" (not "sector_cap_full"). Precondition: candidate exits SIZE COMPUTE before ALLOCATE
+10. `test_cap_full_fires_before_sector_cap_when_both_apply` — pool at $7000, $4000 Tech, $4000 Tech candidate. Both `cap_full` ($7+$4>$10) and `sector_cap_full` ($4+$4>$4) would apply. Outcome: "cap_full" (order-of-checks lock)
+
+### `tests/integration/test_backtest_shared_pool.py` (orchestrator — ~3 new tests)
+
+1. `test_run_shared_pool_default_caps_enabled` — run via `run_shared_pool_backtest()` with default args; assert `result.sector_caps_enabled == True` and `result.sector_cap_policy == "uniform_40pct_v0"`
+2. `test_run_shared_pool_caps_disabled_via_kwargs` — pass `sector_caps_enabled=False, correlation_caps_enabled=False`; assert result fields reflect
+3. `test_run_shared_pool_sector_breakdown_populated_when_caps_active` — multi-strategy multi-ticker fixture; assert `sector_breakdown` is non-empty dict and sums match `avg_capital_utilization` within tolerance
+
+### `tests/web/test_lab_backtest_modes.py` (UI assertions — ~2 new tests)
+
+1. `test_lab_backtest_shared_mode_renders_sector_breakdown_card` — hits `/lab/backtest?mode=shared-pool`; assert `"Sector 暴露分布"` text appears in response
+2. `test_lab_backtest_shared_mode_renders_cap_policy_in_hero` — hits same; assert `"sector_cap_policy=uniform_40pct_v0"` appears in response
+
+### `tests/unit/test_backtest_types_phase5a.py` (type extensions — ~3 new tests)
+
+1. `test_bid_record_sector_cap_full_outcome_literal` — `BidRecord(..., outcome="sector_cap_full", blocked_by_sector="Tech")`. Assert outcome string + blocked_by_sector value
+2. `test_bid_record_correlation_cap_full_with_diagnostics` — `BidRecord(..., outcome="correlation_cap_full", blocked_by_correlation_with=(("AAPL", 0.72),))`. Assert outcome + diagnostic tuple structure
+3. `test_portfolio_result_default_sector_cap_policy` — construct `PortfolioBacktestResult()` with all required args; assert `sector_cap_policy == "uniform_40pct_v0"` and `correlation_cap_policy == "neighbor_sum_rho06_40pct_v0"`
 
 ---
 
