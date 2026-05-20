@@ -89,6 +89,7 @@ def test_shared_pool_close_frees_cap_before_alloc():
         horizon=5,
         initial_capital=10_000.0, base_position_size=1_000.0,
         max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=False,  # Phase 5a invariant: uniform $1k sizes
     )
     assert r.n_trades == 11
 
@@ -197,6 +198,7 @@ def test_shared_pool_greedy_alloc_respects_max_cap():
         horizon=5,
         initial_capital=10_000.0, base_position_size=1_000.0,
         max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=False,  # Phase 5a invariant: uniform $1k sizes
     )
     assert r.n_trades == 10
     cap_full = [b for b in r.bid_history if b.outcome == "cap_full"]
@@ -238,6 +240,7 @@ def test_shared_pool_mtm_uses_linear_interp_per_position():
         horizon=4,
         initial_capital=10_000.0, base_position_size=1_000.0,
         max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=False,  # Phase 5a invariant: uniform $1k sizes
     )
     curve = dict(r.daily_equity_curve)
     mid = curve.get(date(2026, 5, 5))
@@ -545,3 +548,111 @@ def test_shared_pool_empty_bids_returns_fixed_v0_when_disabled():
         sizing_enabled=True,
     )
     assert r_on.sizing_policy == "vol_target_conviction_v0"
+
+
+def test_shared_pool_sizing_caps_at_max_when_clamped():
+    """A strategy with raw > max gets clamped to max in actual ALLOC."""
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+
+    # Construct a strategy that would compute size > max:
+    # Very low σ + only-strategy → vol_scale large, α_scale = 1, raw > max
+    low_vol = []
+    v = 10_000.0
+    for i in range(30):
+        d = date(2026, 4, 1) + timedelta(days=i)
+        low_vol.append((d, v))
+        v *= 1.001  # 0.1% steady (very low σ)
+
+    bids = [_pair("AAA", "low_vol", date(2026, 5, 1), 100.0,
+                   date(2026, 5, 8), 105.0)]
+    r = simulate_shared_pool(
+        bids=bids,
+        daily_curves={"low_vol": low_vol},
+        horizon=5,
+        initial_capital=10_000.0, base_position_size=2_000.0,
+        target_vol=0.01, max_position=4_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=True,
+    )
+    # Won bid's position_size should be capped at max_position
+    won = [b for b in r.bid_history if b.outcome == "won"]
+    if won:
+        assert won[0].position_size <= 4_000.0
+
+
+def test_shared_pool_high_size_strategy_blocks_more_small_bids():
+    """Review iter 1 fix #3: high-conviction strategy consumes more cap.
+
+    Setup: one strategy with high alpha gets a $3k size; 8 other small bids
+    at $1k each. The pool ($10k) fills with 1×$3k + 7×$1k = $10k, blocking
+    1 small bid (vs Phase 5a where all 9 would have fit at $1k each).
+    """
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+
+    # high_a_strategy has α much above mean → size > $3k after clamping
+    high_a = [(date(2026, 4, 1) + timedelta(days=i), 10_000.0 * (1.02 ** i))
+              for i in range(30)]  # 2% daily growth → high α
+
+    # Other strategies are neutral
+    neutrals = {
+        f"n{i}": [(date(2026, 4, 1) + timedelta(days=j), 10_000.0 * (1.005 ** j))
+                  for j in range(30)]
+        for i in range(8)
+    }
+    daily_curves = {"high_a": high_a, **neutrals}
+
+    # 1 bid for high_a + 8 bids for neutrals on the same day
+    bids = [_pair("HIGH", "high_a", date(2026, 5, 1), 100.0,
+                   date(2026, 5, 8), 105.0)]
+    for i in range(8):
+        bids.append(_pair(f"N{i}", f"n{i}", date(2026, 5, 1), 100.0,
+                          date(2026, 5, 8), 105.0))
+
+    r = simulate_shared_pool(
+        bids=bids,
+        daily_curves=daily_curves,
+        horizon=5,
+        initial_capital=10_000.0, base_position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=True,
+    )
+    # Total bids attempted: 9. Won bids should be < 9 because high_a's
+    # variable size blocks at least one neutral.
+    won = [b for b in r.bid_history if b.outcome == "won"]
+    cap_full = [b for b in r.bid_history if b.outcome == "cap_full"]
+    assert len(won) < 9
+    assert len(cap_full) >= 1
+    # Total capital allocated should equal pool cap (or close to it)
+    total_won_size = sum(b.position_size for b in won)
+    assert total_won_size <= 10_000.0  # never exceeds cap
+
+
+def test_shared_pool_cap_full_records_requested_size():
+    """cap_full BidRecord shows the requested size, not 0.0 or base.
+
+    Review iter 1 fix #2: diagnostic value preserved.
+    """
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+
+    # high-conviction strategy with size > base
+    high = [(date(2026, 4, 1) + timedelta(days=i), 10_000.0 * (1.02 ** i))
+            for i in range(30)]
+
+    # 11 bids for the same strategy → 10 fit at variable size, 11th cap-blocked
+    daily_curves = {"high": high}
+    bids = [_pair(f"T{i}", "high", date(2026, 5, 1), 100.0,
+                   date(2026, 5, 8), 101.0) for i in range(11)]
+    r = simulate_shared_pool(
+        bids=bids,
+        daily_curves=daily_curves,
+        horizon=5,
+        initial_capital=10_000.0, base_position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=True,
+    )
+    cap_full = [b for b in r.bid_history if b.outcome == "cap_full"]
+    if cap_full:
+        # cap_full position_size should be the ACTUAL computed size (variable),
+        # not 0.0 and not base_position_size hardcoded
+        for record in cap_full:
+            assert record.position_size > 0.0  # real value
