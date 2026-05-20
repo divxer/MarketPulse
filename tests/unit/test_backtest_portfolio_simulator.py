@@ -225,3 +225,96 @@ def test_equal_weight_tiebreak_uses_event_time_then_alpha():
     won = [b for b in r.bid_history if b.outcome == "won"]
     assert len(won) == 1
     assert won[0].strategy == "momentum_breakout"
+
+
+def test_shared_pool_mtm_uses_linear_interp_per_position():
+    """Mid-period MTM reflects fractional gain (linear interpolation)."""
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+    bids = [_pair("M", "momentum_breakout", date(2026, 5, 1), 100.0,
+                   date(2026, 5, 7), 110.0)]
+    r = simulate_shared_pool(
+        bids=bids,
+        daily_curves={"momentum_breakout": _curve()},
+        horizon=4,
+        initial_capital=10_000.0, position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+    )
+    curve = dict(r.daily_equity_curve)
+    mid = curve.get(date(2026, 5, 5))
+    assert mid is not None
+    assert mid == pytest.approx(10_050.0, abs=1.0)
+
+
+def test_shared_pool_no_signal_day_still_records_equity():
+    """A day with no bids still records equity (MTM-only update)."""
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+    bids = [_pair("X", "momentum_breakout", date(2026, 5, 1), 100.0,
+                   date(2026, 5, 8), 105.0)]
+    r = simulate_shared_pool(
+        bids=bids,
+        daily_curves={"momentum_breakout": _curve()},
+        horizon=5,
+        initial_capital=10_000.0, position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+    )
+    curve_dates = [d for d, _ in r.daily_equity_curve]
+    assert date(2026, 5, 4) in curve_dates
+
+
+def test_shared_pool_contribution_pnl_sums_to_pool_pnl():
+    """Σ per_strategy_stats[s].contribution_pnl == pool.cumulative_return * initial."""
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+    bids = [
+        _pair("A", "momentum_breakout", date(2026, 5, 1), 100.0, date(2026, 5, 8), 110.0),
+        _pair("B", "news_event", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0),
+    ]
+    r = simulate_shared_pool(
+        bids=bids,
+        daily_curves={
+            "momentum_breakout": _curve(daily_return=0.01, n_days=30),
+            "news_event": _curve(daily_return=0.005, n_days=30),
+        },
+        horizon=5,
+        initial_capital=10_000.0, position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+    )
+    total_contrib = sum(c.contribution_pnl for c in r.per_strategy_stats.values())
+    pool_pnl = r.cumulative_return * 10_000.0
+    assert abs(total_contrib - pool_pnl) < 1.0
+
+
+def test_shared_pool_bid_records_capped_at_render_layer():
+    """bid_history has at most 100 entries (last-100 slice)."""
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+    bids = []
+    base = date(2026, 1, 1)
+    for i in range(150):
+        bids.append(_pair(
+            f"T{i}", "momentum_breakout",
+            base + timedelta(days=i % 90), 100.0,
+            base + timedelta(days=(i % 90) + 5), 101.0,
+        ))
+    r = simulate_shared_pool(
+        bids=bids,
+        daily_curves={"momentum_breakout": _curve(n_days=200)},
+        horizon=5,
+        initial_capital=10_000.0, position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+    )
+    assert len(r.bid_history) <= 100
+
+
+def test_shared_pool_avg_capital_utilization_correct():
+    """avg_capital_utilization = mean(capital_in_use / max_cap) across all days."""
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+    bids = [_pair("A", "momentum_breakout", date(2026, 5, 1), 100.0,
+                   date(2026, 5, 5), 105.0)]
+    r = simulate_shared_pool(
+        bids=bids,
+        daily_curves={"momentum_breakout": _curve()},
+        horizon=4,
+        initial_capital=10_000.0, position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+    )
+    assert 0.0 <= r.avg_capital_utilization <= 1.0
+    assert r.avg_capital_utilization > 0

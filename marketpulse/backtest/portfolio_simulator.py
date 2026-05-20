@@ -12,16 +12,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-from marketpulse.backtest.metrics import compute_metrics  # noqa: F401  (used in T6)
+from marketpulse.backtest.metrics import compute_metrics
 from marketpulse.backtest.sharpe import compute_bid_weights
 from marketpulse.backtest.trading_calendar import (
     build_calendar,
-    elapsed_fraction,  # noqa: F401  (used in T6 MTM)
+    elapsed_fraction,
 )
 from marketpulse.backtest.types import (
     BidRecord,
     PortfolioBacktestResult,
-    StrategyContribution,  # noqa: F401  (used in T6 finalization)
+    StrategyContribution,
 )
 from marketpulse.logging import get_logger
 
@@ -217,30 +217,98 @@ def simulate_shared_pool(
                 outcome="won", winner=None,
             ))
 
-        # ─── MTM, RECORD — Task 6 fills proper MTM. Stub: cash + raw positions. ───
-        equity_curve.append((d, cash + sum(p.position_size for p in open_positions)))
+        # ─── MTM ─── (linear interpolation per spec § 2 + Phase 4)
+        positions_value = 0.0
+        for pos in open_positions:
+            if pos.entry_date == d:
+                # Newly opened: no same-day MTM (matches Phase 4 invariant)
+                positions_value += pos.position_size
+            else:
+                fraction = elapsed_fraction(
+                    calendar, entry=pos.entry_date,
+                    horizon=pos.horizon_date, current=d,
+                )
+                est_price = pos.entry_price + (
+                    pos.horizon_price - pos.entry_price
+                ) * fraction
+                positions_value += pos.position_size * (est_price / pos.entry_price)
+
+        # ─── RECORD ───
+        equity_curve.append((d, cash + positions_value))
         capital_in_use_by_day.append(sum(p.position_size for p in open_positions))
-        for s in strategies_today:
+        # Per-strategy exposure (snapshot of currently-deployed capital)
+        all_strategies_seen = set(daily_curves.keys()) | set(n_bids_by_strategy.keys())
+        for s in all_strategies_seen:
             exposure_by_strategy_by_day.setdefault(s, []).append(
                 sum(p.position_size for p in open_positions if p.strategy == s)
                 / initial_capital
             )
 
+    # ─── FINALIZE ───
+    # Aggregate metrics over the COMBINED pool's daily curve
+    all_returns: list[float] = []
+    for s_returns in trade_returns_by_strategy.values():
+        all_returns.extend(s_returns)
     n_trades = sum(n_trades_by_strategy.values())
+    metrics = compute_metrics(
+        equity_curve=equity_curve,
+        n_trades=n_trades,
+        trade_returns=all_returns,
+    )
+
+    # avg capital utilization across all days
+    avg_util = (
+        sum(c / max_capital_in_use for c in capital_in_use_by_day)
+        / len(capital_in_use_by_day)
+        if capital_in_use_by_day else 0.0
+    )
+
+    # Per-strategy contributions
+    from marketpulse.strategies import load_strategies
+    strategies_yaml = load_strategies()
+    per_strategy_stats: dict[str, StrategyContribution] = {}
+    for s in set(daily_curves.keys()):
+        ret_list = trade_returns_by_strategy.get(s, [])
+        contrib_pnl = sum(r * position_size for r in ret_list)
+        exposures = exposure_by_strategy_by_day.get(s, [])
+        avg_exposure = sum(exposures) / len(exposures) if exposures else 0.0
+        bid_w_list = bid_weights_by_strategy.get(s, [])
+        avg_bid_weight = sum(bid_w_list) / len(bid_w_list) if bid_w_list else 0.0
+        per_strategy_stats[s] = StrategyContribution(
+            strategy=s,
+            display_name=(
+                strategies_yaml[s].display_name if s in strategies_yaml else s
+            ),
+            n_trades=n_trades_by_strategy.get(s, 0),
+            n_dedup_skipped=n_dedup_skipped_by_strategy.get(s, 0),
+            n_capacity_skipped=n_capacity_skipped_by_strategy.get(s, 0),
+            n_cash_short_skipped=n_cash_short_skipped_by_strategy.get(s, 0),
+            contribution_pnl=contrib_pnl,
+            avg_exposure=avg_exposure,
+            avg_bid_weight=avg_bid_weight,
+            n_bids=n_bids_by_strategy.get(s, 0),
+            n_floor_hits=n_floor_hits_by_strategy.get(s, 0),
+        )
+
+    # Last-100 slice of bid history (spec § 4: render-layer cap)
+    bid_history = all_bid_records[-100:] if len(all_bid_records) > 100 else all_bid_records
+
     return PortfolioBacktestResult(
         horizon=horizon,
         n_trades=n_trades,
         n_dedup_total=sum(n_dedup_skipped_by_strategy.values()),
-        avg_capital_utilization=(
-            sum(capital_in_use_by_day) / (max_capital_in_use * len(capital_in_use_by_day))
-            if capital_in_use_by_day else 0.0
-        ),
-        cumulative_return=(equity_curve[-1][1] - initial_capital) / initial_capital
-                          if equity_curve else 0.0,
-        annual_return=0.0, sharpe=None, sortino=None, max_drawdown=0.0,
-        calmar=None, win_rate=0.0, avg_win_pct=0.0, avg_loss_pct=0.0,
+        avg_capital_utilization=avg_util,
+        cumulative_return=metrics.cumulative_return,
+        annual_return=metrics.annual_return,
+        sharpe=metrics.sharpe,
+        sortino=metrics.sortino,
+        max_drawdown=metrics.max_drawdown,
+        calmar=metrics.calmar,
+        win_rate=metrics.win_rate,
+        avg_win_pct=metrics.avg_win_pct,
+        avg_loss_pct=metrics.avg_loss_pct,
         daily_equity_curve=equity_curve,
-        excess_vs_spy=0.0,
-        per_strategy_stats={},
-        bid_history=all_bid_records,
+        excess_vs_spy=0.0,  # orchestrator (Task 7) overrides with combined - SPY
+        per_strategy_stats=per_strategy_stats,
+        bid_history=bid_history,
     )
