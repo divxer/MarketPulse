@@ -233,7 +233,14 @@ def compute_position_sizes(
         sigma = sigmas[s]
         alpha = alphas[s]
         vol_scale = target_vol / sigma if (sigma is not None and sigma > 0) else 1.0
-        if alpha is not None and mean_alpha is not None and mean_alpha != 0:
+        # Conviction scale guard: only divide by mean_alpha when it's strictly
+        # positive. If the pool is in a drawdown (mean_alpha < 0), dividing
+        # would invert the sign — positive-α strategies would get a negative
+        # alpha_scale and be skipped as size_too_small while negative-α losers
+        # get a positive scale. Fall back to the joint-bootstrap path
+        # (alpha_scale = 1.0) so all strategies receive base sizing during
+        # pool-wide drawdowns.
+        if alpha is not None and mean_alpha is not None and mean_alpha > 0:
             alpha_scale = alpha / mean_alpha
         else:
             alpha_scale = 1.0

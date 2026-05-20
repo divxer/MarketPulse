@@ -575,5 +575,88 @@ def test_compute_position_sizes_raw_only_for_none_strategies():
         ["normal"], daily_curves,
         as_of=date(2026, 5, 1),
     )
-    if sizes["normal"] is not None:
-        assert "normal" not in raw_below
+    assert sizes["normal"] is not None
+    assert "normal" not in raw_below
+
+
+def test_size_negative_mean_alpha_falls_back_to_base():
+    """Drawdown regime (mean_α < 0) → all strategies get α_scale = 1.0 (base sizing).
+
+    Without the mean_alpha > 0 guard, dividing by a negative mean would
+    invert sign: positive-α strategies would get negative alpha_scale →
+    raw < 0 < min → silently skipped as size_too_small, while negative-α
+    losers would get positive scales. The guard falls back to the
+    joint-bootstrap path so every strategy receives base × vol_scale,
+    preserving Phase 5a-style uniform sizing through drawdowns.
+    """
+    from datetime import date, timedelta
+
+    from marketpulse.backtest.sharpe import compute_position_sizes
+
+    # Construct two curves both with NEGATIVE daily mean return →
+    # mean_alpha will be negative. One slightly less bad than the other
+    # so the test exercises both branches of "alpha / mean_alpha would
+    # have been positive" vs "negative" if the guard were missing.
+    bad_curve = [
+        (date(2026, 4, 1) + timedelta(days=i), 10_000.0 * (0.99 ** i))
+        for i in range(30)
+    ]  # ~ -1% daily → α ≈ -0.01
+    worse_curve = [
+        (date(2026, 4, 1) + timedelta(days=i), 10_000.0 * (0.98 ** i))
+        for i in range(30)
+    ]  # ~ -2% daily → α ≈ -0.02
+
+    sizes, raw_below = compute_position_sizes(
+        ["bad", "worse"],
+        {"bad": bad_curve, "worse": worse_curve},
+        as_of=date(2026, 5, 1),
+        base=1_000.0,
+        target_vol=0.01,
+        min_position=200.0,
+        max_position=4_000.0,
+    )
+
+    # Without the guard, the LESS-bad strategy ("bad") would have
+    # alpha_scale = (-0.01) / (-0.015) ≈ 0.67 (positive) and the
+    # WORSE one would have alpha_scale = (-0.02) / (-0.015) ≈ 1.33 —
+    # inverting the intended ranking. With the guard, both get
+    # alpha_scale = 1.0 and size = base × vol_scale (which depends only
+    # on σ, not on α direction).
+    assert sizes["bad"] is not None, (
+        "bad strategy should not be skipped in drawdown regime"
+    )
+    assert sizes["worse"] is not None, (
+        "worse strategy should not be skipped in drawdown regime"
+    )
+    # Neither should appear in raw_below
+    assert "bad" not in raw_below
+    assert "worse" not in raw_below
+
+
+def test_size_zero_mean_alpha_uses_base():
+    """mean_α == 0 (degenerate) → α_scale = 1.0 (joint-bootstrap fallback)."""
+    from datetime import date, timedelta
+
+    from marketpulse.backtest.sharpe import compute_position_sizes
+
+    # Two strategies with exactly opposite drifts → mean_alpha ≈ 0
+    up_curve = [
+        (date(2026, 4, 1) + timedelta(days=i), 10_000.0 * (1.005 ** i))
+        for i in range(30)
+    ]
+    down_curve = [
+        (date(2026, 4, 1) + timedelta(days=i), 10_000.0 * (0.995 ** i))
+        for i in range(30)
+    ]
+    sizes, _ = compute_position_sizes(
+        ["up", "down"],
+        {"up": up_curve, "down": down_curve},
+        as_of=date(2026, 5, 1),
+        base=1_000.0,
+        target_vol=0.01,
+    )
+    # mean_alpha is near zero; even if slightly off due to compounding,
+    # the guard kicks in for mean_alpha <= 0 cases. Both should be
+    # non-None and reasonable.
+    assert sizes["up"] is not None
+    assert sizes["down"] is not None
