@@ -10,6 +10,8 @@
 
 Phase 5a is the **True Coupling foundation** — it replaces Phase 4's six isolated $10k portfolios with **ONE** $10k pool that all strategies bid into. The six strategies stop being parallel universes and become competing claimants on a single capital pool.
 
+**This phase introduces endogenous competition between strategies.** Where Phase 4 measured strategies independently (an *observation system*), Phase 5a forces them to interact for a finite resource (a *competition system*). The shift is structural — every subsequent phase (5b sizing, 5c exposure, 5d feedback, 6 live, 7 evolution) operates inside this competitive substrate, not the isolated one.
+
 This is the first phase where strategy quality (measured by Phase 2 hit-rate and Phase 4 Sharpe) **directly drives capital allocation**, closing the feedback loop:
 
 ```
@@ -88,12 +90,23 @@ for d in trading_calendar:
     bids_by_ticker = group_by(todays_bids, key=lambda b: b.ticker)
     winners = {}
     for ticker, bids in bids_by_ticker.items():
-        # Tiebreaker: highest weight wins; on tie, alphabetically-earliest
-        # strategy name. min(...) on (-weight, strategy_name) gives:
-        #   primary  = max weight (since negated)
-        #   secondary = min strategy_name (alphabetical ascending)
-        # Deterministic across runs and across Python versions.
-        best = min(bids, key=lambda b: (-weights[b.strategy], b.strategy))
+        # Tiebreaker chain (deterministic across runs):
+        #   1. Primary: highest bid weight  (rolling Sharpe-based)
+        #   2. Secondary: earliest event_time  (whoever signaled first)
+        #   3. Tertiary: alphabetical strategy name  (paranoia fallback —
+        #      event_time has microsecond precision so collisions are rare)
+        #
+        # min(...) on (-weight, event_time, strategy_name):
+        #   - negated weight makes "highest weight" sort first
+        #   - event_time ASC means earliest signal wins ties
+        #   - strategy_name ASC is the ultimate deterministic tiebreaker
+        #
+        # Semantic meaning: "the strategy that the data validates most
+        # gets the trade. If two are equally validated, the one that
+        # spoke first gets it (rewards early conviction)."
+        best = min(bids, key=lambda b: (
+            -weights[b.strategy], b.event_time, b.strategy,
+        ))
         winners[ticker] = best
         for loser in bids:
             if loser != best:
@@ -104,10 +117,10 @@ for d in trading_calendar:
                 ))
 
     # ─── ALLOCATE (capital-constrained, greedy by weight desc) ───
-    # Same composite-key tiebreaker as DEDUP: weight desc, then strategy asc.
+    # Same 3-key tiebreaker as DEDUP: weight desc → event_time asc → strategy asc
     sorted_winners = sorted(
         winners.values(),
-        key=lambda b: (-weights[b.strategy], b.strategy),
+        key=lambda b: (-weights[b.strategy], b.event_time, b.strategy),
     )
     for bid in sorted_winners:
         capital_in_use = sum(p.position_size for p in open_positions)
@@ -172,7 +185,12 @@ for d in trading_calendar:
 - **Cash drops below `$1k` but cap not full** → distinct counter `n_cash_short_skipped` (vs cap-full `n_capacity_skipped`). Both surfaced in `StrategyContribution`.
 - **In-flight ticker** (already held in another position) → bid filtered out in `BID COLLECT` step. Avoids doubling up.
 - **Same-day round-trip allowed (v0 simplification)** → a position closes on day d (CLOSE step) and a NEW bid for the same ticker arrives on day d (BID COLLECT step). Because CLOSE precedes BID COLLECT in the strict order, the ticker is no longer in `open_positions` when bid collection runs, so the new bid passes the in-flight filter and may open. Real trading would require a 1-day cooldown to avoid wash-sale rules and over-trading. **Phase 5a accepts this as a v0 simplification.** Phase 5b/6 should add `min_holding_days_after_close` enforcement. Tracked as an explicit non-goal in §1.
-- **Equal-weight tiebreaker** → when two strategies bid the same weight (common in bootstrap when both = 1.0), DEDUP `max(..., key=weights[s])` and ALLOC `sorted(..., key=weights[s])` use Python's stable sort + iteration order. To make this deterministic across runs, both sorts use `(weights[s], strategy_name)` as the composite key — alphabetical strategy name as the secondary sort. Test: `test_equal_weight_tiebreaker_uses_alphabetical_strategy`.
+- **Equal-weight tiebreaker** → 3-key composite, both DEDUP and ALLOC use it: `(-weight, event_time, strategy_name)`. Semantic order:
+  1. **Primary — weight desc**: highest rolling Sharpe wins (the validated quality signal)
+  2. **Secondary — event_time asc**: among equal-weight bids, the *earliest signal* wins (rewards prompt conviction; event_time has microsecond precision so practical collisions are rare)
+  3. **Tertiary — strategy_name asc**: alphabetical fallback for the freak case where two events have identical event_time
+  
+  Deterministic across runs and Python versions. Test: `test_equal_weight_tiebreak_uses_event_time_then_alpha`.
 
 ---
 
@@ -209,13 +227,40 @@ This means the Phase 5a "extra work" beyond Phase 4 is purely the bidding logic 
 
 ### Design rationale — why use Phase 4 ISOLATED curves (not shared-pool slices) for Sharpe
 
-The Sharpe input for bid weighting is each strategy's PHASE 4 isolated daily curve (the "what if this strategy ran alone with $10k" curve), NOT a slice of the shared-pool curve attributable to this strategy.
+> **⚠ Intentional bootstrap — feedback inconsistency acknowledged**
+>
+> Bid weights in Phase 5a are derived from **isolated strategy performance**
+> (each strategy's hypothetical $10k-alone curve), not from the strategy's
+> realized **shared-pool contribution**. The "world that measures quality"
+> and the "world that allocates capital" are deliberately decoupled in v0.
+>
+> This is **intentional**, not an oversight. Coupling them in v0 would
+> create a recursive allocation loop: a strategy that got starved of capital
+> last month would have low realized returns, which would lower its weight
+> this month, which would starve it further — strategies that lose the
+> early bidding race never recover.
+>
+> Phase 5d (deferred) will replace this with a **contribution-adjusted**
+> rolling Sharpe that uses `StrategyContribution.avg_exposure`-weighted
+> realized returns. By then we will have enough live data to choose a
+> dampening factor that prevents recursive starvation while still letting
+> bad strategies decay.
 
-**Reason:** bid weights should reflect **intrinsic strategy quality**, not the strategy's accident-of-ordering in the shared pool. If momentum_breakout got starved of capital last month (because oversold_reversal happened to fire first and consume cap), its shared-pool Sharpe would be artificially low even though the strategy itself is good. That would create a feedback loop where unlucky strategies stay unlucky.
+**v0 bootstrap (Phase 5a):**
+- Bid weight source = Phase 4 isolated daily curve (intrinsic quality)
+- Pros: stable, breaks the starvation feedback loop, easier to debug
+- Cons: high-Sharpe strategies that happen to fire late stay starved
+  even though their realized PnL would have been good
 
-Using the isolated curve breaks that loop: bid weights measure "this strategy's quality given a fair chance", and the pool dynamically allocates based on that quality estimate. Capital starvation in the pool doesn't degrade future bid weights.
+**Phase 5d planned source:**
+- Bid weight source = exposure-adjusted realized daily returns from the
+  shared pool (with anti-recursion dampening — exact form TBD)
+- Pros: closes the feedback loop honestly
+- Cons: requires careful regularization (out of v0 scope)
 
-**Edge case:** Phase 4 isolated runs use the **same event set** as Phase 5a shared runs, just with each strategy getting its own $10k. The pairs going into both simulators are identical (same `get_bullish_events_with_outcomes` query). So the isolated daily curve is a clean signal of strategy quality.
+**Edge case:** Phase 4 isolated runs use the **same event set** as Phase 5a shared runs, just with each strategy getting its own $10k. The pairs going into both simulators are identical (same `get_bullish_events_with_outcomes` query). So the isolated daily curve is a clean signal of strategy quality at the event-attendance level.
+
+**Locked behavior — do not change without a Phase 5d-scope spec.** A test enforces: bid weights at day d are computed using `isolated_results[s].full_equity_curve`, NEVER using the shared-pool curve's per-strategy slice. Test: `test_bid_weight_source_is_isolated_curve_not_shared_slice`.
 
 ### Bid weight computation function
 
@@ -281,10 +326,11 @@ Phase 5a stays read-side over Phase 1-3 outputs, same philosophy as Phase 4. No 
 
 @dataclass(frozen=True)
 class StrategyBacktestResult:
-    """Phase 4 isolated per-strategy result.
+    """Phase 4 isolated per-strategy result — a serialization-friendly DTO.
 
-    The two reserved Phase 5 hooks (previously always None) are now
-    populated when this result is part of a shared-pool run. Toggle-mode
+    Stays a clean serializable shape (no large internal-use arrays). The
+    two reserved Phase 5 hooks (previously always None) are now populated
+    when this result is part of a shared-pool run. Toggle-mode
     'Per-Strategy' view shows enriched isolated results — same shape,
     more populated fields.
     """
@@ -294,11 +340,35 @@ class StrategyBacktestResult:
     strategy_exposure: float | None = None   # avg deployed / initial in shared pool
     capital_bid_score: float | None = None   # avg rolling Sharpe weight used
 
-    # Un-downsampled daily curve, used cross-module by sharpe.rolling_sharpe()
-    # for window slicing. Never serialized to template (the chart still uses
-    # the downsampled `daily_equity_curve`). Name is public (no leading
-    # underscore) because compute_bid_weights in a separate module reads it.
-    full_equity_curve: list[tuple[date, float]] | None = None
+
+@dataclass(frozen=True)
+class StrategyBacktestArtifacts:
+    """Diagnostic + cross-module compute layer for a per-strategy run.
+
+    Separates SERIALIZATION concerns (StrategyBacktestResult — what goes
+    into templates, JSON, pickle, API responses) from COMPUTE concerns
+    (StrategyBacktestArtifacts — what the Phase 5a shared-pool simulator
+    needs internally for rolling Sharpe lookups).
+
+    Why split: the un-downsampled daily curve can be hundreds of rows.
+    Embedding it in StrategyBacktestResult would bloat every template
+    payload, every cached API response, and any future serialization
+    use case. By living on a sibling Artifacts dataclass, the result
+    stays a small clean DTO.
+
+    Orchestrator returns BOTH for each strategy:
+        run_all_backtests(...) -> list[StrategyBacktestResult]      # for templates
+        run_all_backtests(..., return_artifacts=True) -> tuple[
+            list[StrategyBacktestResult], list[StrategyBacktestArtifacts]
+        ]                                                            # for Phase 5a
+
+    Phase 4 callers never need artifacts. Phase 5a's orchestrator always
+    requests them. The artifacts list is parallel-indexed to the results
+    list (same order, same length).
+    """
+    strategy: str                                    # links to StrategyBacktestResult.strategy
+    full_equity_curve: list[tuple[date, float]]      # un-downsampled, one row per trading day
+    # Future Phase 5d/6 may add: full_drawdown_curve, daily_bids_attempted, etc.
 
 
 @dataclass(frozen=True)
@@ -317,6 +387,14 @@ class PortfolioBacktestResult:
     # Aggregate counts (required)
     n_trades: int                         # positions opened across all strategies
     n_dedup_total: int                    # cross-strategy ticker collisions resolved
+
+    # Utilization (required) — mean over all trading days of
+    #   (capital_in_use_at_record_step / max_capital_in_use)
+    # Critical interpretability metric:
+    #   - low cum_return + high utilization = bad alpha
+    #   - low cum_return + low utilization  = cap-starved (not bad alpha)
+    # Computed in the RECORD step of the daily loop; averaged at end.
+    avg_capital_utilization: float
 
     # Performance metrics (required; sharpe/sortino/calmar may be None)
     cumulative_return: float
@@ -362,6 +440,12 @@ class StrategyContribution:
     avg_exposure: float          # avg capital fraction this strategy held
     avg_bid_weight: float        # avg rolling-Sharpe weight in its bids
     n_bids: int                  # total bid attempts (won + all skipped variants)
+    n_floor_hits: int            # bids where rolling Sharpe < 0 → floored at 0.1.
+                                 # Distinguishes "dying strategy" (high floor-hit
+                                 # rate, weights consistently below threshold)
+                                 # from "unlucky" (occasional floor hit, otherwise
+                                 # competitive). Critical for diagnosing whether
+                                 # to delist a strategy in future phases.
 
 
 @dataclass(frozen=True)
@@ -414,12 +498,20 @@ def run_shared_pool_backtest(
 
     Returns:
         {
-            'isolated': list[StrategyBacktestResult],  # 6 strategies + SPY
-            'shared':   PortfolioBacktestResult,       # new Phase 5a
+            'isolated':  list[StrategyBacktestResult],     # 6 strategies + SPY (DTO)
+            'artifacts': list[StrategyBacktestArtifacts],  # 6 strategies (internal)
+            'shared':    PortfolioBacktestResult,          # new Phase 5a
         }
 
-    UI toggle picks which to display — both are always computed so the
-    user can toggle without a second request to the server.
+    - `isolated`: serializable DTOs for the Per-Strategy toggle view.
+    - `artifacts`: parallel-indexed (same order/length as isolated, minus SPY)
+      with un-downsampled curves; consumed internally by the shared simulator
+      for rolling Sharpe; never sent to templates.
+    - `shared`: the Phase 5a portfolio result for the Shared Pool toggle view.
+
+    Caller MAY memoize this entire dict per (horizon, since_days) tuple.
+    No spec-locked freshness requirement — backtests over historical data
+    are deterministic and stable until new EvaluationEvents land.
     """
 ```
 
@@ -594,7 +686,7 @@ No DB migration. No new dependencies (empyrical-reloaded already added in Phase 
 
 ## 7. Test Plan
 
-### Key invariants to lock (≈38 tests)
+### Key invariants to lock (≈44 tests)
 
 **Rolling Sharpe service:**
 ```
@@ -632,12 +724,17 @@ test_shared_pool_contribution_pnl_sums_to_pool_pnl
 test_shared_pool_in_flight_ticker_filtered_at_bid_collect
 test_shared_pool_sharpe_does_not_peek_future
 test_shared_pool_same_day_reentry_after_close_allowed       # v0 simplification
-test_equal_weight_tiebreaker_uses_alphabetical_strategy     # DEDUP + ALLOC
+test_equal_weight_tiebreak_uses_event_time_then_alpha       # 3-key composite
 test_strategy_contribution_avg_exposure_correct             # day-avg math
 test_bid_records_capped_at_render_layer                     # last-100 slice
 test_simulator_internal_bid_history_unbounded               # raw store unbounded
 test_phase4_isolated_results_unchanged_with_shared_run      # Phase 4 regression
 test_n_dedup_total_equals_sum_of_per_strategy_n_dedup       # accounting integrity
+test_avg_capital_utilization_matches_record_step_mean       # new field accuracy
+test_n_floor_hits_increments_only_on_negative_sharpe        # telemetry accuracy
+test_n_floor_hits_distinguishes_dying_from_unlucky          # diagnostic value
+test_bid_weight_source_is_isolated_curve_not_shared_slice   # Phase 5d boundary enforcement
+test_artifacts_full_equity_curve_not_in_result_dto          # DTO/artifact separation
 ```
 
 **Route + UI:**
@@ -675,7 +772,7 @@ test_lab_backtest_per_strategy_unchanged              # Phase 4 regression
 | 10 | **UI**: Toggle on existing `/lab/backtest`, default `?mode=per-strategy`. | LOCKED |
 | 11 | **Bid history cap**: render last 100 BidRecord entries. | LOCKED |
 | 12 | **DB**: no new tables; no migrations. | LOCKED |
-| 13 | **Pool vs isolated**: BOTH always computed every render. Toggle picks display only. | LOCKED |
+| 13 | **Pool vs isolated**: orchestrator MUST return both shapes from a single call (isolated list + shared result). Caller MAY memoize per (horizon, since_days) filter tuple — implementation choice, not spec-locked. Toggle picks display from already-computed data. | LOCKED |
 
 ---
 
@@ -728,10 +825,24 @@ Every clause in §1 (Identity) maps to a section below:
 would raise TypeError at import), 3 important (bid-history dual-cap policy, underscore-
 prefix vs cross-module access, same-day re-entry semantics), and 7 minor items (tiebreaker
 determinism, deep-negative-Sharpe floor, parameter contract, design rationale, hero text
-templating, missing tests, risks-table coverage). All addressed inline in this commit:
-field order corrected in §4, two-layer bid-history cap explicit in §4, `full_equity_curve`
-public name in §4, same-day re-entry documented as v0 simplification in §2, composite-key
-tiebreaker `(-weight, strategy_name)` locked in §2 pseudocode, design rationale for using
-Phase 4 isolated curves added to §3, contract block on `compute_bid_weights` in §3, hero
-text templated in §5, ~10 new tests added to §7 (now 38 total), deep-negative-Sharpe
-risk added to §9.
+templating, missing tests, risks-table coverage). All addressed inline in commit
+`1ab1705`.
+
+**Review iteration 2 (2026-05-20):** Second quant review identified 2 MUST FIX
+(intentional-bootstrap disclaimer missing on rolling Sharpe source; `full_equity_curve`
+on serialized DTO pollutes downstream API/template payloads) + 4 STRONGLY RECOMMEND
+(`avg_capital_utilization` field, `n_floor_hits` telemetry, event_time-primary tiebreaker
+for trade-semantic alignment, allow caching in decision #13) + 1 prose addition
+(endogenous-competition framing in §1). All addressed in this commit:
+
+- §1: added "endogenous competition" paragraph framing Phase 5a as structural shift
+- §2: tiebreaker upgraded from 2-key (weight, alpha) to 3-key (weight, event_time, alpha)
+- §3: stronger "intentional bootstrap" warning block + Phase 5d planned-source pointer
+- §4: split `StrategyBacktestArtifacts` out of `StrategyBacktestResult` to keep DTO clean
+- §4: added `avg_capital_utilization` to `PortfolioBacktestResult`
+- §4: added `n_floor_hits` to `StrategyContribution`
+- §4: orchestrator return contract now exposes `{isolated, artifacts, shared}` triple
+- §8 decision #13 wording softened: orchestrator MUST return both; caller MAY memoize
+- §7: +5 new tests (now 43 total)
+
+13 locked decisions unchanged. Spec now reads more like a research engine than a dashboard.
