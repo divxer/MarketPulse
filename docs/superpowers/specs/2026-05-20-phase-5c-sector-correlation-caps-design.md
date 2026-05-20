@@ -280,12 +280,24 @@ This is **not** transitive. If A↔B has ρ=0.7 and B↔C has ρ=0.7 but A↔C h
 
 The simplification avoids transitive closure complexity. The cost: A and C might both be opened even though they share B as a common driver.
 
-**Worked example of the 2× bound.** Cap = $4000, B already open at $3000:
+**Worked example — 3-node triangle.** Cap = $4000, B already open at $3000:
 
-- Candidate A: cluster={A,B}; A_size + 3000 must ≤ 4000 → A_size ≤ 1000
-- Candidate C (later same day): cluster={C,B}; C_size + 3000 must ≤ 4000 → C_size ≤ 1000
+- Candidate A: neighbor set = {B}; A_size + 3000 ≤ 4000 → A_size ≤ 1000
+- Candidate C: neighbor set = {B}; C_size + 3000 ≤ 4000 → C_size ≤ 1000
 
-After both fire: total in {A,B,C} = A_size + 3000 + C_size ≤ 1000 + 3000 + 1000 = 5000 (peak), or 5/4 = **1.25× the cluster cap**, not 2×. The reviewer's earlier "~2× upper bound" was conservative; in practice it's lower because each pairwise check binds the size of the new entrant tightly. Worst case is when the shared driver (B) is small relative to A+C, which yields the 2× ceiling.
+After both fire: total exposure across {A,B,C} = A + B + C ≤ 1000 + 3000 + 1000 = 5000, i.e. **1.25× the cap** for this topology.
+
+**Worked example — long chain.** Cap = $4000. Chain topology A-B-C-D-E where each adjacent pair has ρ ≥ 0.6 but non-adjacent pairs have ρ < 0.6:
+
+- A opens at $2k; neighbor set = {} (nothing open yet)
+- B opens; neighbor set = {A}; A + B ≤ 4k → B ≤ 2k. Open $2k
+- C opens; neighbor set = {B}; B + C ≤ 4k → C ≤ 2k. Open $2k
+- D opens; neighbor set = {C}; C + D ≤ 4k → D ≤ 2k. Open $2k
+- E opens; neighbor set = {D}; D + E ≤ 4k → E ≤ 2k. Open $2k
+
+Total {A,B,C,D,E} = $10k, all correlated in a chain. Each pairwise check sees only its immediate neighbor, so the cluster cap is satisfied at every step. Ratio = 10k / 4k = **2.5× the cap** for a 5-chain. For an N-chain the worst-case ratio approaches **N/2**.
+
+**This is a known limit of the pairwise neighbor-sum algorithm**, not a bug. For Phase 5c watchlist (~7 tickers, mostly mega-cap correlated), the chain length is bounded by the watchlist size, so the worst-case is moderate. Future evolution (Appendix C) discusses upgrading to transitive cluster algorithms (e.g., DBSCAN or hierarchical) that compute the full connected component and apply the cap at component level — but that adds complexity not justified at current scale.
 
 ### Cold-start (failsafe-open)
 
@@ -502,11 +514,12 @@ class PortfolioBacktestResult:
     hhi_concentration: float
 
     # NEW Phase 5c-1: sector telemetry
-    max_sector_exposure: float                  # peak Σ(positions in any one sector) / pool
-    sector_breakdown: dict[str, float]          # sector → time-avg fraction of pool
+    max_sector_exposure: float                       # peak Σ(positions in any one sector) / pool (pool-wide max)
+    max_sector_exposure_by_sector: dict[str, float]  # per-sector peak fraction (each sector's own peak day)
+    sector_breakdown: dict[str, float]               # sector → time-avg fraction of pool
 
     # NEW Phase 5c-2: correlation telemetry
-    max_cluster_exposure: float                 # peak observed correlated-cluster size / pool
+    max_neighbor_exposure: float                # peak observed neighbor-set exposure / pool
     n_correlation_cap_events: int               # total bids rejected by correlation cap
 
     # Performance metrics (Phase 5a/5b, unchanged)
@@ -537,13 +550,17 @@ class PortfolioBacktestResult:
     correlation_cap_policy: str = "neighbor_sum_rho06_40pct_v0" # NEW Phase 5c
     sector_caps_enabled: bool = True                            # NEW Phase 5c
     correlation_caps_enabled: bool = True                       # NEW Phase 5c
+    risk_policy: str = "cap40_corr06_enforced_v0"               # NEW Phase 5c: composite tag for
+                                                                # downstream tooling. Recomputes when
+                                                                # any cap-related kwarg differs from default
 ```
 
 ### Field semantics
 
 - **`blocked_by_sector`**: the sector string that was already at-or-near cap when this bid was rejected. Format matches `get_sector()` output (e.g., `"Technology"`, `"leveraged_qqq"`, `"unknown"`)
 - **`blocked_by_correlation_with`**: tuple of `(ticker, corr_value)` pairs from `open_positions` whose pairwise ρ ≥ 0.6 with the candidate. Sorted by corr descending. Stored as tuple-of-tuples (immutable, frozen-dataclass-safe, hashable). Example: `(("AAPL", 0.72), ("GOOGL", 0.68))`
-- **`max_sector_exposure`**: peak single-day single-sector fraction. Computed daily as `max over sectors of (Σ positions in sector / pool_capital)` and `max()`-reduced over the backtest window
+- **`max_sector_exposure`**: pool-wide peak. Computed daily as `max over sectors of (Σ positions in sector / pool_capital)` and `max()`-reduced over the backtest window. Single scalar
+- **`max_sector_exposure_by_sector`**: per-sector peak. For each sector observed during the run, the maximum daily exposure that sector achieved. UI uses this dict for "Sector / time-avg / peak" tables so each row's peak is computed correctly (not from the row's avg)
 - **`sector_breakdown`**: time-averaged fractional exposure per sector. **Concrete semantics**:
   - Computed during finalization (not maintained as running state)
   - Iterate every calendar day in the backtest window (including days with empty pool)
@@ -551,13 +568,13 @@ class PortfolioBacktestResult:
   - Average over **the count of calendar days in the window** (denominator is fixed, NOT "days with positions"). This deliberately includes empty-pool days, so the average reflects deployment intensity, not just allocation mix
   - Result: `dict[sector_str, float]` where each value is in `[0.0, 1.0]`. The sum of values is `≤ avg_capital_utilization ≤ 1.0` (proven by linearity of expectation over the same calendar days)
   - Empty backtest (no positions ever opened) → `{}` (empty dict)
-- **`max_cluster_exposure`**: similar to `max_sector_exposure` but computed at the candidate-cluster level. Tracked only when correlation caps are enabled
+- **`max_neighbor_exposure`**: peak observed neighbor-set exposure (candidate + open positions correlated above threshold). Tracked only when correlation caps are enabled. Renamed from "cluster" to "neighbor exposure" because the algorithm computes per-candidate pairwise neighbors, not transitive clusters
 - **`n_correlation_cap_events`**: simple counter, used for hero dashboard or sanity check
 
 ### Schema stability when caps disabled
 
 - `sector_caps_enabled=False` → `max_sector_exposure=0.0`, `sector_breakdown={}`. **Fields still exist** in the dataclass
-- `correlation_caps_enabled=False` → `max_cluster_exposure=0.0`, `n_correlation_cap_events=0`
+- `correlation_caps_enabled=False` → `max_neighbor_exposure=0.0`, `n_correlation_cap_events=0`
 - UI guards (`{% if shared_result.sector_breakdown %}`) skip empty cards
 
 ---
@@ -645,12 +662,12 @@ Placed below the strategy table:
           <td>{{ sector }}</td>
           <td class="num mono tnum">{{ "{:.1%}".format(avg_frac) }}</td>
           <td class="num mono tnum">
-            {% if loop.first %}
-              <strong>{{ "{:.1%}".format(shared_result.max_sector_exposure) }}</strong>
-            {% else %}—{% endif %}
+            {{ "{:.1%}".format(shared_result.max_sector_exposure_by_sector.get(sector, 0.0)) }}
           </td>
           <td>
-            {% if avg_frac > 0.35 %}<span class="mp-chip mp-chip--down">near cap</span>
+            {% set sector_peak = shared_result.max_sector_exposure_by_sector.get(sector, 0.0) %}
+            {% if sector_peak > 0.39 %}<span class="mp-chip mp-chip--down">at cap</span>
+            {% elif avg_frac > 0.35 %}<span class="mp-chip mp-chip--down">near cap</span>
             {% elif avg_frac > 0.2 %}<span class="mp-chip">heavy</span>
             {% else %}<span class="mp-chip mp-chip--up">light</span>
             {% endif %}
@@ -664,7 +681,7 @@ Placed below the strategy table:
 {% endif %}
 ```
 
-The sort ensures the top row (largest avg) shows the peak — matching `max_sector_exposure`.
+**Bug fix**: the previous draft used `{% if loop.first %}` to render `max_sector_exposure` only on the top row (sorted by avg desc). That conflated "highest average sector" with "highest peak sector" — they are different. A sector with average 20% might peak at 70% (one large spike) while a sector with average 35% peaks at 35% (steady). The fix is to store per-sector peaks in `max_sector_exposure_by_sector: dict[str, float]` and read directly. The `"at cap"` chip uses 0.39 (just under 40% cap) to flag sectors that hit the ceiling at any point during the run, independent of their average.
 
 ### KPI strip — unchanged
 
@@ -728,6 +745,66 @@ These tests assert specific values for `max_strategy_exposure`, `hhi_concentrati
 - `test_shared_pool_n_size_too_small_in_contribution` — designed to fail at SIZE COMPUTE, so caps never fire. Safe by construction
 
 The plan will list the exact test files and the toggle additions in a dedicated migration task. The audit pattern: run each test with default-on caps; if it fails, either (a) add the toggle flags to the test, or (b) verify the new behavior is correct and update the expected values.
+
+---
+
+## 10b. Migration & Reproducibility
+
+Phase 5c changes the default behavior of the shared-pool simulator: bids that would have opened under Phase 5b can now be rejected by sector or correlation caps. This is **intentional behavior change**, not a bug. Historical Phase 5b benchmarks will not be bit-for-bit reproducible by default after Phase 5c lands.
+
+### Reproducing pre-5c results
+
+To run the simulator with **exactly Phase 5b semantics** (caps inactive):
+
+```python
+result = run_shared_pool_backtest(
+    db, horizon=5, since=since,
+    sector_caps_enabled=False,
+    correlation_caps_enabled=False,
+)
+```
+
+The resulting `PortfolioBacktestResult` will have:
+
+- `sector_caps_enabled=False`, `correlation_caps_enabled=False`
+- `risk_policy="caps_disabled_v0"` (composite tag distinguishes this run from a default-on run in downstream tooling)
+- `sector_breakdown={}`, `max_sector_exposure_by_sector={}`, `max_sector_exposure=0.0`
+- `max_neighbor_exposure=0.0`, `n_correlation_cap_events=0`
+- All other fields identical to a Phase 5b shared-pool run with the same inputs
+
+### When to disable caps explicitly
+
+| Scenario | Cap flags |
+|---|---|
+| Default production usage | both `True` (defaults) |
+| Reproducing Phase 5a/5b regression baselines | both `False` |
+| A/B comparing "caps vs no-caps" performance | run twice, once each |
+| Phase 5a-only regression test isolation | both `False` (see §10 Group B/C) |
+| Debugging which cap dimension matters | toggle one at a time |
+
+### `risk_policy` composite tag
+
+The `risk_policy` field combines all cap-related kwargs into one string that downstream tooling (lab UI, hero text, future ML feature columns) can read without inspecting individual booleans:
+
+```python
+# Default
+risk_policy = "cap40_corr06_enforced_v0"
+
+# When caps disabled (e.g., reproducing Phase 5b)
+risk_policy = "caps_disabled_v0"
+
+# Future variations
+risk_policy = "cap30_corr07_enforced_v1"      # tuned thresholds
+risk_policy = "cap40_corr06_observe_only_v0"  # future 3-state mode
+```
+
+The tag is computed deterministically from the kwargs at orchestrator entry; format is documented in `marketpulse/backtest/simulator.py` and exposed in lab UI hero text.
+
+### What gets re-run, what gets archived
+
+Historical CI baseline backtests should keep their stored result JSONs but **mark them as Phase 5b-era** in metadata. New backtests run with `risk_policy="cap40_corr06_enforced_v0"`. Comparing pool Sharpe between the two is comparing apples to oranges — the constraint set differs.
+
+For ongoing performance tracking, Phase 5c sets a new baseline. The lab UI's "vs SPY" KPI now reflects "vs SPY under Phase 5c constraint regime" rather than "vs SPY unconstrained." This is the intended semantics — production portfolio performance should always be measured under the constraint regime actually in force.
 
 ---
 
@@ -812,6 +889,120 @@ Each test pre-loads 30-60 days of price data into a fake `PriceProvider`, then a
 1. `test_bid_record_sector_cap_full_outcome_literal` — `BidRecord(..., outcome="sector_cap_full", blocked_by_sector="Tech")`. Assert outcome string + blocked_by_sector value
 2. `test_bid_record_correlation_cap_full_with_diagnostics` — `BidRecord(..., outcome="correlation_cap_full", blocked_by_correlation_with=(("AAPL", 0.72),))`. Assert outcome + diagnostic tuple structure
 3. `test_portfolio_result_default_sector_cap_policy` — construct `PortfolioBacktestResult()` with all required args; assert `sector_cap_policy == "uniform_40pct_v0"` and `correlation_cap_policy == "neighbor_sum_rho06_40pct_v0"`
+
+---
+
+## Appendix C: Long-Term Evolution Roadmap
+
+This section documents known limits of the Phase 5c v0 design and the upgrade paths that would address them. These are **not Phase 5c work** but are sketched here to inform future design conversations and to clarify which v0 decisions are temporary vs structural.
+
+### C.1 Sector taxonomy → exposure_group hierarchy
+
+**Limit**: GICS sector classification is a **taxonomy**, not a **risk signal**. Examples:
+
+- NVDA (Technology) vs TSLA (Consumer Cyclical) — different sectors, but in 2024-2026 their correlation ran ~0.7-0.8 due to mega-cap growth co-movement. Sector cap allows both at full size; correlation cap is the only Phase 5c-2 backstop
+- XOM (Energy) vs SLB (Energy) — same sector, but their correlation is often ~0.2-0.3 (one is integrated major, other is oilfield services). Sector cap restricts both as if they were the same exposure when they aren't
+
+**Upgrade**: introduce `exposure_group` as a structured tag that captures risk-relevant groupings beyond GICS:
+
+```yaml
+# config/exposure_groups.yaml (future)
+exposure_groups:
+  AAPL:  {sector: Technology, theme: mega_cap_growth, factor: quality}
+  TSLA:  {sector: Consumer_Cyclical, theme: mega_cap_growth, factor: momentum}
+  NVDA:  {sector: Technology, theme: ai_semis, factor: momentum}
+  XOM:   {sector: Energy, theme: oil_integrated, factor: value}
+  SLB:   {sector: Energy, theme: oil_services, factor: value}
+  TQQQ:  {sector: Technology, theme: mega_cap_growth, factor: leveraged_long, leverage: 3.0}
+```
+
+Then caps would compose along dimensions:
+
+- Total **theme** ≤ 50%
+- Total **factor** ≤ 60%
+- Total **leverage** ≤ 1.5× pool
+- Total per-leg single-name (sector dimension) ≤ 30%
+
+**When to do this**: when the prod data shows two clear patterns — (a) sector-orthogonal pairs running > 0.7 correlation, and (b) intra-sector pairs running < 0.3. The current 7-ticker watchlist is too small to see this clearly.
+
+### C.2 ticker_metadata.parquet — unified metadata cache
+
+Phase 5c stores sector lookups in `data/sector_cache.json`. Future phases will need beta, factor loadings, country, market cap, and theme tags. Without consolidation each new cap dimension spawns its own JSON cache.
+
+**Upgrade**: a single `data/ticker_metadata.parquet` schema:
+
+```python
+ticker | sector | industry | market_cap | beta | country | theme | factor_loadings | updated_at
+```
+
+Built lazily, parquet for compact + fast columnar read. All cap modules read from this single source. `get_sector()`, `get_factor()`, `get_beta()`, etc. become thin wrappers over the same metadata read.
+
+**When to do this**: when adding the 2nd or 3rd metadata dimension. Phase 5c sticks with sector-only JSON to avoid premature abstraction.
+
+### C.3 Transitive cluster detection (DBSCAN / agglomerative)
+
+Phase 5c v0 uses pairwise neighbor-sum. As shown in §5, a long correlation chain A-B-C-D-E can yield N/2× cap exposure. The fix is true transitive clustering:
+
+**Upgrade options**:
+
+- **DBSCAN** with distance = `1 - |ρ|` and ε = 0.4 → returns connected components. Cap applies to component total
+- **Agglomerative hierarchical** with linkage = `complete` (all pairs must be ≥ threshold) → more conservative, no chain extension
+- **Single-linkage clustering** with chain breaks at `ρ < 0.6` gaps → similar to DBSCAN
+
+All three add a dependency on `scikit-learn` (already pulled in by other ML libs in some venvs but not currently a hard dep). They also change the semantics from "candidate-specific neighbor set" to "global daily cluster map", which shifts where the cap is enforced (pre-ALLOC daily setup vs per-bid runtime check).
+
+**When to do this**: when prod data shows N-chain exposures > 2× cap routinely. Telemetry `max_neighbor_exposure` is the trigger. If it consistently exceeds the cap, the algorithm needs an upgrade.
+
+### C.4 Three-state caps_mode (off / observe / enforce)
+
+Phase 5c v0 uses two bool flags (`sector_caps_enabled`, `correlation_caps_enabled`). User reviewer flagged that a future 3-state mode is cleaner:
+
+```python
+sector_caps_mode: Literal["off", "observe", "enforce"] = "enforce"
+correlation_caps_mode: Literal["off", "observe", "enforce"] = "enforce"
+```
+
+- `off`: cap not computed, no telemetry
+- `observe`: cap computed and telemetry recorded (`would_hit_sector_cap` counters added to `StrategyContribution`), but **bid still opens**
+- `enforce`: full v0 behavior — bid blocked, `*_cap_full` outcome recorded
+
+This enables: production runs in `observe` for a few weeks while you watch the would_hit counters, then flip to `enforce` once you trust the cap calibration. Phase 5c v0's two-bool model collapses the off/observe distinction.
+
+**When to do this**: when tuning cap thresholds for new ticker universes (e.g., adding crypto) and you want a safe shadow period. Phase 5c v0 ships as `enforce` to match locked Decision #3.
+
+### C.5 Per-strategy cap exemptions
+
+Some strategies have legitimate reasons to bust caps:
+
+- `sector_rotation` strategy explicitly trades sector concentration as its alpha — capping it at 40% defeats the strategy
+- A future `pairs_trade` strategy might want correlation > 0.6 by construction (long leg + short leg)
+
+**Upgrade**: `config/strategy_cap_overrides.yaml`:
+
+```yaml
+sector_rotation:
+  sector_cap: 0.80      # raise from 0.40
+  correlation_cap: 0.60 # raise from 0.40
+
+pairs_trade:
+  correlation_cap: null  # bypass entirely
+```
+
+Hooks at ALLOCATE: per-bid lookup of strategy overrides; fall back to global cap.
+
+**When to do this**: when 2+ strategies are bumping into caps for legitimate reasons. Currently the deferred 5b-3 sizing override would land first since it's the foundation.
+
+### C.6 Risk-budget cap dimensions (Phase 6+)
+
+Phase 5c caps are **size-based** (% of pool). Future risk-budget caps would be **variance-based**:
+
+- Per-strategy variance ≤ 20% of pool variance
+- Total portfolio variance ≤ target (e.g., 1% daily vol)
+- Marginal contribution to risk (MCR) for any position ≤ 15%
+
+This requires the Phase 5d `contribution-adjusted Sharpe` machinery first — measuring marginal Sharpe is the prerequisite to budgeting marginal variance.
+
+**When to do this**: Phase 6 or later. Strictly downstream of Phase 5d.
 
 ---
 
