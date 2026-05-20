@@ -47,6 +47,38 @@ def rolling_sharpe(
     return s
 
 
+def rolling_sigma(
+    daily_curve: list[tuple[date, float]],
+    *,
+    as_of: date,
+    lookback_days: int = 60,
+    min_events: int = 5,
+) -> float | None:
+    """Daily-return σ over curve points in [as_of - lookback, as_of).
+
+    Returns None when:
+      - Fewer than `min_events` qualifying points
+      - σ computes to exactly 0 (degenerate zero-variance, e.g., flat curve)
+      - Non-finite result (shouldn't happen with np.std on finite input)
+
+    Causality: identical window semantics to rolling_sharpe.
+    """
+    if not daily_curve:
+        return None
+    window_start = as_of - timedelta(days=lookback_days)
+    sliced = [(d, v) for d, v in daily_curve if window_start <= d < as_of]
+    if len(sliced) < min_events:
+        return None
+    values = np.array([v for _, v in sliced], dtype=float)
+    if len(values) < 2:
+        return None
+    daily_returns = np.diff(values) / values[:-1]
+    s = float(np.std(daily_returns))
+    if not math.isfinite(s) or s == 0.0:
+        return None
+    return s
+
+
 def compute_bid_weights(
     strategies_today: list[str],
     daily_curves: dict[str, list[tuple[date, float]]],
