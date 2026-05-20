@@ -90,6 +90,8 @@ def test_shared_pool_close_frees_cap_before_alloc():
         initial_capital=10_000.0, base_position_size=1_000.0,
         max_capital_in_use=10_000.0, lookback_days=60,
         sizing_enabled=False,  # Phase 5a invariant: uniform $1k sizes
+        sector_caps_enabled=False,        # Phase 5c isolation
+        correlation_caps_enabled=False,   # Phase 5c isolation
     )
     assert r.n_trades == 11
 
@@ -199,6 +201,8 @@ def test_shared_pool_greedy_alloc_respects_max_cap():
         initial_capital=10_000.0, base_position_size=1_000.0,
         max_capital_in_use=10_000.0, lookback_days=60,
         sizing_enabled=False,  # Phase 5a invariant: uniform $1k sizes
+        sector_caps_enabled=False,        # Phase 5c isolation
+        correlation_caps_enabled=False,   # Phase 5c isolation
     )
     assert r.n_trades == 10
     cap_full = [b for b in r.bid_history if b.outcome == "cap_full"]
@@ -241,6 +245,8 @@ def test_shared_pool_mtm_uses_linear_interp_per_position():
         initial_capital=10_000.0, base_position_size=1_000.0,
         max_capital_in_use=10_000.0, lookback_days=60,
         sizing_enabled=False,  # Phase 5a invariant: uniform $1k sizes
+        sector_caps_enabled=False,        # Phase 5c isolation
+        correlation_caps_enabled=False,   # Phase 5c isolation
     )
     curve = dict(r.daily_equity_curve)
     mid = curve.get(date(2026, 5, 5))
@@ -615,6 +621,8 @@ def test_shared_pool_high_size_strategy_blocks_more_small_bids():
         initial_capital=10_000.0, base_position_size=1_000.0,
         max_capital_in_use=10_000.0, lookback_days=60,
         sizing_enabled=True,
+        sector_caps_enabled=False,        # Phase 5c isolation
+        correlation_caps_enabled=False,   # Phase 5c isolation
     )
     # Total bids attempted: 9. Won bids should be < 9 because high_a's
     # variable size blocks at least one neutral.
