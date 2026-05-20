@@ -9,13 +9,31 @@
   </header>
   <table class="w-full text-sm">
     <thead class="text-left text-slate-500">
-      <tr><th class="px-4 py-2">代码</th><th>价格</th><th>涨跌幅</th><th>成交量</th><th>信号</th></tr>
+      <tr>
+        <th class="px-4 py-2">代码</th>
+        <th class="text-right">价格</th>
+        <th class="text-right">涨跌幅</th>
+        <th class="text-right">成交量</th>
+        <th>备注</th>
+      </tr>
     </thead>
     <tbody>
       {% for item in watchlist %}
       <tr class="border-t hover:bg-slate-50">
-        <td class="px-4 py-2"><a href="/stock/{{ item.ticker }}" class="font-medium">{{ item.ticker }}</a></td>
-        <td>—</td><td>—</td><td>—</td><td>—</td>
+        <td class="px-4 py-2">
+          <a href="/stock/{{ item.ticker }}" class="font-medium">{{ item.ticker }}</a>
+          {% if item.stale %}<span class="ml-1 text-xs text-amber-600" title="数据可能滞后">⚠</span>{% endif %}
+        </td>
+        <td class="text-right tnum mono">
+          {% if item.price is not none %}${{ "{:.2f}".format(item.price) }}{% else %}—{% endif %}
+        </td>
+        <td class="text-right tnum mono {% if item.change_pct is not none and item.change_pct > 0 %}text-green-600{% elif item.change_pct is not none and item.change_pct < 0 %}text-red-600{% endif %}">
+          {% if item.change_pct is not none %}{{ "{:+.2f}%".format(item.change_pct) }}{% else %}—{% endif %}
+        </td>
+        <td class="text-right tnum mono text-slate-600">
+          {% if item.volume %}{{ "{:,}".format(item.volume) }}{% else %}—{% endif %}
+        </td>
+        <td class="text-slate-500 truncate max-w-[200px]">{{ item.notes or "" }}</td>
       </tr>
       {% endfor %}
       {% if not watchlist %}
