@@ -1,0 +1,53 @@
+<section class="mp-card">
+  <div class="mp-card__head">
+    <span class="mp-card__title">
+      <span class="material-symbols-outlined">leaderboard</span>策略贡献
+    </span>
+    <span class="mp-card__sub">{{ filters.horizon }}d · 共享池视图</span>
+  </div>
+  <div class="mp-card__body" style="padding:0; overflow-x:auto;">
+    <table class="mp-table mp-backtest-table">
+      <thead>
+        <tr>
+          <th>策略</th>
+          <th class="num">n_trades</th>
+          <th class="num">n_dedup</th>
+          <th class="num">n_skipped</th>
+          <th class="num">PnL ($)</th>
+          <th class="num">avg exposure</th>
+          <th class="num">avg bid w</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% if shared_result %}
+          {% for s, c in shared_result.per_strategy_stats.items() %}
+          <tr>
+            <td>
+              <a href="/lab/ai-track?strategy={{ s }}"
+                 class="mp-strategy-link" title="查看 hit rate">
+                {{ c.display_name }}
+              </a>
+              {% if c.n_floor_hits > 0 %}
+                <span class="mp-chip mp-chip--down" style="margin-left:4px;"
+                      title="负 Sharpe 触地 {{ c.n_floor_hits }} 次">
+                  floor {{ c.n_floor_hits }}
+                </span>
+              {% endif %}
+            </td>
+            <td class="num mono tnum">{{ c.n_trades }}</td>
+            <td class="num mono tnum">{{ c.n_dedup_skipped }}</td>
+            <td class="num mono tnum">
+              {{ c.n_capacity_skipped + c.n_cash_short_skipped }}
+            </td>
+            <td class="num mono tnum {% if c.contribution_pnl >= 0 %}up{% else %}down{% endif %}">
+              {{ "{:+.2f}".format(c.contribution_pnl) }}
+            </td>
+            <td class="num mono tnum">{{ "{:.1%}".format(c.avg_exposure) }}</td>
+            <td class="num mono tnum">{{ "{:.2f}".format(c.avg_bid_weight) }}</td>
+          </tr>
+          {% endfor %}
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</section>

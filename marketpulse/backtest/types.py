@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -58,3 +59,82 @@ class StrategyBacktestResult:
     # v0 leaves them None for retroactive replay compatibility.
     strategy_exposure: float | None = None      # avg gross exposure during run
     capital_bid_score: float | None = None      # priority weight in shared pool
+
+
+@dataclass(frozen=True)
+class StrategyBacktestArtifacts:
+    """Diagnostic + cross-module compute layer for a per-strategy run.
+
+    Separates SERIALIZATION concerns (StrategyBacktestResult — what goes
+    into templates, JSON, pickle, API responses) from COMPUTE concerns
+    (StrategyBacktestArtifacts — what the Phase 5a shared-pool simulator
+    needs internally for rolling Sharpe lookups).
+    """
+    strategy: str
+    full_equity_curve: list[tuple[date, float]]
+
+
+@dataclass(frozen=True)
+class StrategyContribution:
+    """One strategy's slice of a shared-pool run."""
+    strategy: str
+    display_name: str
+    n_trades: int
+    n_dedup_skipped: int
+    n_capacity_skipped: int
+    n_cash_short_skipped: int
+    contribution_pnl: float
+    avg_exposure: float
+    avg_bid_weight: float
+    n_bids: int
+    n_floor_hits: int
+
+
+@dataclass(frozen=True)
+class BidRecord:
+    """One bid decision — diagnostic timeline."""
+    date: date
+    strategy: str
+    ticker: str
+    weight: float
+    outcome: Literal["won", "dedup_loser", "cap_full", "cash_short"]
+    winner: str | None
+
+
+@dataclass(frozen=True)
+class PortfolioBacktestResult:
+    """Phase 5a shared-pool result — the ONE portfolio combining all strategies."""
+
+    # Identity (required)
+    horizon: int
+
+    # Aggregate counts (required)
+    n_trades: int
+    n_dedup_total: int
+
+    # Utilization (required)
+    avg_capital_utilization: float
+
+    # Performance metrics (required; sharpe/sortino/calmar may be None)
+    cumulative_return: float
+    annual_return: float
+    sharpe: float | None
+    sortino: float | None
+    max_drawdown: float
+    calmar: float | None
+    win_rate: float
+    avg_win_pct: float
+    avg_loss_pct: float
+
+    # Series + benchmarks (required)
+    daily_equity_curve: list[tuple[date, float]]
+    excess_vs_spy: float
+
+    # Breakdown + diagnostics (required)
+    per_strategy_stats: dict[str, StrategyContribution]
+    bid_history: list[BidRecord]
+
+    # Defaulted provenance (always-default in v0)
+    display_name: str = "Shared Pool"
+    mtm_model: str = "linear_interpolation_v0"
+    bid_policy: str = "rolling_sharpe_60d_v0"

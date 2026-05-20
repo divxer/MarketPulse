@@ -3,9 +3,17 @@
     <span class="mp-eyebrow mp-eyebrow--primary">实验室 · 组合回测</span>
     <h1 class="grotesk mp-hero__title">Strategy Performance Observatory</h1>
     <span class="mp-rule"></span>
-    <p class="mp-hero__desc">
-      回放 Phase 3 的 6 个策略 + SPY 基准在过去 N 天内的策略级合成 PnL。
-      回测使用 long-only 模型 + 固定持有 horizon 天 + $1k 每信号 + $10k 软上限。
-    </p>
+    {% if mode == 'shared-pool' %}
+      <p class="mp-hero__desc">
+        6 个策略共享单一 $10k 资本池,通过 {{ lookback_days }}-day 滚动 Sharpe
+        加权竞标分配。撞 ticker 时高 Sharpe 策略赢。
+        <strong>bid_policy=rolling_sharpe_60d_v0</strong>。
+      </p>
+    {% else %}
+      <p class="mp-hero__desc">
+        回放 Phase 3 的 6 个策略 + SPY 基准在过去 N 天内的策略级合成 PnL。
+        回测使用 long-only 模型 + 固定持有 horizon 天 + $1k 每信号 + $10k 软上限。
+      </p>
+    {% endif %}
   </div>
 </section>

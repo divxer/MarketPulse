@@ -1155,3 +1155,28 @@ hr.mp-hr {
   height: 2px;
   background: var(--ns-primary);
 }
+
+/* ════════ Phase 5a: shared-pool view styles ════════ */
+.mp-bid-history-table {
+  width: 100%;
+  min-width: 480px;
+  font-size: 12px;
+}
+.mp-bid-history-table th,
+.mp-bid-history-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--ns-outline-variant);
+}
+.mp-bid-history-table th {
+  text-align: left;
+  color: var(--ns-on-surface-variant);
+  position: sticky;
+  top: 0;
+  background: var(--ns-surface);
+  z-index: 1;
+}
+.mp-bid-history-table td.num,
+.mp-bid-history-table th.num { text-align: right; }
+.mp-bid-history-table tr.is-won { background: rgba(22, 163, 74, 0.04); }
+.mp-bid-history-table tr.is-loser { background: rgba(100, 116, 139, 0.04); }
+.mp-bid-history-table tr.is-skipped { background: rgba(220, 38, 38, 0.04); }

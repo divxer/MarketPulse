@@ -1,5 +1,6 @@
 """Lab — /lab/backtest Strategy Performance Observatory."""
 from datetime import date, timedelta
+from typing import Literal
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -16,7 +17,7 @@ router = APIRouter()
 
 def _qs_from_filters(filters: dict) -> str:
     """Build a clean query string, dropping defaults / None / empty."""
-    DEFAULTS = {"horizon": 5, "since_days": 90}
+    DEFAULTS = {"horizon": 5, "since_days": 90, "mode": "per-strategy"}
     payload = {}
     for k, v in filters.items():
         if v is None or v == "":
@@ -32,6 +33,7 @@ def lab_backtest(
     request: Request,
     horizon: int = 5,
     since_days: str | int = 90,
+    mode: Literal["per-strategy", "shared-pool"] = "per-strategy",
     db: Session = Depends(get_db),
     _: None = Depends(require_auth),
 ):
@@ -57,7 +59,16 @@ def lab_backtest(
             detail=f"invalid horizon: must be one of {DEFAULT_HORIZONS}",
         )
 
-    results = run_all_backtests(db, horizon=horizon, since=since)
+    if mode == "shared-pool":
+        from marketpulse.backtest.simulator import run_shared_pool_backtest
+        out = run_shared_pool_backtest(
+            db, horizon=horizon, since=since, lookback_days=60,
+        )
+        results = out["isolated"]
+        shared_result = out["shared"]
+    else:
+        results = run_all_backtests(db, horizon=horizon, since=since)
+        shared_result = None
 
     strategies = [r for r in results if r.strategy != "__spy_buyhold__"]
     spy = next((r for r in results if r.strategy == "__spy_buyhold__"), None)
@@ -87,7 +98,7 @@ def lab_backtest(
 
     chart_data = _build_chart_data(strategies + ([spy] if spy else []))
 
-    filters = {"horizon": horizon, "since_days": since_days}
+    filters = {"horizon": horizon, "since_days": since_days, "mode": mode}
 
     return templates.TemplateResponse(
         request, "lab_backtest.html",
@@ -102,6 +113,9 @@ def lab_backtest(
             "chart_data": chart_data,
             "filters": filters,
             "filters_qs": _qs_from_filters(filters),
+            "mode": mode,
+            "shared_result": shared_result,
+            "lookback_days": 60,
         },
     )
 
