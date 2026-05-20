@@ -66,6 +66,8 @@ def simulate_shared_pool(
             n_trades=0,
             n_dedup_total=0,
             avg_capital_utilization=0.0,
+            max_strategy_exposure=0.0,
+            hhi_concentration=0.0,
             cumulative_return=0.0,
             annual_return=0.0,
             sharpe=None,
@@ -164,6 +166,7 @@ def simulate_shared_pool(
                         date=d, strategy=loser.strategy, ticker=ticker,
                         weight=weights[loser.strategy],
                         outcome="dedup_loser", winner=best.strategy,
+                        position_size=position_size,
                     ))
                     n_dedup_skipped_by_strategy[loser.strategy] = (
                         n_dedup_skipped_by_strategy.get(loser.strategy, 0) + 1
@@ -192,6 +195,7 @@ def simulate_shared_pool(
                     date=d, strategy=b.strategy, ticker=b.ticker,
                     weight=weights[b.strategy],
                     outcome="cap_full", winner=None,
+                    position_size=position_size,
                 ))
                 n_capacity_skipped_by_strategy[b.strategy] = (
                     n_capacity_skipped_by_strategy.get(b.strategy, 0) + 1
@@ -202,6 +206,7 @@ def simulate_shared_pool(
                     date=d, strategy=b.strategy, ticker=b.ticker,
                     weight=weights[b.strategy],
                     outcome="cash_short", winner=None,
+                    position_size=position_size,
                 ))
                 n_cash_short_skipped_by_strategy[b.strategy] = (
                     n_cash_short_skipped_by_strategy.get(b.strategy, 0) + 1
@@ -219,6 +224,7 @@ def simulate_shared_pool(
                 date=d, strategy=b.strategy, ticker=b.ticker,
                 weight=weights[b.strategy],
                 outcome="won", winner=None,
+                position_size=position_size,
             ))
 
         # ─── MTM ─── (linear interpolation per spec § 2 + Phase 4)
@@ -314,9 +320,11 @@ def simulate_shared_pool(
             n_dedup_skipped=n_dedup_skipped_by_strategy.get(s, 0),
             n_capacity_skipped=n_capacity_skipped_by_strategy.get(s, 0),
             n_cash_short_skipped=n_cash_short_skipped_by_strategy.get(s, 0),
+            n_size_too_small_skipped=0,  # Phase 5b placeholder; Task 7 computes real value
             contribution_pnl=contrib_pnl,
             avg_exposure=avg_exposure,
             avg_bid_weight=avg_bid_weight,
+            avg_position_size=0.0,  # Phase 5b placeholder; Task 7 computes real value
             n_bids=n_bids_by_strategy.get(s, 0),
             n_floor_hits=n_floor_hits_by_strategy.get(s, 0),
         )
@@ -329,6 +337,8 @@ def simulate_shared_pool(
         n_trades=n_trades,
         n_dedup_total=sum(n_dedup_skipped_by_strategy.values()),
         avg_capital_utilization=avg_util,
+        max_strategy_exposure=0.0,  # Phase 5b placeholder; Task 7 computes real value
+        hhi_concentration=0.0,      # Phase 5b placeholder; Task 7 computes real value
         cumulative_return=metrics.cumulative_return,
         annual_return=metrics.annual_return,
         sharpe=metrics.sharpe,
