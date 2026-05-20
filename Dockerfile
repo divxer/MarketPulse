@@ -17,7 +17,17 @@ ENV PYTHONUNBUFFERED=1 \
     UV_LINK_MODE=copy
 
 # Install uv into a system-wide location so the non-root `app` user can execute it.
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+#
+# libnss3 is required at runtime by curl_cffi's browser-impersonate profiles
+# (yfinance 1.3+ uses curl_cffi to dodge Yahoo's anti-bot detection). Without
+# it the BoringSSL bundle inside curl_cffi fails to load and every yfinance
+# fetch raises:
+#   curl_cffi.curl.CurlError: TLS connect error:
+#     error:00000000:invalid library (0):OPENSSL_internal:invalid library
+# This manifested in production as 503s on /stock/{ticker} pages. libnspr4
+# is pulled in transitively (NSS needs it).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl ca-certificates libnss3 \
     && rm -rf /var/lib/apt/lists/* \
     && curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh \
     && chmod +x /usr/local/bin/uv /usr/local/bin/uvx
