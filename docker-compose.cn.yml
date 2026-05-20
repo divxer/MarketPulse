@@ -64,9 +64,15 @@ services:
       # Outbound HTTP proxy (e.g. for reaching Anthropic API from regions where
       # it's blocked). Leave empty to disable. NO_PROXY bypasses for hosts that
       # are already China-friendly (Tencent quote/kline) or local.
+      #
+      # httpx (used by TencentClient) does NOT recognize the `*.domain.com`
+      # wildcard — its httpcore proxy resolver only matches leading-dot suffix
+      # or explicit hostnames. With the wildcard, Tencent calls get routed
+      # through Clash/Mihomo to overseas exit nodes and Tencent's CDN
+      # terminates the TLS handshake (SSL UNEXPECTED_EOF_WHILE_READING).
       HTTP_PROXY: ${HTTP_PROXY:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}
-      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,*.gtimg.cn}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,.gtimg.cn,qt.gtimg.cn,web.ifzq.gtimg.cn}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
       interval: 30s
