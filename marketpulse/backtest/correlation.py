@@ -84,3 +84,44 @@ def compute_pairwise_correlation(
     if not math.isfinite(corr):
         return None
     return corr
+
+
+def find_correlation_neighbors(
+    candidate_ticker: str,
+    open_position_tickers: list[str],
+    *,
+    as_of: date,
+    threshold: float = 0.6,
+    lookback_days: int = 60,
+    min_overlap: int = 30,
+    price_provider: PriceProvider,
+) -> tuple[list[str], tuple[tuple[str, float], ...]]:
+    """For a candidate bid, find which open positions are correlated above threshold.
+
+    Returns (neighbors, diagnostics):
+      - neighbors: list of open-position tickers with pairwise corr >= threshold,
+        in the same order as input (stable iteration for deterministic tests).
+      - diagnostics: tuple of (ticker, corr_value) pairs for ALL pairs checked
+        where corr is not None. Sorted by corr descending. Hashable, embeddable
+        in BidRecord.blocked_by_correlation_with.
+
+    Self-pair handling: candidate_ticker is filtered from open_position_tickers
+    before pairing. Caller does not need to dedupe.
+    """
+    filtered_open = [t for t in open_position_tickers if t != candidate_ticker]
+
+    diag_with_corr: list[tuple[str, float]] = []
+    for other in filtered_open:
+        corr = compute_pairwise_correlation(
+            candidate_ticker, other,
+            as_of=as_of,
+            lookback_days=lookback_days,
+            min_overlap=min_overlap,
+            price_provider=price_provider,
+        )
+        if corr is not None:
+            diag_with_corr.append((other, corr))
+
+    diagnostics = tuple(sorted(diag_with_corr, key=lambda x: -x[1]))
+    neighbors = [t for t, c in diag_with_corr if c >= threshold]
+    return neighbors, diagnostics

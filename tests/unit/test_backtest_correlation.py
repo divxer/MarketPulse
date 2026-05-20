@@ -147,3 +147,103 @@ def test_pairwise_correlation_excludes_dates_at_or_after_as_of() -> None:
     # not be influenced by post-as_of data (same series both legs → ~1.0)
     assert corr is not None
     assert corr > 0.999
+
+
+def test_find_correlation_neighbors_returns_only_above_threshold() -> None:
+    """Only tickers with corr >= threshold appear in neighbors."""
+    from marketpulse.backtest.correlation import find_correlation_neighbors
+
+    base = _linear(100.0, 60, 1.0, date(2026, 1, 1))
+    weak = [(d, base[i][1] + 5.0 * (i % 7)) for i, (d, _) in enumerate(base)]
+    flat = [(d, 100.0 + 0.05 * (i % 3)) for i, (d, _) in enumerate(base)]
+    provider = _FakePriceProvider({
+        "CAND": base,
+        "STRONG": base,  # ρ ≈ 1.0
+        "WEAK": weak,    # ρ moderate
+        "FLAT": flat,    # near zero correlation
+    })
+
+    neighbors, _diag = find_correlation_neighbors(
+        "CAND",
+        ["STRONG", "WEAK", "FLAT"],
+        as_of=date(2026, 3, 5),
+        threshold=0.6,
+        lookback_days=60,
+        price_provider=provider,
+    )
+    assert "STRONG" in neighbors
+    assert "FLAT" not in neighbors
+
+
+def test_find_correlation_neighbors_filters_self_from_input() -> None:
+    """Candidate ticker in open_positions list is filtered before pairing."""
+    from marketpulse.backtest.correlation import find_correlation_neighbors
+
+    series = _linear(100.0, 60, 1.0, date(2026, 1, 1))
+    provider = _FakePriceProvider({"AAPL": series, "GOOGL": series})
+
+    neighbors, _diag = find_correlation_neighbors(
+        "AAPL",
+        ["AAPL", "GOOGL"],  # candidate appears in input
+        as_of=date(2026, 3, 5),
+        threshold=0.6,
+        lookback_days=60,
+        price_provider=provider,
+    )
+    # AAPL must NOT appear in neighbors (self-filtered)
+    assert "AAPL" not in neighbors
+    # GOOGL identical series → corr ~1.0 → IS a neighbor
+    assert "GOOGL" in neighbors
+
+
+def test_find_correlation_neighbors_diagnostics_sorted_desc() -> None:
+    """Diagnostics tuple is sorted by corr value descending (highest first)."""
+    from marketpulse.backtest.correlation import find_correlation_neighbors
+
+    # Build series with known correlations relative to CAND
+    base = _linear(100.0, 60, 1.0, date(2026, 1, 1))
+    medium = [(d, v + 2.0 * (i % 9)) for i, (d, v) in enumerate(base)]
+    low = [(d, v + 8.0 * (i % 5)) for i, (d, v) in enumerate(base)]
+    provider = _FakePriceProvider({
+        "CAND": base,
+        "HIGH": base,
+        "MED": medium,
+        "LOW": low,
+    })
+
+    _neighbors, diagnostics = find_correlation_neighbors(
+        "CAND",
+        ["HIGH", "MED", "LOW"],
+        as_of=date(2026, 3, 5),
+        threshold=0.0,  # capture everything for sort assertion
+        lookback_days=60,
+        min_overlap=30,
+        price_provider=provider,
+    )
+    # diagnostics is tuple of (ticker, corr) sorted by corr desc
+    corrs = [c for _t, c in diagnostics]
+    assert corrs == sorted(corrs, reverse=True)
+    # HIGH should be first (corr ~1.0)
+    assert diagnostics[0][0] == "HIGH"
+
+
+def test_find_correlation_neighbors_cold_start_returns_empty() -> None:
+    """When all corrs are None (insufficient overlap), returns empty list + empty tuple."""
+    from marketpulse.backtest.correlation import find_correlation_neighbors
+
+    # Only 10 days of data; min_overlap=30 forces None
+    short_a = _linear(100.0, 10, 1.0, date(2026, 2, 25))
+    short_b = _linear(100.0, 10, 1.0, date(2026, 2, 25))
+    provider = _FakePriceProvider({"A": short_a, "B": short_b})
+
+    neighbors, diagnostics = find_correlation_neighbors(
+        "A",
+        ["B"],
+        as_of=date(2026, 3, 7),
+        threshold=0.6,
+        lookback_days=60,
+        min_overlap=30,
+        price_provider=provider,
+    )
+    assert neighbors == []
+    assert diagnostics == ()
