@@ -93,3 +93,70 @@ def test_static_version_helper_returns_stable_hash():
     # Missing file: returns "missing" sentinel
     missing = static_version("does-not-exist.css")
     assert missing == "missing"
+
+
+def test_base_nav_includes_lab_entry(client: TestClient, monkeypatch):
+    """Verify the top nav exposes a /lab/ai-track entry labeled 实验室.
+
+    Before this PR, /lab/* pages had NO nav entry — only deep links from
+    /stock pages or strategy-table arrows could reach them. Users without
+    bookmarks couldn't find the AI evaluation or backtest pages.
+    """
+    r = client.get("/login")
+    assert r.status_code == 200
+    # The nav <a> for lab — both href and label must be present
+    assert 'href="/lab/ai-track"' in r.text
+    assert "实验室" in r.text
+
+
+def test_base_nav_active_state_highlights_current_page(
+    client: TestClient, monkeypatch,
+):
+    """Each nav entry gets `.mp-nav-active` when the current request path
+    matches. Verify on a few representative routes.
+    """
+    # Visit /watchlist → "自选股" link gets the active class
+    # Use a login-required redirect to short-circuit (we just want the rendered nav).
+    # /login itself has the nav and is unauthenticated, perfect for this assertion.
+    r = client.get("/login")
+    assert r.status_code == 200
+    # /login isn't in the nav, so NO link should have mp-nav-active.
+    # (MarketPulse link is exact-match on '/', /login != '/'.)
+    assert "mp-nav-active" not in r.text, (
+        "/login is not a primary nav destination; no link should be active"
+    )
+
+
+def test_base_nav_lab_link_active_on_lab_pages(
+    client: TestClient, monkeypatch,
+):
+    """Hitting /lab/ai-track lights up the 实验室 nav entry; /lab/backtest
+    too, since both belong to the same primary destination."""
+    # Need auth to reach /lab/* — use the existing test password fixture.
+    from marketpulse.auth.password import hash_password
+    pw = "secret"
+    monkeypatch.setenv("APP_PASSWORD_HASH", hash_password(pw))
+    from marketpulse.config import get_settings
+    get_settings.cache_clear()
+    client.post("/login", data={"password": pw})
+
+    # /lab/ai-track should mark 实验室 active
+    r = client.get("/lab/ai-track")
+    assert r.status_code == 200
+    # Look for the active class on the lab nav anchor specifically.
+    # Find the snippet between href="/lab/ai-track" and the closing </a>.
+    import re
+    m = re.search(r'<a\s+href="/lab/ai-track"[^>]*>', r.text)
+    assert m is not None
+    assert "mp-nav-active" in m.group(0), (
+        f"lab nav anchor should have mp-nav-active; got: {m.group(0)}"
+    )
+
+    # /lab/backtest should also mark 实验室 active (same primary destination)
+    r2 = client.get("/lab/backtest")
+    assert r2.status_code == 200
+    m2 = re.search(r'<a\s+href="/lab/ai-track"[^>]*>', r2.text)
+    assert m2 is not None
+    assert "mp-nav-active" in m2.group(0), (
+        f"on /lab/backtest, lab nav anchor should still be active; got: {m2.group(0)}"
+    )

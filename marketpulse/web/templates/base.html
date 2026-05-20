@@ -54,13 +54,21 @@
 </head>
 <body class="bg-slate-50 text-slate-900 font-sans">
   <header class="border-b bg-white">
+    {# Active-state highlighting: a nav link gets `.mp-nav-active` when its
+       href matches the current request path. Home `/` is exact-match only
+       (else every page would highlight it). All other top-level entries
+       use startswith() so deep links like /stock/AAPL highlight no nav
+       entry by design — stock detail isn't a primary destination.
+       /lab/ai-track and /lab/backtest both light up "实验室". #}
+    {% set p = request.url.path %}
     <nav class="mx-auto px-4 py-3 flex gap-4 text-sm {% block nav_width %}max-w-5xl{% endblock %}">
-      <a href="/" class="font-semibold">MarketPulse</a>
-      <a href="/watchlist">自选股</a>
-      <a href="/holdings">持仓</a>
-      <a href="/trades">交易</a>
-      <a href="/alerts">告警</a>
-      <a href="/recaps">复盘</a>
+      <a href="/" class="font-semibold{% if p == '/' %} mp-nav-active{% endif %}">MarketPulse</a>
+      <a href="/watchlist" class="{% if p.startswith('/watchlist') %}mp-nav-active{% endif %}">自选股</a>
+      <a href="/holdings" class="{% if p.startswith('/holdings') %}mp-nav-active{% endif %}">持仓</a>
+      <a href="/trades" class="{% if p.startswith('/trades') %}mp-nav-active{% endif %}">交易</a>
+      <a href="/alerts" class="{% if p.startswith('/alerts') %}mp-nav-active{% endif %}">告警</a>
+      <a href="/recaps" class="{% if p.startswith('/recap') %}mp-nav-active{% endif %}">复盘</a>
+      <a href="/lab/ai-track" class="{% if p.startswith('/lab') %}mp-nav-active{% endif %}">实验室</a>
     </nav>
   </header>
   <main class="mx-auto p-4 {% block main_width %}max-w-5xl{% endblock %}">
