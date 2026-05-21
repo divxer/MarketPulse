@@ -7,6 +7,7 @@ Create Date: 2026-05-21
 from collections.abc import Sequence
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision: str = "0010"
@@ -70,10 +71,22 @@ def upgrade() -> None:
         sa.Column("contribution_multiplier", sa.Float(), nullable=False, server_default="1.0"),
         sa.Column("adjusted_bid_weight", sa.Float(), nullable=True),
         sa.Column("effective_corr_window", sa.Integer(), nullable=False, server_default="60"),
-        sa.Column("rewarded_for_negative_corr", sa.Boolean(), nullable=False, server_default=sa.text("0")),
-        sa.Column("would_change_rank", sa.Boolean(), nullable=False, server_default=sa.text("0")),
-        sa.Column("size_clamped_by_override", sa.Boolean(), nullable=False, server_default=sa.text("0")),
-        sa.CheckConstraint("status IN ('PLACED', 'ENTRY_FILLED', 'CANCELLED')", name="ck_paper_order_status"),
+        sa.Column(
+            "rewarded_for_negative_corr",
+            sa.Boolean(), nullable=False, server_default=sa.text("0"),
+        ),
+        sa.Column(
+            "would_change_rank",
+            sa.Boolean(), nullable=False, server_default=sa.text("0"),
+        ),
+        sa.Column(
+            "size_clamped_by_override",
+            sa.Boolean(), nullable=False, server_default=sa.text("0"),
+        ),
+        sa.CheckConstraint(
+            "status IN ('PLACED', 'ENTRY_FILLED', 'CANCELLED')",
+            name="ck_paper_order_status",
+        ),
         sa.CheckConstraint("quantity > 0", name="ck_paper_order_qty_positive"),
         # Time-consistency CHECKs (spec § 4.1):
         sa.CheckConstraint(
@@ -89,17 +102,30 @@ def upgrade() -> None:
             name="ck_paper_order_cancelled_has_ts",
         ),
     )
-    op.create_index("ix_paper_order_status_horizon", "paper_order", ["status", "horizon_date"])
-    op.create_index("ix_paper_order_status_alloc_date", "paper_order", ["status", "allocation_date"])
-    op.create_index("ix_paper_order_alloc_date_strategy", "paper_order", ["allocation_date", "strategy"])
-    op.create_index("ix_paper_order_strategy_placed", "paper_order", ["strategy", "placed_at"])
+    op.create_index(
+        "ix_paper_order_status_horizon", "paper_order", ["status", "horizon_date"],
+    )
+    op.create_index(
+        "ix_paper_order_status_alloc_date", "paper_order", ["status", "allocation_date"],
+    )
+    op.create_index(
+        "ix_paper_order_alloc_date_strategy",
+        "paper_order", ["allocation_date", "strategy"],
+    )
+    op.create_index(
+        "ix_paper_order_strategy_placed", "paper_order", ["strategy", "placed_at"],
+    )
     op.create_index("ix_paper_order_run_id", "paper_order", ["allocation_run_id"])
 
     # paper_position (no FK to paper_fill — see spec § 4.7)
     op.create_table(
         "paper_position",
         sa.Column("id", sa.Integer(), primary_key=True),
-        sa.Column("order_id", sa.Integer(), sa.ForeignKey("paper_order.id"), nullable=False, unique=True),
+        sa.Column(
+            "order_id", sa.Integer(),
+            sa.ForeignKey("paper_order.id"),
+            nullable=False, unique=True,
+        ),
         sa.Column("entry_fill_id", sa.Integer(), nullable=True),
         sa.Column("exit_fill_id", sa.Integer(), nullable=True),
         sa.Column("strategy", sa.String(64), nullable=False),
@@ -114,13 +140,19 @@ def upgrade() -> None:
         sa.Column("exit_price", sa.Numeric(18, 6), nullable=True),
         sa.Column("realized_pnl", sa.Numeric(18, 6), nullable=True),
         sa.CheckConstraint("status IN ('OPEN', 'CLOSED')", name="ck_paper_position_status"),
-        sa.CheckConstraint("status != 'OPEN' OR exit_fill_id IS NULL", name="ck_paper_position_open_no_exit"),
+        sa.CheckConstraint(
+            "status != 'OPEN' OR exit_fill_id IS NULL",
+            name="ck_paper_position_open_no_exit",
+        ),
         sa.CheckConstraint(
             "status != 'CLOSED' OR (entry_fill_id IS NOT NULL AND exit_fill_id IS NOT NULL)",
             name="ck_paper_position_closed_both_set",
         ),
     )
-    op.create_index("ix_paper_position_status_horizon", "paper_position", ["status", "horizon_date"])
+    op.create_index(
+        "ix_paper_position_status_horizon",
+        "paper_position", ["status", "horizon_date"],
+    )
     op.create_index("ix_paper_position_strategy_ticker", "paper_position", ["strategy", "ticker"])
     op.create_index("ix_paper_position_entry_fill", "paper_position", ["entry_fill_id"])
     op.create_index("ix_paper_position_exit_fill", "paper_position", ["exit_fill_id"])
