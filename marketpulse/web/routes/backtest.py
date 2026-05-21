@@ -164,6 +164,13 @@ def lab_backtest(
                 shared_result.correlation_caps_enabled if shared_result else False
             ),
             "risk_policy": shared_result.risk_policy if shared_result else None,
+            # Phase 5d: explicit aliases for template clarity
+            "contribution_enabled": (
+                shared_result.contribution_enabled if shared_result else False
+            ),
+            "contribution_lambda": (
+                shared_result.contribution_lambda if shared_result else 0.5
+            ),
         },
     )
 
