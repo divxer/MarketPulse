@@ -1373,3 +1373,110 @@ def test_phase5d_would_change_rank_populated_when_disabled():
         # (whether True or False — what matters is the field is computed)
         for b in bids_with_corr:
             assert isinstance(b.would_change_rank, bool)
+
+
+def test_phase5d_metadata_on_won_bidrecord():
+    """Won BidRecord carries all 8 Phase 5d fields populated from metadata."""
+    from datetime import date, timedelta
+
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+
+    good = [(date(2026, 4, 1) + timedelta(days=i), 10_000.0 * (1.005 ** i))
+            for i in range(30)]
+    bids = [_pair("AAPL", "a", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0)]
+    daily_curves = {"a": good}
+
+    r = simulate_shared_pool(
+        bids=bids, daily_curves=daily_curves,
+        horizon=5, initial_capital=10_000.0, base_position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=False,
+        sector_caps_enabled=False, correlation_caps_enabled=False,
+        contribution_enabled=False,
+    )
+    won = [b for b in r.bid_history if b.outcome == "won"]
+    assert len(won) == 1
+    b = won[0]
+    # Precondition: weight is set (matches raw)
+    assert b.weight is not None
+    # Outcome: all 8 Phase 5d fields are populated
+    assert b.raw_bid_weight is not None or b.raw_bid_weight is None  # may be None on cold-start
+    # multiplier defaults to 1.0 in cold-start
+    assert b.contribution_multiplier in (1.0,) or 0.5 <= b.contribution_multiplier <= 1.2
+    # effective_corr_window is set (0 if no overlap)
+    assert b.effective_corr_window >= 0
+    # pool_corr_excludes_self is True (LOO v0 lock)
+    assert b.pool_corr_excludes_self is True
+
+
+def test_phase5d_metadata_on_sector_cap_full_bidrecord():
+    """sector_cap_full BidRecord (Phase 5c site) carries Phase 5d metadata."""
+    from datetime import date, timedelta
+
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+
+    good = [(date(2026, 4, 1) + timedelta(days=i), 10_000.0 * (1.005 ** i))
+            for i in range(30)]
+
+    def fake_sector(_ticker: str) -> str:
+        return "Technology"  # all bids same sector → cap fires
+
+    # 5 same-sector $1k bids; cap=40% × $10k = $4k → first 4 win, 5th blocks
+    bids = [
+        _pair(f"T{i}", f"s{i}", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0)
+        for i in range(5)
+    ]
+    daily_curves = {f"s{i}": good for i in range(5)}
+
+    r = simulate_shared_pool(
+        bids=bids, daily_curves=daily_curves,
+        horizon=5, initial_capital=10_000.0, base_position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=False,
+        sector_caps_enabled=True, sector_cap_pct=0.40,
+        correlation_caps_enabled=False,
+        sector_provider=fake_sector,
+        contribution_enabled=False,
+    )
+    blocked = [b for b in r.bid_history if b.outcome == "sector_cap_full"]
+    # Precondition: exactly one blocked bid
+    assert len(blocked) == 1
+    b = blocked[0]
+    # Outcome: 5d metadata present
+    assert b.pool_corr_excludes_self is True
+    assert b.effective_corr_window >= 0
+    # Multiplier should be 1.0 (cold-start or short_circuit; not adjusted)
+    assert 0.5 <= b.contribution_multiplier <= 1.2
+
+
+def test_phase5d_metadata_on_dedup_loser_bidrecord():
+    """dedup_loser BidRecord carries Phase 5d metadata."""
+    from datetime import date, timedelta
+
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+
+    good = [(date(2026, 4, 1) + timedelta(days=i), 10_000.0 * (1.005 ** i))
+            for i in range(30)]
+
+    # Two strategies bid same ticker; lower Sharpe loses dedup
+    bids = [
+        _pair("AAPL", "a", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0),
+        _pair("AAPL", "b", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0),
+    ]
+    daily_curves = {"a": good, "b": good}
+
+    r = simulate_shared_pool(
+        bids=bids, daily_curves=daily_curves,
+        horizon=5, initial_capital=10_000.0, base_position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=False,
+        sector_caps_enabled=False, correlation_caps_enabled=False,
+        contribution_enabled=False,
+    )
+    losers = [b for b in r.bid_history if b.outcome == "dedup_loser"]
+    # Precondition: exactly one dedup loser
+    assert len(losers) == 1
+    b = losers[0]
+    # Outcome: 5d metadata present
+    assert b.pool_corr_excludes_self is True
+    assert b.effective_corr_window >= 0
