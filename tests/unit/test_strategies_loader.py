@@ -142,3 +142,160 @@ def test_phase5e_strategy_dataclass_has_phase5e_sizing_fields_defaulted() -> Non
     assert s.base_position_size is None
     assert s.min_position is None
     assert s.max_position is None
+
+
+def test_phase5e_sizing_block_absent_yields_none_fields(tmp_path) -> None:
+    """# Layer: invariant
+    No sizing: block → all 3 Strategy fields are None. Backward-compat
+    with existing YAMLs.
+    """
+    from marketpulse.strategies.loader import load_strategies
+    yaml_text = """
+name: test_strategy
+display_name: Test
+version: v1
+description: test
+applies_when: always
+expected_horizons: [5]
+instructions: do x
+"""
+    (tmp_path / "test_strategy.yaml").write_text(yaml_text)
+    strategies = load_strategies(tmp_path)
+    s = strategies["test_strategy"]
+    assert s.base_position_size is None
+    assert s.min_position is None
+    assert s.max_position is None
+
+
+def test_phase5e_sizing_block_partial_only_base(tmp_path) -> None:
+    """# Layer: invariant
+    Partial sizing: block (only base_position_size) → other 2 fields None.
+    """
+    from marketpulse.strategies.loader import load_strategies
+    yaml_text = """
+name: test_strategy
+display_name: Test
+version: v1
+description: test
+applies_when: always
+expected_horizons: [5]
+instructions: do x
+sizing:
+  base_position_size: 750
+"""
+    (tmp_path / "test_strategy.yaml").write_text(yaml_text)
+    strategies = load_strategies(tmp_path)
+    s = strategies["test_strategy"]
+    assert s.base_position_size == 750.0
+    assert s.min_position is None
+    assert s.max_position is None
+
+
+def test_phase5e_sizing_block_full_valid(tmp_path) -> None:
+    """# Layer: invariant
+    Full sizing: block with all 3 fields, satisfying min <= base <= max.
+    """
+    from marketpulse.strategies.loader import load_strategies
+    yaml_text = """
+name: test_strategy
+display_name: Test
+version: v1
+description: test
+applies_when: always
+expected_horizons: [5]
+instructions: do x
+sizing:
+  base_position_size: 500
+  min_position: 200
+  max_position: 2000
+"""
+    (tmp_path / "test_strategy.yaml").write_text(yaml_text)
+    strategies = load_strategies(tmp_path)
+    s = strategies["test_strategy"]
+    assert s.base_position_size == 500.0
+    assert s.min_position == 200.0
+    assert s.max_position == 2000.0
+
+
+def test_phase5e_sizing_invalid_min_greater_than_max_raises(tmp_path) -> None:
+    """# Layer: invariant
+    min > max (after merging with globals) → ValueError with both values
+    in the message. Spec § 5 error-message contract.
+    """
+    import pytest
+
+    from marketpulse.strategies.loader import load_strategies
+    yaml_text = """
+name: test_strategy
+display_name: Test
+version: v1
+description: test
+applies_when: always
+expected_horizons: [5]
+instructions: do x
+sizing:
+  min_position: 5000
+  max_position: 1000
+"""
+    (tmp_path / "test_strategy.yaml").write_text(yaml_text)
+    with pytest.raises(ValueError) as exc_info:
+        load_strategies(tmp_path)
+    # Precondition: error mentions both values
+    msg = str(exc_info.value)
+    assert "5000" in msg and "1000" in msg
+    assert "min" in msg.lower() and "max" in msg.lower()
+    assert "test_strategy" in msg
+
+
+def test_phase5e_sizing_invalid_base_greater_than_max_raises(tmp_path) -> None:
+    """# Layer: invariant
+    base > max (after merging with globals) → ValueError.
+    """
+    import pytest
+
+    from marketpulse.strategies.loader import load_strategies
+    yaml_text = """
+name: test_strategy
+display_name: Test
+version: v1
+description: test
+applies_when: always
+expected_horizons: [5]
+instructions: do x
+sizing:
+  base_position_size: 6000
+  max_position: 3000
+"""
+    (tmp_path / "test_strategy.yaml").write_text(yaml_text)
+    with pytest.raises(ValueError) as exc_info:
+        load_strategies(tmp_path)
+    msg = str(exc_info.value)
+    assert "6000" in msg and "3000" in msg
+    assert "test_strategy" in msg
+
+
+def test_phase5e_sizing_invalid_negative_min_raises(tmp_path) -> None:
+    """# Layer: invariant
+    Negative sizing.min_position → ValueError with field name + value.
+    """
+    import pytest
+
+    from marketpulse.strategies.loader import load_strategies
+    yaml_text = """
+name: test_strategy
+display_name: Test
+version: v1
+description: test
+applies_when: always
+expected_horizons: [5]
+instructions: do x
+sizing:
+  min_position: -100
+"""
+    (tmp_path / "test_strategy.yaml").write_text(yaml_text)
+    with pytest.raises(ValueError) as exc_info:
+        load_strategies(tmp_path)
+    msg = str(exc_info.value)
+    assert "min_position" in msg
+    assert "-100" in msg
+    assert "test_strategy" in msg
