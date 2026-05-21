@@ -60,6 +60,11 @@ No new features beyond the sizing override + observability metrics. **One new mo
 
     **Taxonomy is DESCRIPTIVE, not prescriptive.** The tag is added AFTER the author has decided what failure the test is detecting; the tag describes what was already true about the test's logic. Authors must NOT shape a test to "fit" a category — e.g., weakening a behavioral assertion to fit the invariant slot, or adding a fixture-dependent precondition to fit the behavioral slot. If a test resists clean categorization, that is a SIGNAL that the test is doing two things and should be split, not a license to relax the tag rules. Code reviewers verify: "given this test's actual logic, is the tag accurate?" — not "is the tag present?"
 14. **Allocation observability — default-ON, no gating flag.** The two new metrics (`effective_allocation`, `rank_drift_from_signal`) are computed at finalization on EVERY backtest run. No `observability_enabled` flag. Rationale: gating would reintroduce the same "silent missing telemetry" failure mode that the warm-pool fixture in Thread B was created to prevent. If display-level filtering is ever needed, add a UI-only / API-only switch — never a computation gate. **Stats are either present and complete, or the run did not happen.**
+
+    **Structural presence vs semantic validity (clarification):**
+    - **Structural presence**: the FIELDS are always present on every `StrategyContribution` instance — guaranteed by dataclass schema. No consumer needs `hasattr` or `getattr` defaults. This is enforced by D20.4.
+    - **Semantic validity**: the VALUES are meaningful only when produced by the simulator's finalization path. A `StrategyContribution` constructed manually (e.g., in a test fixture) with default values (`0.0`, `0`) is structurally valid but semantically null — "no run yet" rather than "this run produced zero allocation." Consumers that bypass the simulator must be aware of this distinction.
+    - These two guarantees compose: simulator output is BOTH structurally present AND semantically valid; manual construction is only structurally present. The dataclass defaults exist to support the manual-construction case (tests, fixtures) without making the simulator's invariant weaker.
 15. **Allocation metrics are INVARIANT-grade telemetry, not stochastic.** `effective_allocation` and `rank_drift_from_signal` are deterministic functions of (final per-strategy capital, bid sequence). Given fixed inputs, the metrics return identical outputs every run. Their tests therefore live in the invariant taxonomy (lock #13). The ONLY behavioral aspect is whether a given fixture *triggers* a non-zero drift — that fixture-shape question is isolated as a separate behavioral guard test, never conflated with the metric's correctness. This separation prevents the metric from drifting into the same ambiguity class that bit `n_would_change_rank` in Phase 5d.
 16. **Allocation metrics are part of the CORE BACKTEST CONTRACT, not diagnostics.** Because lock #14 guarantees `effective_allocation` and `rank_drift_from_signal` are always populated, downstream consumers MAY assume their presence unconditionally:
     - Phase 6's optimizer (or any future allocation-tier consumer) may read these fields without a `hasattr` check, a feature-flag check, or a None-fallback.
@@ -1031,6 +1036,31 @@ The system optimizes a stack of partial objectives:
 There is no scalar objective $J$ that the entire stack maximizes. The system is **rule-following, not objective-driven**. Phase 6's optimization layer will require defining $J$ — likely a constrained optimization over $\sum_s x_s w_s$ subject to all current heuristics expressed as linear constraints. Until that exists, the current stack's behavior cannot be proved optimal relative to any criterion.
 **5e instrumentation:** `effective_allocation` is the canonical observable for "what the system actually optimized," distinct from the bid-weight signal. The gap between them is the heuristic-to-optimal residual that Phase 6 will need to close (or accept).
 
+### The two-space framing — what 5e's metrics actually measure
+
+The right way to read Phase 5e's new instrumentation is NOT "we added two telemetry fields." It is:
+
+> **Phase 5e introduces a measurable divergence metric between the system's two latent spaces.**
+
+The Phase 5a-5d evolution implicitly constructed two distinct decision spaces:
+
+- **Space A (signal space):** `rolling_sharpe`, `pool_corr`, `contribution_multiplier`, `weights_raw`, `weights_adjusted`, `rank`. This is the space the signal layer optimizes — it tells us where capital "should" go according to the Sharpe + correlation calculus.
+- **Space B (execution space):** `position_size`, `outcome`, `effective_allocation`. This is where capital actually went, after all clamps and caps fired.
+
+These two spaces have been silently diverging since Phase 5c introduced caps, and the divergence widens with each new constraint. Until 5e, this divergence had no name and no observable. `rank_drift_from_signal` is the canonical instrument:
+
+$$D_s = \mathrm{rank}_A(w_s) - \mathrm{rank}_B(E_s)$$
+
+When `D_s ≠ 0`, the signal layer wanted strategy `s` to occupy a different rank than the execution layer actually placed it. This is **system inconsistency** — not bug-level inconsistency, but architectural-level inconsistency between what the optimizer asked for and what the rule cascade delivered.
+
+This reframing matters because it tells future engineers what the metric IS, not just what it measures:
+
+- `rank_drift_from_signal` is **not** a diagnostic for finding bugs (bugs would produce wrong values, not non-zero drift).
+- It is **not** a quality metric (high drift isn't "bad" — it just means the constraint layer is binding).
+- It IS a **structural mismatch detector**: the residual that any future optimization layer (Phase 6) must either close, accept, or explicitly trade off against other objectives.
+
+Phase 6's `pool_optimizer.py` will likely consume this metric as the loss function it tries to minimize — or as the bound it tries to stay above (sometimes drift IS desired, e.g., when caps are deliberately conservative).
+
 ### Three additional named risks (interpretability watch-list)
 
 These are NOT debts (no compounding component obligation) but interpretability hazards that grow as the heuristic stack deepens. Naming them so future readers can recognize the smell before it becomes a bug:
@@ -1048,5 +1078,34 @@ Phase 5e adds the sizing-override clamp on top of Phase 5c's sector + correlatio
 
 - `phase5d_kwargs_from_metadata` lives in `contribution.py` (signal module) but is technically presentation-layer (BidRecord serialization). This is mild drift accepted in 5e to avoid spawning a second new module (the policy.py module from lock #7 is the one new module 5e allows). Phase 6 should formalize a `BidRecordAssembler` layer if telemetry threading grows further.
 - `_decompose_day_contributions` stays in `portfolio_simulator.py` because it mutates simulator-local accumulators. Pure-function extraction would require returning ~3 large structures per day, complicating the hot path. Acceptable for 5e.
+- `effective_weight_trace` (§ 9) is deferred but is NOT optional long-term. As 5e's three execution clamps (override / sector cap / correlation cap / capacity cap) compose, attribution beyond the single `size_clamped_by_override` boolean (lock #23) becomes structurally necessary. Phase 6's optimizer will likely require it as a first-class input. Implementing the trace is the natural Phase 6 work that the deferral acknowledges.
 
-**Bottom line:** Phase 5e is **system stabilization and constraint layering**, NOT feature expansion. It is the last natural step before Phase 6's combinatorial optimization complexity. Architectural decisions in 5e (especially the lock #12 signal-vs-execution boundary) are designed to survive that transition.
+### Five Phase 6 pressure points — explicit forward-warnings
+
+These are NOT 5e shortcomings. They are forks that Phase 6 must answer; 5e deliberately stays on the rule-engine side of each fork. Naming them so future readers can see what 5e is NOT trying to solve:
+
+**Pressure point 1 — Locks → canonical execution spec.**
+Phase 5e accumulates 23 locked decisions across pipeline ordering, signal-purity, metric semantics, taxonomy, and provenance constants. Each lock is individually defensible. Collectively, they form a distributed architectural contract that no single executable object represents. As 5f/6 add real-time constraints, optimization loops, and stochastic fills, debug reports like "rank drift changed but signal didn't" will require traversing multiple lock sections to explain. The eventual remediation is a `BacktestExecutionSpec` object (likely documentation-driven at first, machine-readable later) that unifies the locks into one source of truth. 5e does NOT build this; the lock-based discipline is the bridge form.
+
+**Pressure point 2 — Batch ALLOC → batch / streaming fork.**
+Lock #18's pipeline (`SIGNAL → SIZE → DEDUP → ALLOC → RECORD`) is correct for batch backtests where all decisions exist before any constraint applies. Phase 6's live-trading mode introduces asynchronous fills, partial execution, and delayed information arrival — bids will arrive sequentially with pool state evolving mid-day. The current ALLOC step is implicitly batch-safe only. Phase 6 must explicitly fork: a `batch_simulator.py` (current code, renamed) and a `streaming_executor.py` (new). 5e does NOT do this; the implicit batch assumption is acceptable for backtest scope. The fork is Phase 6 work.
+
+**Pressure point 3 — `effective_allocation` measures only realized execution.**
+$E_s = \frac{\text{won capital}}{\text{total won capital}}$ ignores the *intended* world — rejected bids, capped strategies that wanted more, opportunity cost of capacity that wasn't used. Phase 6's optimizer needs the intended-vs-realized gap, not just realized share. New metrics likely required:
+- `attempted_allocation` — capital each strategy bid for (pre-cap)
+- `demand_uncapped` — capital each strategy would have received with no caps (pre-clamp)
+- `capacity_residual` — pool capital unallocated due to constraints binding
+
+5e does NOT add these. The rationale: Phase 5e's instrumentation is signal-vs-execution divergence (`rank_drift_from_signal`); intended-vs-realized is a Phase 6 question and a different framing.
+
+**Pressure point 4 — Rank-drift identity scoped to deterministic batch.**
+Lock #19's `Σ rank_drift_from_signal == 0` permutation identity holds under batch deterministic conditions (full strategy set, stable sort, lexicographic tie-break). Phase 6's stochastic regime (slippage, partial fills, fractional rounding) will silently break this if `effective_allocation` becomes a noisy quantity. The invariant must be explicitly scoped: "holds under batch-simulator regime; under streaming-executor regime, replaced by `|Σ rank_drift_from_signal| ≤ ε(noise)`." 5e does NOT scope this — the batch-only assumption is implicit. Phase 6 must make it explicit and decide what the streaming-regime analog looks like.
+
+**Pressure point 5 — Rule cascade → optimization, the decision Phase 6 forces.**
+5e's ALLOC is a sequential greedy rule cascade: DEDUP → sector_cap → correlation_cap → capacity_cap. This is correctly identified as Debt 1 (ordering instability) and instrumented by `rank_drift_from_signal`. Phase 6 will force a decision between two paths:
+- **Path A (keep rule cascade):** accept non-optimality; use `rank_drift_from_signal` to bound expected divergence; add streaming + partial-fill handling on top of the existing rule order.
+- **Path B (replace ALLOC with constrained solver):** caps become constraints in a global objective $\max \sum_s x_s w_s$ subject to sector/correlation/capacity/override bounds. ALLOC step becomes a single LP/QP solve per day.
+
+5e is **deliberately halfway between** these. The architectural setup (signal-vs-execution firewall, observability as state, explicit pipeline locks) supports either path; the decision is Phase 6's. Choosing too early would over-constrain the design.
+
+**Bottom line:** Phase 5e is **system stabilization and constraint layering**, NOT feature expansion. It is the last natural step before Phase 6's combinatorial optimization complexity. Architectural decisions in 5e (especially the lock #12 signal-vs-execution boundary) are designed to survive that transition. The five pressure points above name what Phase 6 will demand without committing to any specific answer.
