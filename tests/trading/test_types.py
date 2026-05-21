@@ -109,3 +109,13 @@ def test_layer_stateful_tag_accepted_by_hook():
     # Layer: stateful
     """
     assert True
+
+
+def test_all_trading_modules_importable():
+    """6a-1 scaffolding: all marketpulse.trading.* modules exist (some
+    are stubs filled in by later sub-tasks). Import smoke only."""
+    import marketpulse.trading.bid_aggregator  # noqa: F401
+    import marketpulse.trading.daily_cycle  # noqa: F401
+    import marketpulse.trading.forward_engine  # noqa: F401
+    import marketpulse.trading.kill_switch  # noqa: F401
+    import marketpulse.trading.repository  # noqa: F401
