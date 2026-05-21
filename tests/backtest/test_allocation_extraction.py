@@ -86,3 +86,53 @@ def test_simulate_shared_pool_matches_frozen_baseline(phase5d_warm_pool):
         "altered behavior. If the change is INTENTIONAL, regenerate via "
         "RUN_6A0_BASELINE=1 and review the diff carefully."
     )
+
+
+def test_allocation_dataclasses_exist():
+    """6a-L9: AllocationContext carries every input the allocator needs
+    as an explicit named field. No hidden today dependency."""
+    from datetime import date
+
+    from marketpulse.backtest.allocation import (
+        AllocationContext,
+        AllocationResult,
+        AllocationWinner,
+        BidCandidate,
+        BlockedBidReason,
+        PositionSnapshot,
+        SizingContext,
+        allocate_for_day,
+    )
+
+    ctx = AllocationContext(
+        allocation_date=date(2026, 5, 21),
+        target_vol=0.01,
+        lookback_days=60,
+        sector_caps_enabled=True,
+        sector_cap_pct=0.40,
+        correlation_caps_enabled=True,
+        correlation_cap_pct=0.40,
+        correlation_threshold=0.60,
+        contribution_enabled=False,
+        contribution_lambda=0.5,
+        pool_corr_mode="excludes_self",
+        phase5e_warm_pool_overlap_days=20,
+        max_capital_in_use=10_000.0,
+    )
+    assert ctx.allocation_date == date(2026, 5, 21)
+
+    sizing = SizingContext(
+        base_position_size=1_000.0,
+        min_position=200.0,
+        max_position=4_000.0,
+        sizing_enabled=True,
+        per_strategy_overrides={},
+    )
+    assert sizing.base_position_size == 1_000.0
+
+    assert AllocationWinner is not None
+    assert AllocationResult is not None
+    assert BidCandidate is not None
+    assert PositionSnapshot is not None
+    assert BlockedBidReason is not None
+    assert callable(allocate_for_day)
