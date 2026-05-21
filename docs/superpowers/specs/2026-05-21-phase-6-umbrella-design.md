@@ -217,15 +217,21 @@ The load-bearing contract. Phase 6 ships `ForwardExecutionEngine`; Phase 7 adds 
 @dataclass(frozen=True)
 class OrderRequest:
     """Boundary object: RiskGates produce, ExecutionEngine consumes.
-    Phase 7's BrokerExecutionEngine consumes the same shape (lock vi)."""
+    Phase 7's BrokerExecutionEngine consumes the same shape (lock vi).
+
+    OrderRequest is the float → Decimal quantization boundary (lock xxii).
+    Allocator output may be float; the constructor of OrderRequest is where
+    float values get quantized to Decimal(18, 6). Everything past this point
+    (ExecutionEngine, persistence layer, audit context) sees Decimal."""
     strategy: str
     ticker: str
     quantity: int  # signed: positive=long, negative=short (future)
-    event_time: datetime
-    event_price: float
+    event_time: datetime  # UTC (lock xxix)
+    event_price: Decimal              # ← was float (lock xxii)
     horizon_date: date
-    horizon_price: float | None  # forward-known for Phase 6;
-                                  # None reserved for Phase 7 broker
+    horizon_price: Decimal | None     # ← was float | None (lock xxii)
+                                      # forward-known for Phase 6;
+                                      # None reserved for Phase 7 broker
     # ... plus Phase 5 allocation context (weight, contribution metadata, etc.)
 
 
@@ -319,7 +325,7 @@ REJECTED is synchronous-only:
 - **(ix)** Rejected order attempts create NO `paper_order` row, but MUST write an append-only audit event (via 6g) with full rejection reason (failing risk gate, kill-switch state, etc.).
 - **(x)** `RuleCascadeAllocator` is shared between Phase 5 backtest and Phase 6 paper trading — no duplicate allocator implementation. The math is one source; the time semantics + persistence layer differ.
 - **(xi)** Order lifecycle (PLACED → ENTRY_FILLED / CANCELLED) and position lifecycle (OPEN → CLOSED) are SEPARATE state machines. Entry fill creates/updates `paper_position`; horizon exit closes it. `paper_order.ENTRY_FILLED` means entry recorded, NOT both entry and exit.
-- **(xii)** `OrderRequest.horizon_price: float | None`. `ForwardExecutionEngine` REJECTS `OrderRequest` with `horizon_price is None` (cannot compute fill without it). `BrokerExecutionEngine` IGNORES `horizon_price` (broker reports real fill). `RealtimeExecutionEngine` semantics are deferred to the 6d spec when that sub-project is brainstormed.
+- **(xii)** `OrderRequest.horizon_price: Decimal | None` (lock xxii quantization boundary). `ForwardExecutionEngine` REJECTS `OrderRequest` with `horizon_price is None` (cannot compute fill without it). `BrokerExecutionEngine` IGNORES `horizon_price` (broker reports real fill). `RealtimeExecutionEngine` semantics are deferred to the 6d spec when that sub-project is brainstormed.
 
 ---
 
@@ -344,7 +350,7 @@ paper_order
 ├── quantity                 signed int (positive only in Phase 6;
 │                                        shorts deferred)
 ├── event_time               timestamp WITH TIME ZONE (UTC — lock xxix)
-├── event_price              Decimal(18, 6)   ← was float (lock xxxi)
+├── event_price              Decimal(18, 6)   ← was float (lock xxii)
 ├── horizon_date             date
 ├── horizon_price            Decimal(18, 6) | None
 │                            (forward-known for Phase 6;
@@ -384,7 +390,7 @@ paper_fill
 ├── order_id            FK → paper_order.id
 ├── position_id         FK → paper_position.id  (NOT NULL)
 ├── side                Literal["ENTRY", "EXIT"]
-├── price               Decimal(18, 6)    ← was float (lock xxxi)
+├── price               Decimal(18, 6)    ← was float (lock xxii)
 ├── quantity            signed int
 ├── filled_at           timestamp WITH TIME ZONE (UTC — lock xxix)
 ├── cash_delta          Decimal(18, 6)    ← was float
@@ -406,12 +412,16 @@ Single row per OPEN position; flipped to CLOSED on horizon. Linked to paper_orde
 paper_position
 ├── id                  PK
 ├── order_id            FK → paper_order.id (UNIQUE — lock xiv)
-├── entry_fill_id       FK → paper_fill.id
+├── entry_fill_id       FK → paper_fill.id | None
+│                       (DB-level NULLABLE to break the position↔fill FK cycle
+│                        during ENTRY-flow creation. App invariant: non-null
+│                        for any row visible OUTSIDE the creation transaction.
+│                        See § 4.2 insertion-order discipline.)
 ├── exit_fill_id        FK → paper_fill.id | None
 ├── strategy            denormalized
 ├── ticker              denormalized
 ├── quantity            signed int
-├── entry_price         Decimal(18, 6)    ← was float (lock xxxi)
+├── entry_price         Decimal(18, 6)    ← was float (lock xxii)
 ├── entry_date          date
 ├── horizon_date        date
 ├── status              Literal["OPEN", "CLOSED"]
@@ -426,6 +436,8 @@ paper_position
 - OPEN: `entry_fill_id` SET, `exit_fill_id` NULL
 - CLOSED: BOTH set
 
+The brief NULL window on `entry_fill_id` only exists *inside* the ENTRY-flow transaction (between INSERT `paper_position` and UPDATE `paper_position.entry_fill_id` — see § 4.2). Outside that transaction, an OPEN row with `entry_fill_id IS NULL` is a corruption signal. A CHECK constraint (`status='OPEN' AND entry_fill_id IS NOT NULL` OR similar) is the 6a spec's call.
+
 ### 4.4 `paper_cash_ledger`
 
 Append-only ledger of every cash movement. Source of truth for cash balance.
@@ -434,7 +446,7 @@ Append-only ledger of every cash movement. Source of truth for cash balance.
 paper_cash_ledger
 ├── id                  PK (monotonic; defines ordering — lock xxi)
 ├── timestamp           timestamp WITH TIME ZONE (UTC — lock xxix)
-├── delta               Decimal(18, 6) signed   ← was float (lock xxxi)
+├── delta               Decimal(18, 6) signed   ← was float (lock xxii)
 ├── reason              Literal["ENTRY_FILL", "EXIT_FILL",
 │                                "INITIAL_DEPOSIT", "MANUAL_ADJUSTMENT"]
 ├── fill_id             FK → paper_fill.id | None
@@ -593,14 +605,14 @@ Three test categories in Phase 6:
 These four locks address concrete future-bug surfaces identified during architectural review:
 
 - **(xxviii)** Every `paper_order` row carries `strategy_version` (from YAML), `allocator_version` (semver/git-sha of `RuleCascadeAllocator`), and `execution_engine_version` (semver of `ForwardExecutionEngine`). Without these, replay across deploys produces different output for the same input — and there's no way to explain why March's allocation differs from a re-run today. The versions appear on every row so replay determinism is auditable per-order.
-- **(xxix)** **All timestamps stored in UTC.** All market-hours / holiday logic evaluated in `America/New_York` (or the strategy's declared exchange tz). DST never appears as a bug because timezone-naive datetimes never enter the DB and never enter business-day arithmetic.
+- **(xxix)** **All timestamps stored in UTC.** Market-hours / holiday logic is evaluated in the **instrument's exchange timezone**; Phase 6 default is `America/New_York` for US equities. Hong Kong (`Asia/Hong_Kong`), mainland China (`Asia/Shanghai`), and other venues will plug in via the canonical calendar source (lock xxxii) when Phase 7 / multi-broker support arrives. DST never appears as a bug because timezone-naive datetimes never enter the DB and never enter business-day arithmetic.
 - **(xxx)** **Idempotency check executes BEFORE risk gates** in `place_order(order_request)`:
     1. Compute `idempotency_key` from `OrderRequest`
     2. IF an existing `paper_order` row matches → return its `OrderId` (no-op; no audit row, or `ORDER_PLACED_DUPLICATE` audit)
     3. ELSE → run risk gates → if accepted, INSERT paper_order + ORDER_PLACED audit transactionally (lock xxvii)
 
   Rationale: once an order is accepted, retries (network timeout, scheduler restart) MUST NOT be re-evaluated by risk gates whose state has since changed. The accepted-then-retried-then-now-rejected scenario produces non-deterministic replays. Idempotency wins.
-- **(xxxi)** DB persistence uses `Decimal(18, 6)` from Phase 6a Day 1 (see § 4.6 + updated lock xxii). Internal backtest math keeps float; the persistence boundary (typically `OrderRequest` construction) is the float → Decimal quantization site.
+- **(xxxi)** *Merged into lock xxii (umbrella review 2026-05-21).* The earlier draft introduced this as a Section-5 companion to lock xxii, but the two locks were operationally identical. Lock number reserved — do not reuse to keep references in Section 4 / Section 5 stable.
 - **(xxxii)** `marketpulse/trading/calendar.py` declares the single canonical source of trading-calendar truth. Phase 6a picks ONE library (`exchange_calendars`, `pandas_market_calendars`, or a hand-rolled NYSE holiday list) and locks the choice in this module. Risk gates (6b), scheduler (6a), market-hours UI indicators (6f) all import from here. No second source.
 
 ---
@@ -612,10 +624,10 @@ Parallel to Phase 5e § 10. Names the architectural pressure points that Phase 6
 ### 6.1 The five Phase 7 pressure points
 
 **PP1 — `horizon_price` becomes `None` mid-flow.**
-In `ForwardExecutionEngine`, `horizon_price` is known at `place_order()` time (Phase 4-5 outcome math). In `BrokerExecutionEngine`, the broker reports the actual fill price post-hoc via callback. `OrderRequest.horizon_price` is typed `float | None` (lock xii); ForwardExecutionEngine rejects None, BrokerExecutionEngine accepts it. **But:** `paper_order.horizon_price` is currently `float | None` and the Phase 6 query pattern assumes "if status=ENTRY_FILLED, horizon_price is the truth." Phase 7 must split this: `expected_horizon_price` (set at placement, signal-driven) vs. `realized_horizon_price` (set by broker callback, may differ by slippage). The two columns let drift be measured.
+In `ForwardExecutionEngine`, `horizon_price` is known at `place_order()` time (Phase 4-5 outcome math). In `BrokerExecutionEngine`, the broker reports the actual fill price post-hoc via callback. `OrderRequest.horizon_price` is typed `Decimal | None` (lock xii); ForwardExecutionEngine rejects None, BrokerExecutionEngine accepts it. **But:** `paper_order.horizon_price` is a single `Decimal | None` column, and the Phase 6 query pattern assumes "if status=ENTRY_FILLED, horizon_price is the truth." Phase 7 must split this single column into two: `expected_horizon_price` (set at placement, signal-driven) vs. `realized_horizon_price` (set by broker callback, may differ by slippage). The two columns let drift be measured.
 
 **PP2 — Broker-reported vs. recomputed price reconciliation.**
-Phase 6 already persists prices/cash/P&L as `Decimal(18, 6)` (lock xxii / xxxi), so the ledger itself does NOT accumulate float-rounding drift. The remaining Phase 7 problem is *semantic*: the broker's reported fill price will differ from `ForwardExecutionEngine`'s outcome-math fill price by real-market slippage, commissions, FX, and venue-specific rounding. Phase 7 must split `paper_order.horizon_price` into `expected_horizon_price` (signal-driven, set at placement) vs. `realized_horizon_price` (broker callback, may differ). See PP1 — the two pressure points share the same architectural fix. The work Phase 6 deferred from this point is the boundary split, not the type migration.
+Phase 6 already persists prices/cash/P&L as `Decimal(18, 6)` (lock xxii), so the ledger itself does NOT accumulate float-rounding drift. The remaining Phase 7 problem is *semantic*: the broker's reported fill price will differ from `ForwardExecutionEngine`'s outcome-math fill price by real-market slippage, commissions, FX, and venue-specific rounding. Phase 7 must split `paper_order.horizon_price` into `expected_horizon_price` (signal-driven, set at placement) vs. `realized_horizon_price` (broker callback, may differ). See PP1 — the two pressure points share the same architectural fix. The work Phase 6 deferred from this point is the boundary split, not the type migration.
 
 **PP3 — `tick(as_of)` semantics for broker-driven mode.**
 `ForwardExecutionEngine`: `tick(as_of=D)` materializes all fills for D. `RealtimeExecutionEngine`: `tick()` may be no-op (wall clock drives) or wall-clock advance. `BrokerExecutionEngine`: `tick()` is fundamentally no-op (broker's WebSocket callbacks drive state). But the scheduler still runs! Phase 7 must define: does the scheduler keep calling `tick()` on a daily cron (broker engine no-ops it), or does the scheduler itself change shape per engine? Lock xxv says scheduler is single-purpose; Phase 7 might break that.
@@ -669,7 +681,7 @@ Mirror-image of forward-warnings. By the end of Phase 6 MVP (6a + 6b + 6f + 6g):
 
 ### 6.5 No new locks in Section 6
 
-Section 6 is documentary forward-warning. No new architectural locks; lock count stays at **32**.
+Section 6 is documentary forward-warning. No new architectural locks; lock count stays at **31** (xxxi reserved/merged into xxii).
 
 ---
 
@@ -719,11 +731,11 @@ S8 covers ONLY the cross-cutting operational integrity surface — the "must nev
 
 ### 8.3 No new locks in Section 8
 
-Section 8 is the test map for existing locks. No new architectural commitments; lock count stays at **32**.
+Section 8 is the test map for existing locks. No new architectural commitments; lock count stays at **31** (xxxi reserved/merged into xxii).
 
 ---
 
-## Appendix A — Consolidated lock list (32 locked decisions)
+## Appendix A — Consolidated lock list (31 locked decisions; xxxi merged into xxii, number reserved)
 
 | # | Lock | Section |
 |---|---|---|
@@ -738,7 +750,7 @@ Section 8 is the test map for existing locks. No new architectural commitments; 
 | ix | Rejected orders write audit event with full reason; no paper_order row | § 3 (6a + 6g) |
 | x | `RuleCascadeAllocator` shared between Phase 5 backtest and Phase 6 paper trading | § 3 (6a) |
 | xi | Order lifecycle ≠ position lifecycle; separate state machines | § 3 (6a) |
-| xii | `OrderRequest.horizon_price: float | None`; ForwardExec rejects None, BrokerExec ignores | § 3 (6a) |
+| xii | `OrderRequest.horizon_price: Decimal | None`; ForwardExec rejects None, BrokerExec ignores | § 3 (6a) |
 | xiii | `paper_fill` + `paper_audit_event` + `paper_cash_ledger` are append-only | § 4 (6a + 6g) |
 | xiv | `paper_position.order_id` is UNIQUE in Phase 6 | § 4 (6a) |
 | xv | Phase 6 introduces NO modifications to Phase 1-5 tables | § 4 (6a) |
@@ -757,7 +769,7 @@ Section 8 is the test map for existing locks. No new architectural commitments; 
 | xxviii | Every `paper_order` carries `strategy_version` + `allocator_version` + `execution_engine_version` for replay determinism | § 5 (6a) |
 | xxix | All timestamps stored in UTC; market-hours logic evaluated in `America/New_York` | § 5 (6a + 6b) |
 | xxx | Idempotency check runs BEFORE risk gates in `place_order` | § 5 (6a) |
-| xxxi | DB persistence uses `Decimal(18, 6)` from Phase 6a Day 1 (companion to lock xxii) | § 5 (6a) |
+| xxxi | *merged into xxii — number reserved, see § 5.6* | — |
 | xxxii | `marketpulse/trading/calendar.py` is the single canonical trading-calendar source | § 5 (6a + 6b + 6f) |
 
 ---
