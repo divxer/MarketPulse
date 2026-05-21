@@ -1,4 +1,5 @@
 from datetime import UTC, date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -335,5 +336,21 @@ def build_scheduler() -> BackgroundScheduler:
         trigger=CronTrigger(hour=2, minute=0, timezone="UTC"),
         id="outcome_computation",
         replace_existing=True,
+    )
+    # Phase 6a paper trading daily tick (lock xxv: thin entrypoint).
+    # Imported here so the registration sits with all other jobs.
+    from marketpulse.scheduler.paper_trading_tick import paper_trading_tick_job
+    sched.add_job(
+        paper_trading_tick_job,
+        trigger=CronTrigger(
+            hour=settings.paper_tick_hour,
+            minute=settings.paper_tick_minute,
+            timezone=ZoneInfo("America/New_York"),
+        ),
+        id="paper_trading_tick",
+        replace_existing=True,
+        misfire_grace_time=3600,
+        coalesce=True,
+        max_instances=1,
     )
     return sched
