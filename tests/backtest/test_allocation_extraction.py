@@ -88,6 +88,16 @@ def test_simulate_shared_pool_matches_frozen_baseline(phase5d_warm_pool):
     )
 
 
+def test_extraction_marker_pre():
+    """Pre-extraction marker. Removed in 6a-0.4 once the extraction
+    lands. Asserts portfolio_simulator still owns the inline weight/
+    size/dedup/allocate logic."""
+    from pathlib import Path
+    src = Path("marketpulse/backtest/portfolio_simulator.py").read_text()
+    assert "compute_position_sizes" in src
+    assert "compute_adjusted_bid_weight" in src or "compute_bid_weights" in src
+
+
 def test_allocation_dataclasses_exist():
     """6a-L9: AllocationContext carries every input the allocator needs
     as an explicit named field. No hidden today dependency."""
