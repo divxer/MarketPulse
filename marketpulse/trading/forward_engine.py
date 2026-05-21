@@ -15,10 +15,12 @@ from marketpulse.trading.repository import Repository
 from marketpulse.trading.risk_gate import RiskGate
 from marketpulse.trading.types import (
     AuditEventType,
+    InvariantError,
     OrderId,
     OrderRejected,
     OrderRequest,
     PlaceOrderResult,
+    TickError,
     TickResult,
 )
 
@@ -175,5 +177,156 @@ class ForwardExecutionEngine:
             )
 
     def tick(self, *, as_of: date) -> TickResult:
-        """Filled in Task 6a-2.7."""
-        raise NotImplementedError
+        """Per-row transactional. Each entry / exit gets its own
+        Repository.transaction(); InvariantError → audit + continue
+        (6a-L4)."""
+        entries = 0
+        exits = 0
+        errors: list[TickError] = []
+
+        # Phase A: entries
+        for order in self._repo.find_orders_for_entry(as_of=as_of):
+            try:
+                self._materialize_entry(order, fill_date=as_of)
+                entries += 1
+            except InvariantError as e:
+                err = TickError(
+                    phase="entry_materialization",
+                    order_id=order.id,
+                    position_id=None,
+                    error=str(e),
+                )
+                errors.append(err)
+                with self._repo.transaction():
+                    self._repo.write_audit_event(
+                        event_type=AuditEventType.ENGINE_INVARIANT_ERROR,
+                        order_id=order.id,
+                        strategy=order.strategy,
+                        reason="invariant_error",
+                        context={
+                            "phase": err.phase,
+                            "order_id": err.order_id,
+                            "error": err.error,
+                            "as_of": as_of.isoformat(),
+                        },
+                        timestamp=self._clock.now(),
+                    )
+
+        # Phase B: exits
+        for position in self._repo.find_positions_for_exit(as_of=as_of):
+            try:
+                self._materialize_exit(position, exit_date=as_of)
+                exits += 1
+            except InvariantError as e:
+                err = TickError(
+                    phase="exit_materialization",
+                    order_id=position.order_id,
+                    position_id=position.id,
+                    error=str(e),
+                )
+                errors.append(err)
+                with self._repo.transaction():
+                    self._repo.write_audit_event(
+                        event_type=AuditEventType.ENGINE_INVARIANT_ERROR,
+                        order_id=position.order_id,
+                        strategy=position.strategy,
+                        reason="invariant_error",
+                        context={
+                            "phase": err.phase,
+                            "position_id": err.position_id,
+                            "order_id": err.order_id,
+                            "error": err.error,
+                            "as_of": as_of.isoformat(),
+                        },
+                        timestamp=self._clock.now(),
+                    )
+
+        return TickResult(
+            as_of=as_of,
+            entries_materialized=entries,
+            exits_materialized=exits,
+            errors=tuple(errors),
+        )
+
+    def _materialize_entry(self, order, *, fill_date: date) -> None:
+        fill_time = self._clock.now()
+        fill_price = order.event_price
+        cash_outflow = fill_price * Decimal(order.quantity)
+
+        with self._repo.transaction():
+            position = self._repo.insert_paper_position(
+                order_id=order.id, strategy=order.strategy,
+                ticker=order.ticker, quantity=order.quantity,
+                entry_price=fill_price, entry_date=fill_date,
+                horizon_date=order.horizon_date, opened_at=fill_time,
+            )
+            fill = self._repo.insert_paper_fill(
+                order_id=order.id, position_id=position.id,
+                side="ENTRY", price=fill_price, quantity=order.quantity,
+                filled_at=fill_time, cash_delta=-cash_outflow,
+                realized_pnl=None,
+            )
+            self._repo.update_paper_position_entry_fill(
+                position_id=position.id, entry_fill_id=fill.id,
+            )
+            self._repo.insert_cash_ledger_entry_for_fill(
+                timestamp=fill_time, delta=-cash_outflow,
+                reason="ENTRY_FILL", fill_id=fill.id,
+            )
+            self._repo.update_paper_order_status(
+                order_id=order.id, new_status="ENTRY_FILLED",
+                filled_at=fill_time,
+            )
+            self._repo.write_audit_event(
+                event_type=AuditEventType.ORDER_ENTRY_FILLED,
+                order_id=order.id, strategy=order.strategy, reason="",
+                context={
+                    "position_id": position.id,
+                    "fill_price": str(fill_price),
+                    "cash_balance_after": str(self._repo.cash_balance()),
+                },
+                timestamp=fill_time,
+            )
+
+    def _materialize_exit(self, position, *, exit_date: date) -> None:
+        exit_time = self._clock.now()
+        order = self._repo.find_paper_order_by_id(position.order_id)
+        if order.horizon_price is None:
+            raise InvariantError(
+                f"order {order.id} has no horizon_price; "
+                "ForwardExecutionEngine cannot exit without it (lock xii)"
+            )
+        exit_price = order.horizon_price
+        cash_inflow = exit_price * Decimal(position.quantity)
+        realized_pnl = (
+            (exit_price - position.entry_price) * Decimal(position.quantity)
+        )
+
+        with self._repo.transaction():
+            fill = self._repo.insert_paper_fill(
+                order_id=position.order_id, position_id=position.id,
+                side="EXIT", price=exit_price, quantity=position.quantity,
+                filled_at=exit_time, cash_delta=cash_inflow,
+                realized_pnl=realized_pnl,
+            )
+            self._repo.update_paper_position_exit(
+                position_id=position.id, exit_fill_id=fill.id,
+                exit_price=exit_price, realized_pnl=realized_pnl,
+                closed_at=exit_time,
+            )
+            self._repo.insert_cash_ledger_entry_for_fill(
+                timestamp=exit_time, delta=cash_inflow,
+                reason="EXIT_FILL", fill_id=fill.id,
+            )
+            self._repo.write_audit_event(
+                event_type=AuditEventType.POSITION_CLOSED,
+                order_id=position.order_id, strategy=position.strategy,
+                reason="",
+                context={
+                    "position_id": position.id,
+                    "exit_price": str(exit_price),
+                    "realized_pnl": str(realized_pnl),
+                    "cash_balance_after": str(self._repo.cash_balance()),
+                },
+                timestamp=exit_time,
+            )

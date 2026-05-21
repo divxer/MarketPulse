@@ -247,3 +247,106 @@ def test_cancel_order_idempotent_on_already_cancelled(session):
     engine.cancel_order(order_id=result.order_id)
     order = repo.find_paper_order_by_id(int(result.order_id))
     assert order.status == "CANCELLED"
+
+
+def test_tick_materializes_entry_then_exit(session):
+    """E2E single-position lifecycle through tick()."""
+    from marketpulse.db.models import PaperCashLedger, PaperFill, PaperPosition
+
+    engine, repo, clock, _ = _engine(session)
+
+    # Initial deposit
+    repo.ensure_initial_deposit(
+        amount=Decimal("10000"), timestamp=clock.now(),
+    )
+
+    # Place order
+    engine.place_order(order_request=_request())
+
+    # tick on allocation_date → ENTRY materialization
+    r1 = engine.tick(as_of=date(2026, 5, 21))
+    assert r1.entries_materialized == 1
+    assert r1.exits_materialized == 0
+    assert r1.errors == ()
+
+    pos = session.execute(select(PaperPosition)).scalars().first()
+    assert pos.status == "OPEN"
+    assert pos.entry_fill_id is not None
+
+    fills = session.execute(
+        select(PaperFill).order_by(PaperFill.id),
+    ).scalars().all()
+    assert len(fills) == 1
+    assert fills[0].side == "ENTRY"
+
+    cash_rows = session.execute(
+        select(PaperCashLedger).order_by(PaperCashLedger.id),
+    ).scalars().all()
+    # Initial 10000, then -1500 entry
+    assert cash_rows[-1].balance_after == Decimal("8500")
+
+    # tick on horizon_date → EXIT
+    r2 = engine.tick(as_of=date(2026, 5, 28))
+    assert r2.exits_materialized == 1
+
+    pos = session.execute(select(PaperPosition)).scalars().first()
+    assert pos.status == "CLOSED"
+
+    fills = session.execute(
+        select(PaperFill).order_by(PaperFill.id),
+    ).scalars().all()
+    assert len(fills) == 2
+    assert fills[1].side == "EXIT"
+    # PnL: (155 - 150) * 10 = 50
+    assert fills[1].realized_pnl == Decimal("50")
+
+    assert repo.cash_balance() == Decimal("10050")
+
+
+def test_tick_is_idempotent(session):
+    """Calling tick twice for the same date produces the same state."""
+    engine, repo, _, _ = _engine(session)
+    repo.ensure_initial_deposit(
+        amount=Decimal("10000"),
+        timestamp=datetime(2026, 5, 21, tzinfo=UTC),
+    )
+    engine.place_order(order_request=_request())
+
+    r1 = engine.tick(as_of=date(2026, 5, 21))
+    r2 = engine.tick(as_of=date(2026, 5, 21))
+    assert r1.entries_materialized == 1
+    assert r2.entries_materialized == 0  # no rows to flip
+    assert r2.exits_materialized == 0
+
+
+def test_tick_invariant_error_writes_audit_and_continues(session):
+    """6a-L4: horizon_price is None → ENGINE_INVARIANT_ERROR audit; other
+    positions in the same tick keep processing."""
+    from marketpulse.db.models import PaperAuditEvent, PaperOrder
+
+    engine, repo, _, _ = _engine(session)
+    repo.ensure_initial_deposit(
+        amount=Decimal("10000"),
+        timestamp=datetime(2026, 5, 21, tzinfo=UTC),
+    )
+
+    # Place a normal order
+    engine.place_order(order_request=_request(strategy="ok"))
+    engine.tick(as_of=date(2026, 5, 21))  # materialize entry
+
+    # Manually corrupt horizon_price to None on the order
+    bad = session.execute(select(PaperOrder)).scalars().first()
+    bad.horizon_price = None
+    session.commit()
+
+    # Now tick the horizon → should record ENGINE_INVARIANT_ERROR
+    result = engine.tick(as_of=date(2026, 5, 28))
+    assert len(result.errors) == 1
+    assert result.errors[0].phase == "exit_materialization"
+
+    audits = session.execute(
+        select(PaperAuditEvent).where(
+            PaperAuditEvent.event_type == "ENGINE_INVARIANT_ERROR",
+        ),
+    ).scalars().all()
+    assert len(audits) == 1
