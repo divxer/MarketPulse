@@ -23,6 +23,7 @@ from marketpulse.backtest.contribution import (
     BidWeightMetadata,
     compute_adjusted_bid_weight,
     daily_contribution_return,
+    phase5d_kwargs_from_metadata,
     pool_corr_excluding_self,
 )
 from marketpulse.backtest.correlation import find_correlation_neighbors
@@ -338,40 +339,8 @@ def simulate_shared_pool(
             # The toggle only chooses which weight drives DEDUP/ALLOC
             weights = weights_adjusted if contribution_enabled else weights_raw
 
-        # Phase 5d: helper to thread 8 telemetry fields onto every BidRecord
-        # constructor below (7 sites). Default-arg capture binds *this
-        # iteration's* bid_weight_metadata snapshot, avoiding loop-variable
-        # late-binding (ruff B023). Safe because all BidRecord sites are in
-        # the same iteration scope. Missing-strategy fallback matches the
-        # BidRecord dataclass defaults so the bid still records cleanly when
-        # WEIGHT was skipped (e.g., strategy never entered today's WEIGHT
-        # block).
-        def _phase5d_kwargs(
-            strategy: str,
-            _meta_map: dict[str, BidWeightMetadata] = bid_weight_metadata,
-        ) -> dict:
-            meta = _meta_map.get(strategy)
-            if meta is None:
-                return {
-                    "raw_bid_weight": None,
-                    "pool_corr": None,
-                    "contribution_multiplier": 1.0,
-                    "adjusted_bid_weight": None,
-                    "effective_corr_window": 0,
-                    "pool_corr_excludes_self": True,
-                    "rewarded_for_negative_corr": False,
-                    "would_change_rank": False,
-                }
-            return {
-                "raw_bid_weight": meta.raw,
-                "pool_corr": meta.pool_corr,
-                "contribution_multiplier": meta.multiplier,
-                "adjusted_bid_weight": meta.adjusted,
-                "effective_corr_window": meta.effective_window,
-                "pool_corr_excludes_self": True,
-                "rewarded_for_negative_corr": meta.rewarded_for_negative_corr,
-                "would_change_rank": meta.would_change_rank,
-            }
+        # Phase 5e: bid_weight_metadata-to-kwargs serialization now in
+        # contribution.phase5d_kwargs_from_metadata (spec § 2 lock #7).
 
         # n_floor_hits telemetry (post-floor-hit set is the source of truth)
         for s in floor_hits:
@@ -407,7 +376,9 @@ def simulate_shared_pool(
                         outcome="size_too_small",
                         winner=None,
                         position_size=raw_sizes_below_min[b.strategy],
-                        **_phase5d_kwargs(b.strategy),
+                        **phase5d_kwargs_from_metadata(
+                            bid_weight_metadata.get(b.strategy), b.strategy,
+                        ),
                     ))
                     n_size_too_small_by_strategy[b.strategy] = (
                         n_size_too_small_by_strategy.get(b.strategy, 0) + 1
@@ -444,7 +415,9 @@ def simulate_shared_pool(
                         weight=weights[loser.strategy],
                         outcome="dedup_loser", winner=best.strategy,
                         position_size=position_sizes[loser.strategy],
-                        **_phase5d_kwargs(loser.strategy),
+                        **phase5d_kwargs_from_metadata(
+                            bid_weight_metadata.get(loser.strategy), loser.strategy,
+                        ),
                     ))
                     n_dedup_skipped_by_strategy[loser.strategy] = (
                         n_dedup_skipped_by_strategy.get(loser.strategy, 0) + 1
@@ -490,7 +463,7 @@ def simulate_shared_pool(
                     weight=weights[b.strategy],
                     outcome="cap_full", winner=None,
                     position_size=requested_size,
-                    **_phase5d_kwargs(b.strategy),
+                    **phase5d_kwargs_from_metadata(bid_weight_metadata.get(b.strategy), b.strategy),
                 ))
                 n_capacity_skipped_by_strategy[b.strategy] = (
                     n_capacity_skipped_by_strategy.get(b.strategy, 0) + 1
@@ -502,7 +475,7 @@ def simulate_shared_pool(
                     weight=weights[b.strategy],
                     outcome="cash_short", winner=None,
                     position_size=requested_size,
-                    **_phase5d_kwargs(b.strategy),
+                    **phase5d_kwargs_from_metadata(bid_weight_metadata.get(b.strategy), b.strategy),
                 ))
                 n_cash_short_skipped_by_strategy[b.strategy] = (
                     n_cash_short_skipped_by_strategy.get(b.strategy, 0) + 1
@@ -521,7 +494,7 @@ def simulate_shared_pool(
                     outcome="sector_cap_full", winner=None,
                     position_size=requested_size,
                     blocked_by_sector=candidate_sector,
-                    **_phase5d_kwargs(b.strategy),
+                    **phase5d_kwargs_from_metadata(bid_weight_metadata.get(b.strategy), b.strategy),
                 ))
                 n_sector_cap_skipped_by_strategy[b.strategy] = (
                     n_sector_cap_skipped_by_strategy.get(b.strategy, 0) + 1
@@ -554,7 +527,9 @@ def simulate_shared_pool(
                         outcome="correlation_cap_full", winner=None,
                         position_size=requested_size,
                         blocked_by_correlation_with=corr_diagnostics,
-                        **_phase5d_kwargs(b.strategy),
+                        **phase5d_kwargs_from_metadata(
+                            bid_weight_metadata.get(b.strategy), b.strategy,
+                        ),
                     ))
                     n_correlation_cap_skipped_by_strategy[b.strategy] = (
                         n_correlation_cap_skipped_by_strategy.get(b.strategy, 0) + 1
@@ -577,7 +552,7 @@ def simulate_shared_pool(
                 weight=weights[b.strategy],
                 outcome="won", winner=None,
                 position_size=requested_size,
-                **_phase5d_kwargs(b.strategy),
+                **phase5d_kwargs_from_metadata(bid_weight_metadata.get(b.strategy), b.strategy),
             ))
 
         # Phase 5c: snapshot per-day sector exposure (post-ALLOCATE).
