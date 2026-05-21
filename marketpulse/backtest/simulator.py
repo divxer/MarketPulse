@@ -587,6 +587,25 @@ def run_shared_pool_backtest(
 
     # Run shared pool, then patch excess_vs_spy
     daily_curves = {a.strategy: a.full_equity_curve for a in artifacts}
+
+    # Phase 5e: build per_strategy_overrides map from loaded Strategy objects.
+    # A strategy contributes to the map ONLY if at least one of its 3 sizing
+    # fields is non-None. Spec § 2 lock #6 + § 3.3 orchestrator threading.
+    per_strategy_overrides: dict[
+        str, tuple[float | None, float | None, float | None]
+    ] = {}
+    for name, strat in strategies.items():
+        if (
+            strat.base_position_size is not None
+            or strat.min_position is not None
+            or strat.max_position is not None
+        ):
+            per_strategy_overrides[name] = (
+                strat.base_position_size,
+                strat.min_position,
+                strat.max_position,
+            )
+
     shared = simulate_shared_pool(
         bids=all_bids,
         daily_curves=daily_curves,
@@ -607,6 +626,7 @@ def run_shared_pool_backtest(
         price_provider=price_provider,
         contribution_enabled=contribution_enabled,
         contribution_lambda=contribution_lambda,
+        per_strategy_overrides=per_strategy_overrides,
     )
     shared = replace(
         shared,

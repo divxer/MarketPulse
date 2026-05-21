@@ -136,6 +136,18 @@ def lab_backtest(
 
     filters = {"horizon": horizon, "since_days": since_days, "mode": mode}
 
+    # Phase 5e lock #8 — set of strategies that have sizing overrides.
+    # Drives the "custom limits" tooltip in bid history without adding a
+    # new BidRecord field.
+    from marketpulse.strategies.loader import load_strategies
+    all_strategies = load_strategies()
+    strategies_with_sizing_overrides = {
+        name for name, s in all_strategies.items()
+        if (s.base_position_size is not None
+            or s.min_position is not None
+            or s.max_position is not None)
+    }
+
     return templates.TemplateResponse(
         request, "lab_backtest.html",
         {
@@ -171,6 +183,7 @@ def lab_backtest(
             "contribution_lambda": (
                 shared_result.contribution_lambda if shared_result else 0.5
             ),
+            "strategies_with_sizing_overrides": strategies_with_sizing_overrides,
         },
     )
 

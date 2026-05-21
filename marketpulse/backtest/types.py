@@ -97,6 +97,11 @@ class StrategyContribution:
     avg_pool_corr: float | None = None
     n_would_change_rank: int = 0
 
+    # NEW Phase 5e Thread D — always populated by simulator, invariant-grade
+    # (spec § 2 lock #14, #15, #16)
+    effective_allocation: float = 0.0
+    rank_drift_from_signal: int = 0
+
 
 @dataclass(frozen=True)
 class BidRecord:
@@ -130,9 +135,15 @@ class BidRecord:
     contribution_multiplier: float = 1.0
     adjusted_bid_weight: float | None = None
     effective_corr_window: int = 0
-    pool_corr_excludes_self: bool = True
     rewarded_for_negative_corr: bool = False
     would_change_rank: bool = False
+    # NEW Phase 5e (lock #23) — clamp-attribution flag. True iff the raw
+    # sized magnitude exceeded the strategy's effective max ceiling for the
+    # day (i.e., the eff_max clamp was binding). Independent of cap clamps
+    # (cap_full, sector_cap_full, correlation_cap_full) which are separate
+    # outcomes. Defaulted so existing BidRecord construction sites continue
+    # to work; populated for ALL 7 outcome sites in portfolio_simulator.
+    size_clamped_by_override: bool = False
 
 
 @dataclass(frozen=True)

@@ -190,3 +190,62 @@ def test_run_shared_pool_avg_pool_corr_populated_when_history_sufficient(db_sess
     for _s, c in out["shared"].per_strategy_stats.items():
         assert c.avg_pool_corr is None or isinstance(c.avg_pool_corr, float)
         assert c.n_would_change_rank >= 0
+
+
+def test_phase5e_overridden_strategy_respects_eff_min_eff_max(
+    db_session, tmp_path,
+):
+    """# Layer: invariant
+    Spec § 8 scenario #20. When a strategy has a YAML sizing override,
+    every BidRecord that strategy produces (won bids in particular)
+    satisfies eff_min <= position_size <= eff_max.
+
+    Pure post-condition that holds independently of dynamics: the clamp
+    envelope is respected.
+    """
+    import shutil
+    from pathlib import Path
+
+    import marketpulse.strategies.loader as loader_mod
+    from marketpulse.backtest.simulator import run_shared_pool_backtest
+    from marketpulse.strategies.loader import clear_strategy_cache
+
+    # Copy default YAMLs to tmp_path, then write one custom override
+    default_dir = Path(__file__).parents[2] / "marketpulse/strategies/definitions"
+    for yaml_file in default_dir.glob("*.yaml"):
+        shutil.copy(yaml_file, tmp_path / yaml_file.name)
+    # Patch ONE strategy with custom sizing
+    custom_yaml = (tmp_path / "momentum_breakout.yaml").read_text()
+    custom_yaml += """
+sizing:
+  base_position_size: 500
+  min_position: 300
+  max_position: 800
+"""
+    (tmp_path / "momentum_breakout.yaml").write_text(custom_yaml)
+
+    # Re-load strategies from tmp_path by monkey-patching the loader's
+    # default directory. Clear the cache to force re-read.
+    clear_strategy_cache()
+    original_dir = loader_mod._DEFAULT_DIR
+    loader_mod._DEFAULT_DIR = tmp_path
+    try:
+        _seed(db_session, ticker="A1", strategy="momentum_breakout")
+        db_session.commit()
+        out = run_shared_pool_backtest(db_session, horizon=5)
+        # Outcome: every won bid for momentum_breakout has size in [300, 800]
+        won_mb_bids = [
+            b for b in out["shared"].bid_history
+            if b.strategy == "momentum_breakout" and b.outcome == "won"
+        ]
+        # Non-vacuity guard: ensure the test actually exercises the clamp.
+        assert len(won_mb_bids) > 0, (
+            "test should produce at least one won bid for momentum_breakout"
+        )
+        for b in won_mb_bids:
+            assert 300.0 <= b.position_size <= 800.0, (
+                f"Bid {b!r} violates override envelope [300, 800]"
+            )
+    finally:
+        loader_mod._DEFAULT_DIR = original_dir
+        clear_strategy_cache()
