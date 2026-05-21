@@ -1903,3 +1903,68 @@ def test_phase5e_conditional_simplex_zero_state_lock20() -> None:
     assert total == 0.0
     for c in r.per_strategy_stats.values():
         assert c.effective_allocation == 0.0
+
+
+def test_phase5e_fixed_mode_override_min_greater_than_base_filters_to_size_too_small():
+    """# Layer: invariant
+    Phase 5e cleanup. Fixed-mode (sizing_enabled=False) with a per-strategy
+    override where eff_min > eff_base must filter the strategy's bids into
+    size_too_small outcomes, NOT leak None positions into DEDUP/ALLOC.
+
+    Reproduces the C12-flagged latent bug. Before the cleanup commit,
+    this would TypeError inside DEDUP/ALLOC on `-weights[b.strategy]`
+    or `min(group, ...)`. After the fix, the bid records cleanly as
+    size_too_small.
+    """
+    from dataclasses import dataclass
+    from datetime import UTC, date, datetime, timedelta
+
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+
+    @dataclass(frozen=True)
+    class _Bid:
+        strategy: str
+        ticker: str
+        event_time: datetime
+        event_price: float
+        horizon_price: float
+        horizon_date: date
+        forward_return: float
+        benchmark_forward_return: float
+
+    def _make_bid(ticker, strategy, event_date, horizon_date):
+        return _Bid(
+            strategy=strategy, ticker=ticker,
+            event_time=datetime.combine(event_date, datetime.min.time(), tzinfo=UTC),
+            event_price=100.0, horizon_price=105.0,
+            horizon_date=horizon_date, forward_return=0.05,
+            benchmark_forward_return=0.01,
+        )
+
+    curve = [
+        (date(2026, 4, 1) + timedelta(days=i), 10_000.0 * (1.005 ** i))
+        for i in range(30)
+    ]
+    bids = [
+        _make_bid("AAPL", "broken", date(2026, 5, 1), date(2026, 5, 8)),
+    ]
+    daily_curves = {"broken": curve}
+
+    # Override: eff_min=2000 > eff_base=1000. Fixed-mode raw = eff_base = 1000.
+    # Since raw < eff_min, the strategy gets None size → must be filtered
+    # to size_too_small. Before the fix, downstream DEDUP would crash.
+    r = simulate_shared_pool(
+        bids=bids, daily_curves=daily_curves,
+        horizon=5, initial_capital=10_000.0, base_position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=False,  # fixed mode
+        sector_caps_enabled=False, correlation_caps_enabled=False,
+        per_strategy_overrides={"broken": (1_000.0, 2_000.0, 4_000.0)},
+    )
+    # Outcome: the bid recorded as size_too_small, no crash, no won bids
+    blocked = [b for b in r.bid_history if b.outcome == "size_too_small"]
+    won = [b for b in r.bid_history if b.outcome == "won"]
+    assert len(blocked) == 1
+    assert blocked[0].strategy == "broken"
+    assert blocked[0].position_size == 1_000.0  # the raw, below floor
+    assert len(won) == 0

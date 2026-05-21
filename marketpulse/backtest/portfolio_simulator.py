@@ -422,41 +422,6 @@ def simulate_shared_pool(
                     per_strategy_overrides=per_strategy_overrides,
                 )
             )
-
-            # Strategies returning None → skip all their bids today;
-            # diagnostic log records the raw pre-clamp size.
-            strategies_skipped_by_size = {
-                s for s, sz in position_sizes.items() if sz is None
-            }
-            new_todays_bids = []
-            for b in todays_bids:
-                if b.strategy in strategies_skipped_by_size:
-                    all_bid_records.append(BidRecord(
-                        date=d, strategy=b.strategy, ticker=b.ticker,
-                        weight=weights[b.strategy],
-                        outcome="size_too_small",
-                        winner=None,
-                        position_size=raw_sizes_below_min[b.strategy],
-                        # Lock #23: bid fell below floor — raw < eff_min, not
-                        # raw > eff_max. Override-clamp attribution is False.
-                        size_clamped_by_override=False,
-                        **phase5d_kwargs_from_metadata(
-                            bid_weight_metadata.get(b.strategy), b.strategy,
-                        ),
-                    ))
-                    n_size_too_small_by_strategy[b.strategy] = (
-                        n_size_too_small_by_strategy.get(b.strategy, 0) + 1
-                    )
-                    n_bids_by_strategy[b.strategy] = (
-                        n_bids_by_strategy.get(b.strategy, 0) + 1
-                    )
-                else:
-                    new_todays_bids.append(b)
-            todays_bids = new_todays_bids
-            strategies_today = [
-                s for s in strategies_today
-                if s not in strategies_skipped_by_size
-            ]
         else:
             # Fixed-mode sizing: still honor per-strategy override base + clamp
             # (spec § 2 lock #6: overrides apply in BOTH sizing modes).
@@ -476,6 +441,46 @@ def simulate_shared_pool(
                     raw_sizes_below_min[s] = raw
                 else:
                     position_sizes[s] = min(raw, eff_max)
+
+        # Phase 5e cleanup: filter None-sized strategies into size_too_small
+        # outcomes. Runs after BOTH sizing branches so override-clamped Nones
+        # from the fixed-mode else branch are also caught (closes the C12
+        # latent bug where fixed-mode + override min > base would leak None
+        # positions into DEDUP/ALLOC).
+        if strategies_today:
+            strategies_skipped_by_size = {
+                s for s, sz in position_sizes.items() if sz is None
+            }
+            if strategies_skipped_by_size:
+                new_todays_bids = []
+                for b in todays_bids:
+                    if b.strategy in strategies_skipped_by_size:
+                        all_bid_records.append(BidRecord(
+                            date=d, strategy=b.strategy, ticker=b.ticker,
+                            weight=weights[b.strategy],
+                            outcome="size_too_small",
+                            winner=None,
+                            position_size=raw_sizes_below_min[b.strategy],
+                            # Lock #23: bid fell below floor — raw < eff_min, not
+                            # raw > eff_max. Override-clamp attribution is False.
+                            size_clamped_by_override=False,
+                            **phase5d_kwargs_from_metadata(
+                                bid_weight_metadata.get(b.strategy), b.strategy,
+                            ),
+                        ))
+                        n_size_too_small_by_strategy[b.strategy] = (
+                            n_size_too_small_by_strategy.get(b.strategy, 0) + 1
+                        )
+                        n_bids_by_strategy[b.strategy] = (
+                            n_bids_by_strategy.get(b.strategy, 0) + 1
+                        )
+                    else:
+                        new_todays_bids.append(b)
+                todays_bids = new_todays_bids
+                strategies_today = [
+                    s for s in strategies_today
+                    if s not in strategies_skipped_by_size
+                ]
 
         # ─── DEDUP (same-day same-ticker collision) ───
         bids_by_ticker: dict[str, list] = {}
