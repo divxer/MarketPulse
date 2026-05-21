@@ -84,9 +84,15 @@ marketpulse/scheduler/paper_trading_tick.py    (MODIFIED — DI swap)
                                                AlwaysApproveRiskGate
                                                → CompositeRiskGate
 
-marketpulse/strategies/loader.py               (MODIFIED — risk: block)
-                                               Reads new risk: section in
-                                               config/strategies/*.yaml
+marketpulse/strategies/loader.py               (UNCHANGED in 6b)
+                                               The Strategy dataclass does NOT
+                                               grow a `risk:` field. Instead,
+                                               RiskConfigProvider reads the
+                                               risk: block directly from each
+                                               strategy YAML during from_yaml.
+                                               This keeps strategy execution
+                                               concerns separate from risk
+                                               governance concerns (lock 6b-L3).
 
 config/risk_gates.yaml                         (NEW) portfolio governance
 config/strategies/*.yaml                       (MODIFIED) add risk: block
@@ -171,7 +177,11 @@ ForwardExecutionEngine.place_order(order_request)
 
 ### Audit event type — reuse `ORDER_REJECTED` (lock 6b-L6)
 
-The umbrella spec speculated about adding a `RISK_GATE_BLOCKED` event type; 6b overrides that decision. Reusing `ORDER_REJECTED` with extended context keeps zero migration overhead and matches the 6a pattern already established for kill-switch and risk denials. Operators can query risk-gate denials with:
+The umbrella spec speculated about adding a `RISK_GATE_BLOCKED` event type; 6b overrides that decision. Reusing `ORDER_REJECTED` with extended context keeps zero migration overhead and matches the 6a pattern already established for kill-switch and risk denials.
+
+**Decimal-in-context normalization (required):** every gate's `RiskResult.context` may contain `Decimal` values (e.g., `daily_loss_limit`, `sector_cap`, `projected_notional`). Before persisting to `paper_audit_event.context` (JSON column), the audit writer MUST normalize all `Decimal` values to strings via the existing 6a pattern (`_dump` helper in `forward_engine.py`). Direct `json.dumps(asdict(result))` will either crash or emit non-deterministic floats — both unacceptable for an append-only audit ledger. The implementer applies `_dump`-equivalent recursion to nested `context.per_gate[*].context` dicts.
+
+Operators can query risk-gate denials with:
 
 ```sql
 SELECT * FROM paper_audit_event
@@ -203,6 +213,10 @@ engine = ForwardExecutionEngine(
     kill_switch=kill_switch, risk_gate=risk_gate,
 )
 ```
+
+**`CompositeRiskGate.__init__` construction model:** the composite builds its 4 child gates *internally* from the injected dependencies (config_provider, repository, calendar, clock, sector_provider). Callers do not pass pre-built gates — that's an over-flexibility trap; the gate identities + order are locked by 6b-L2. Tests substitute behavior by injecting fakes for the underlying dependencies (FakeClock, in-memory Repository, stub sector_provider) rather than overriding child gates.
+
+**Kill-switch ordering (clarification):** `ForwardExecutionEngine.place_order` checks the kill switch BEFORE invoking `CompositeRiskGate`. This means an active kill switch denies ALL orders, including `CLOSE`/`REDUCE` intents that would otherwise bypass the gates. This is intentional — operators flip the kill switch when they want a complete halt; reducing positions during a halt requires lifting the kill switch first. If a use case for "kill switch active but allow forced flatten" emerges, it lands in Phase 7 broker work, not 6b.
 
 Tests continue using `AlwaysApproveRiskGate` where the composite isn't the unit-under-test (existing 6a test fixtures unchanged).
 
@@ -243,7 +257,23 @@ def check_pre_trade(self, *, order_request):
     return RiskResult(approved=True, gate_name="market_hours", reason="")
 ```
 
-`_window_check` accepts `time(09:30) ≤ t ≤ time(16:00)` when `allow_regular_session`, `time(16:00) < t ≤ post_close_until` when `allow_post_close`, etc.
+`_window_check` algorithm (explicit, ordered to avoid ambiguity at window boundaries):
+
+```python
+def _window_check(t: time, cfg: MarketHoursConfig) -> bool:
+    """Returns True iff t falls within any enabled NY-time window.
+    Boundaries: regular session is INCLUSIVE on both ends [09:30, 16:00];
+    post-close is EXCLUSIVE on left, INCLUSIVE on right (16:00, until];
+    premarket is INCLUSIVE [04:00, 09:30). If all flags False → returns
+    False (no valid placement window)."""
+    if cfg.allow_premarket and time(4, 0) <= t < time(9, 30):
+        return True
+    if cfg.allow_regular_session and time(9, 30) <= t <= time(16, 0):
+        return True
+    if cfg.allow_post_close and time(16, 0) < t <= cfg.post_close_until:
+        return True
+    return False
+```
 
 ### StrategySizeGate
 
@@ -490,6 +520,7 @@ class RiskConfigProvider:
 
 | # | Category | Scenario | Lock |
 |---|---|---|---|
+| 0 | Composite happy path | all 4 gates approve → `CompositeRiskGate` returns `RiskResult(approved=True, gate_name="composite", failed_gates=())`; `ORDER_PLACED` audit written; `paper_order` row created. Unit-level guard before E2E `#14`. | 6b-L2 |
 | 1 | Fail-closed exception | gate raises arbitrary `RuntimeError` → `CompositeRiskGate` denies with `<gate>_error`; `ORDER_REJECTED` audit written; no `paper_order` row | iv, ix, 6a-L3 |
 | 2 | RiskIntent CLOSE/REDUCE bypass | `order_request.risk_intent == CLOSE` → all 4 gates return approve immediately (no DB reads, no clock reads) | 6b-L1 |
 | 3 | RiskIntent FLIP | `order_request.risk_intent == FLIP` → composite returns `unsupported_risk_intent` deny | 6b-L1 |
@@ -522,6 +553,8 @@ class RiskConfigProvider:
 | **6b-L7** | **`MarketHoursGate` denies stale `allocation_date`.** `allocation_date != calendar.today_ny_trading_date(clock.now())` → deny `stale_allocation_date`. 6a-L7 same-day replay still works via `idempotency_key`. |
 | **6b-L8** | **`SectorExposureGate` fail-closed on `proposed_sector is None`.** Never bucket to UNKNOWN-and-allow. `sector_exposure_notional()` also excludes unknown-sector OPEN positions from the buckets (they don't anchor a sector). |
 | **6b-L9** | **`StrategySizeGate` fail-closed on missing strategy risk config.** When `RiskConfigProvider.strategy_config(s)` is None OR `max_position_notional` is None, deny `missing_strategy_risk_config`. No infinite-cap default. |
+| **6b-L10** | **Decimal values in audit context MUST be string-normalized** before persistence (matches 6a's `_dump` pattern). Applies to nested `context.per_gate[*].context` as well. Prevents non-deterministic float serialization and Postgres-migration drift. |
+| **6b-L11** | **Pre-existing OPEN positions with unknown sector are excluded from sector-cap accounting.** Operators MUST run sector mapping backfill (populate `config/sector_overrides.yaml`) before 6b production deploy, OR accept that pre-6b OPENs don't count toward the cap. 6b-L8 fail-closed prevents NEW unknown-sector positions from being placed; this lock covers the deployment transition. |
 
 ---
 
@@ -536,6 +569,11 @@ class RiskConfigProvider:
 
 - `/lab/paper-trading` surfaces per-gate denials per day. Query:
   ```sql
+  -- SQLite syntax shown for illustration only. 6f MUST go through a
+  -- typed wrapper in repository.py (or future query_models.py) that
+  -- abstracts json_extract() — Phase 7 Postgres migration uses
+  -- context::jsonb->'failed_gates' instead. No raw SQL in 6f route
+  -- handlers (per 6a-2 round-6 R6-5 lock — wrapper-only JSON access).
   SELECT json_extract(context, '$.failed_gates') AS gates,
          json_extract(context, '$.per_gate') AS detail,
          strategy, reason, timestamp
@@ -568,13 +606,12 @@ Single PR `feat(phase-6b): risk gates`. Branches from main → `plan/phase-6b-ri
 - `marketpulse/trading/risk_gates/config_provider.py`
 - `config/risk_gates.yaml`
 
-**Modified files (6):**
+**Modified files (5):**
 - `marketpulse/trading/risk_gate.py` — adds `RiskIntent`, extends `RiskResult`, re-exports new package
 - `marketpulse/trading/types.py` — `OrderRequest.risk_intent: RiskIntent = OPEN`
 - `marketpulse/trading/repository.py` — appends 2 read helpers
 - `marketpulse/scheduler/paper_trading_tick.py` — wires `CompositeRiskGate`
-- `marketpulse/strategies/loader.py` — parses `risk:` block from strategy YAML
-- `config/strategies/*.yaml` — adds `risk:` block per strategy
+- `config/strategies/*.yaml` — adds `risk:` block per strategy. Phase 3-T2 created 6 strategy files (`momentum.yaml`, `meanrev.yaml`, etc.); each needs a `risk: { max_position_notional: <N> }` block. Any strategy YAML shipped WITHOUT a `risk:` block will trigger `StrategySizeGate` fail-closed deny `missing_strategy_risk_config` (6b-L9) for all orders in that strategy — verify all 6 are updated before 6b deploy.
 
 **New tests (7):**
 - `tests/trading/risk_gates/__init__.py`
