@@ -503,7 +503,10 @@ class Repository:
 
     def latest_kill_switch_state(self) -> bool:
         """Returns True iff the latest KILL_SWITCH_FLIPPED audit row's
-        context.active is True. Returns False if never flipped."""
+        context.to_state is True. Returns False if never flipped.
+
+        Rule #3: KillSwitchState reads via this helper instead of touching
+        the session directly."""
         row = self._session.execute(
             select(PaperAuditEvent).where(
                 PaperAuditEvent.event_type
@@ -512,4 +515,4 @@ class Repository:
         ).scalars().first()
         if row is None:
             return False
-        return bool(row.context.get("active", False))
+        return bool(row.context.get("to_state", False))
