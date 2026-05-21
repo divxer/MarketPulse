@@ -23,6 +23,18 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import TYPE_CHECKING
 
+from marketpulse.backtest.contribution import (
+    BidWeightMetadata,
+    compute_adjusted_bid_weight,
+    pool_corr_excluding_self,
+)
+from marketpulse.backtest.correlation import find_correlation_neighbors
+from marketpulse.backtest.policy import MIN_OVERLAP_DAYS
+from marketpulse.backtest.sharpe import (
+    compute_bid_weights,
+    compute_position_sizes,
+)
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -208,19 +220,6 @@ def allocate_for_day(
       - blocked: bids rejected by any gate, in encounter order
       - cash_used / cash_remaining: canonical batch totals
     """
-    # Avoid circular import — these helpers were Phase 5 internals.
-    from marketpulse.backtest.contribution import (
-        BidWeightMetadata,
-        compute_adjusted_bid_weight,
-        pool_corr_excluding_self,
-    )
-    from marketpulse.backtest.correlation import find_correlation_neighbors
-    from marketpulse.backtest.policy import MIN_OVERLAP_DAYS
-    from marketpulse.backtest.sharpe import (
-        compute_bid_weights,
-        compute_position_sizes,
-    )
-
     d = allocation_context.allocation_date
     sector_cap_dollars = (
         allocation_context.sector_cap_pct
@@ -451,7 +450,10 @@ def allocate_for_day(
 
     for b in sorted_winners:
         requested_size = position_sizes[b.strategy]
-        assert requested_size is not None  # size_too_small filtered upstream
+        # size_too_small filtered upstream; defensive guard for `python -O`
+        # (asserts are stripped under -O so we use a real branch).
+        if requested_size is None:
+            continue
         capital_in_use = sum(sz for _t, sz in running_open)
 
         if capital_in_use + requested_size > allocation_context.max_capital_in_use:
