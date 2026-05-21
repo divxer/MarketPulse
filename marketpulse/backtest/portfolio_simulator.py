@@ -785,6 +785,57 @@ def simulate_shared_pool(
             sum(defined) / len(defined) if defined else None
         )
 
+    # Phase 5e Thread D — allocation observability (spec § 2 lock #14, #15, #16, #19)
+    # Provenance: OBSERVABILITY_MODE == "v1" — spec § 2 lock #17.
+    # Computed at finalization on EVERY run; downstream consumers (Phase 6
+    # optimizer) read these fields unconditionally (lock #16).
+    total_won_capital = sum(
+        b.position_size for b in all_bid_records if b.outcome == "won"
+    )
+    effective_allocation_by_strategy: dict[str, float] = {}
+    for s in sorted(daily_curves.keys()):
+        won_size_s = sum(
+            b.position_size for b in all_bid_records
+            if b.strategy == s and b.outcome == "won"
+        )
+        effective_allocation_by_strategy[s] = (
+            won_size_s / total_won_capital if total_won_capital > 0 else 0.0
+        )
+
+    # Compute rank_drift with locked tie-break (spec § 2 lock #19).
+    # Both sorts use lexicographic ascending tie-break by strategy key.
+    # Both iterate over the FULL key set (no zero-filtering). This makes
+    # the two rankings permutations of the same set, so Σ drift == 0 is
+    # a true permutation identity.
+    all_strategy_keys = sorted(daily_curves.keys())
+    # Compute per-strategy avg_bid_weight INLINE here (needed BEFORE the
+    # per_strategy_stats loop builds it). Uses the same formula the loop
+    # uses (mean of b.weight over all bids for the strategy).
+    avg_bid_weight_by_strategy: dict[str, float] = {}
+    for s in all_strategy_keys:
+        bids_for_s = [b for b in all_bid_records if b.strategy == s]
+        if bids_for_s:
+            avg_bid_weight_by_strategy[s] = (
+                sum(b.weight for b in bids_for_s) / len(bids_for_s)
+            )
+        else:
+            avg_bid_weight_by_strategy[s] = 0.0
+
+    sorted_by_weight = sorted(
+        all_strategy_keys,
+        key=lambda s: (-avg_bid_weight_by_strategy[s], s),
+    )
+    sorted_by_capital = sorted(
+        all_strategy_keys,
+        key=lambda s: (-effective_allocation_by_strategy[s], s),
+    )
+    rank_by_weight = {s: i for i, s in enumerate(sorted_by_weight)}
+    rank_by_capital = {s: i for i, s in enumerate(sorted_by_capital)}
+    rank_drift_by_strategy: dict[str, int] = {
+        s: rank_by_weight[s] - rank_by_capital[s]
+        for s in all_strategy_keys
+    }
+
     per_strategy_stats: dict[str, StrategyContribution] = {}
     for s in sorted(daily_curves.keys()):
         # Phase 5b: realized PnL uses per-trade actual position size (variable),
@@ -819,6 +870,9 @@ def simulate_shared_pool(
             n_floor_hits=n_floor_hits_by_strategy.get(s, 0),
             avg_pool_corr=avg_pool_corr_by_strategy.get(s),
             n_would_change_rank=n_would_change_rank_by_strategy.get(s, 0),
+            # NEW Phase 5e
+            effective_allocation=effective_allocation_by_strategy.get(s, 0.0),
+            rank_drift_from_signal=rank_drift_by_strategy.get(s, 0),
         )
 
     # Phase 5b Task 7: portfolio-level concentration telemetry.
