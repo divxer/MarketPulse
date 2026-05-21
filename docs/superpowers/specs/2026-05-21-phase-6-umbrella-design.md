@@ -146,10 +146,11 @@ Per umbrella review: 6a carries ~65-75% of Phase 6's total complexity (Protocol,
 
 | Sub-task | Scope |
 |---|---|
-| **6a-1** | DB schema (5 tables) + Alembic migration + `ExecutionEngine` Protocol |
-| **6a-2** | `ForwardExecutionEngine` implementation (place_order, cancel_order, tick) |
-| **6a-3** | Scheduler wrapper + idempotency + transactionality + restart safety |
-| **6a-4** | Stateful test suite (clock-injected, `# Layer: stateful` tag) |
+| **6a-0** | Extract `allocate_for_day(...)` pure-function kernel from Phase 5 `simulate_shared_pool`; cross-validate via Phase 5 regression. New module `marketpulse/backtest/allocation.py`. Both Phase 5 backtest and Phase 6 paper trading share one allocation kernel (makes lock x code-true, not just doc-true). |
+| **6a-1** | DB schema (5 tables) + Alembic migration + `ExecutionEngine` Protocol + scaffolding (`types`, `clock`, `calendar`, `risk_gate`, `idempotency`) |
+| **6a-2** | `ForwardExecutionEngine` implementation (place_order, cancel_order, tick → `TickResult`) + `repository.py` single-writer surface + `kill_switch.py` |
+| **6a-3** | `BidAggregator` + `daily_cycle.py` orchestration + scheduler thin entrypoint + APScheduler wiring + `ensure_initial_deposit()` startup hook |
+| **6a-4** | Full E2E stateful test suite (clock-injected, `# Layer: stateful` tag enforced via 5e pytest hook) |
 
 This is umbrella-level guidance only; 6a's own spec will lock the exact sub-task boundaries. The point is: 6a is not "one task" — it's a sub-phase with its own internal decomposition.
 
@@ -322,7 +323,7 @@ REJECTED is synchronous-only:
 - **(vi)** `ExecutionEngine` is a Protocol (structural typing). Phase 6 ships `ForwardExecutionEngine`; Phase 7 adds `BrokerExecutionEngine`; `RealtimeExecutionEngine` is a stretch sibling. All three implement the same Protocol.
 - **(vii)** In `ForwardExecutionEngine`, `tick(as_of)` is the sole clock-advancement mechanism. Other implementations may use different drivers (wall-clock, broker callback).
 - **(viii)** All execution-state mutation MUST pass through the `ExecutionEngine` boundary. Other components may READ wall-clock time (for display, eligibility checks, market-hours logic), but they cannot advance `paper_order` / `paper_fill` / `paper_position` / `paper_cash_ledger` state.
-- **(ix)** Rejected order attempts create NO `paper_order` row, but MUST write an append-only audit event (via 6g) with full rejection reason (failing risk gate, kill-switch state, etc.).
+- **(ix)** Rejected order attempts create NO `paper_order` row, but MUST write an append-only audit event (via 6a's `repository.write_audit_event` — `paper_audit_event` is an execution-owned ledger, not a 6g observability product) with full rejection reason (failing risk gate, kill-switch state, etc.). `OrderRejected` is raised ONLY after the audit row commits; if audit write fails, the DB error surfaces.
 - **(x)** `RuleCascadeAllocator` is shared between Phase 5 backtest and Phase 6 paper trading — no duplicate allocator implementation. The math is one source; the time semantics + persistence layer differ.
 - **(xi)** Order lifecycle (PLACED → ENTRY_FILLED / CANCELLED) and position lifecycle (OPEN → CLOSED) are SEPARATE state machines. Entry fill creates/updates `paper_position`; horizon exit closes it. `paper_order.ENTRY_FILLED` means entry recorded, NOT both entry and exit.
 - **(xii)** `OrderRequest.horizon_price: Decimal | None` (lock xxii quantization boundary). `ForwardExecutionEngine` REJECTS `OrderRequest` with `horizon_price is None` (cannot compute fill without it). `BrokerExecutionEngine` IGNORES `horizon_price` (broker reports real fill). `RealtimeExecutionEngine` semantics are deferred to the 6d spec when that sub-project is brainstormed.
@@ -350,6 +351,10 @@ paper_order
 ├── quantity                 signed int (positive only in Phase 6;
 │                                        shorts deferred)
 ├── event_time               timestamp WITH TIME ZONE (UTC — lock xxix)
+│                            (the moment AI event was detected)
+├── allocation_date          date  ← NEW per lock xxxiii
+│                            (NY trading day on which allocate_for_day was called;
+│                             distinct from event_time and placed_at)
 ├── event_price              Decimal(18, 6)   ← was float (lock xxii)
 ├── horizon_date             date
 ├── horizon_price            Decimal(18, 6) | None
@@ -357,6 +362,7 @@ paper_order
 │                             None reserved for Phase 7 broker)
 ├── status                   Literal["PLACED", "ENTRY_FILLED", "CANCELLED"]
 ├── placed_at                timestamp WITH TIME ZONE (UTC)
+│                            (DB write time; distinct from allocation_date)
 ├── filled_at                timestamp WITH TIME ZONE | None
 ├── cancelled_at             timestamp WITH TIME ZONE | None
 ├── cancel_reason            str | None
@@ -458,9 +464,11 @@ paper_cash_ledger
 
 **Initial seed:** Phase 6a inserts one `INITIAL_DEPOSIT` row with `delta=10_000` (matching the existing `initial_capital=10_000` default).
 
-### 4.5 `paper_audit_event` (6g)
+### 4.5 `paper_audit_event` (6a-owned, 6g consumes)
 
-Universal provenance log. Every state transition AND every rejection writes here.
+Execution-owned append-only provenance ledger. Schema + writer live in 6a's `repository.py` because lock ix puts audit on the `place_order` critical path — audit is execution infrastructure, not observability decoration. 6g consumes (push notifications, recap aggregation, UI filtering, analytics) but does not own the table's existence.
+
+Every state transition AND every rejection writes here.
 
 ```
 paper_audit_event
@@ -600,9 +608,9 @@ Three test categories in Phase 6:
 - **(xxvi)** Phase 5e's test taxonomy is extended with a third category: `# Layer: stateful` for multi-step paper-trading flow tests. The pytest enforcement hook (5e lock #22) accepts the third value.
 - **(xxvii)** `place_order` is transactional. Accepted attempts commit `paper_order` + `ORDER_PLACED` audit together. Rejected attempts commit `ORDER_REJECTED` audit without `paper_order`. No partial accepted/rejected state.
 
-### 5.6 Cross-cutting locks added per umbrella review (2026-05-21)
+### 5.6 Cross-cutting locks added per umbrella review (2026-05-21) + 6a brainstorm (2026-05-21)
 
-These four locks address concrete future-bug surfaces identified during architectural review:
+These locks address concrete future-bug surfaces identified during architectural review and the 6a brainstorm:
 
 - **(xxviii)** Every `paper_order` row carries `strategy_version` (from YAML), `allocator_version` (semver/git-sha of `RuleCascadeAllocator`), and `execution_engine_version` (semver of `ForwardExecutionEngine`). Without these, replay across deploys produces different output for the same input — and there's no way to explain why March's allocation differs from a re-run today. The versions appear on every row so replay determinism is auditable per-order.
 - **(xxix)** **All timestamps stored in UTC.** Market-hours / holiday logic is evaluated in the **instrument's exchange timezone**; Phase 6 default is `America/New_York` for US equities. Hong Kong (`Asia/Hong_Kong`), mainland China (`Asia/Shanghai`), and other venues will plug in via the canonical calendar source (lock xxxii) when Phase 7 / multi-broker support arrives. DST never appears as a bug because timezone-naive datetimes never enter the DB and never enter business-day arithmetic.
@@ -613,7 +621,8 @@ These four locks address concrete future-bug surfaces identified during architec
 
   Rationale: once an order is accepted, retries (network timeout, scheduler restart) MUST NOT be re-evaluated by risk gates whose state has since changed. The accepted-then-retried-then-now-rejected scenario produces non-deterministic replays. Idempotency wins.
 - **(xxxi)** *Merged into lock xxii (umbrella review 2026-05-21).* The earlier draft introduced this as a Section-5 companion to lock xxii, but the two locks were operationally identical. Lock number reserved — do not reuse to keep references in Section 4 / Section 5 stable.
-- **(xxxii)** `marketpulse/trading/calendar.py` declares the single canonical source of trading-calendar truth. Phase 6a picks ONE library (`exchange_calendars`, `pandas_market_calendars`, or a hand-rolled NYSE holiday list) and locks the choice in this module. Risk gates (6b), scheduler (6a), market-hours UI indicators (6f) all import from here. No second source.
+- **(xxxii)** `marketpulse/trading/calendar.py` declares the single canonical source of trading-calendar truth. Phase 6a picks ONE library (`exchange_calendars`, locked at 6a brainstorm 2026-05-21). Risk gates (6b), scheduler (6a), market-hours UI indicators (6f) all import from here. No second source.
+- **(xxxiii)** **Phase 6 downtime recovery is FORWARD-ONLY.** If the scheduler detects missed business days between `last_successful_tick_date` and `clock.today()` (NY trading day), the system does NOT retroactively replay missed allocation days. Instead it emits an append-only `SCHEDULER_GAP_DETECTED` audit event with `{last_successful_tick_date, resume_date, missed_business_days, mode: "forward_only_skip"}` and resumes normal operation from the current day forward. Rationale: Phase 6 is a forward-running paper-trading system, not a historical market-reconstruction engine. Retroactive replay would reconstruct decisions using stale/non-authoritative portfolio state and violate deterministic clock progression semantics (locks ii, vii, xxiv). Companion field: `paper_order.allocation_date` separates the AI event time (`event_time`) from the allocator decision day (`allocation_date`) from the DB write time (`placed_at`).
 
 ---
 
@@ -681,7 +690,7 @@ Mirror-image of forward-warnings. By the end of Phase 6 MVP (6a + 6b + 6f + 6g):
 
 ### 6.5 No new locks in Section 6
 
-Section 6 is documentary forward-warning. No new architectural locks; lock count stays at **31** (xxxi reserved/merged into xxii).
+Section 6 is documentary forward-warning. No new architectural locks; lock count stays at **32** (xxxi reserved/merged into xxii; xxxiii added per 6a brainstorm).
 
 ---
 
@@ -731,11 +740,11 @@ S8 covers ONLY the cross-cutting operational integrity surface — the "must nev
 
 ### 8.3 No new locks in Section 8
 
-Section 8 is the test map for existing locks. No new architectural commitments; lock count stays at **31** (xxxi reserved/merged into xxii).
+Section 8 is the test map for existing locks. No new architectural commitments; lock count stays at **32** (xxxi reserved/merged into xxii; xxxiii added per 6a brainstorm).
 
 ---
 
-## Appendix A — Consolidated lock list (31 locked decisions; xxxi merged into xxii, number reserved)
+## Appendix A — Consolidated lock list (32 locked decisions; xxxi merged into xxii, number reserved)
 
 | # | Lock | Section |
 |---|---|---|
@@ -770,7 +779,8 @@ Section 8 is the test map for existing locks. No new architectural commitments; 
 | xxix | All timestamps stored in UTC; market-hours logic evaluated in `America/New_York` | § 5 (6a + 6b) |
 | xxx | Idempotency check runs BEFORE risk gates in `place_order` | § 5 (6a) |
 | xxxi | *merged into xxii — number reserved, see § 5.6* | — |
-| xxxii | `marketpulse/trading/calendar.py` is the single canonical trading-calendar source | § 5 (6a + 6b + 6f) |
+| xxxii | `marketpulse/trading/calendar.py` is the single canonical trading-calendar source (`exchange_calendars`-backed) | § 5 (6a + 6b + 6f) |
+| xxxiii | Phase 6 downtime recovery is forward-only; missed business days are skipped, `SCHEDULER_GAP_DETECTED` audit emitted | § 5 (6a) |
 
 ---
 
