@@ -56,6 +56,54 @@ class _OpenPosition:
     position_size: float
 
 
+def _decompose_day_contributions(
+    *,
+    today: date,
+    realized_pnl_today_by_strategy: dict[str, float],
+    mtm_prev_by_strategy: dict[str, float],
+    mtm_today_by_strategy: dict[str, float],
+    equity_curve: list[tuple[date, float]],
+    initial_capital: float,
+    daily_strategy_contribution_returns: dict[str, list[tuple[date, float]]],
+    daily_pool_returns: list[tuple[date, float]],
+) -> None:
+    """Append per-strategy contribution returns + pool return for `today`.
+
+    Spec § 5 + § 2 lock #7. Pure side-effect helper: mutates
+    daily_strategy_contribution_returns and daily_pool_returns in place.
+    Returns None to make the mutation explicit at the call site.
+
+    Invariant: Σ daily_strategy_contribution_returns[s][-1] == daily_pool_returns[-1]
+    by construction. Shared denominator (pool_equity_prev_day) means
+    sum-of-divisions equals division-of-sum.
+
+    Extracted from portfolio_simulator's daily loop in Phase 5e to keep
+    the main loop legible (was inline ~50 LOC).
+    """
+    pool_equity_prev_day = (
+        equity_curve[-1][1] if equity_curve else initial_capital
+    )
+    all_known_strategies = (
+        set(realized_pnl_today_by_strategy)
+        | set(mtm_prev_by_strategy)
+        | set(mtm_today_by_strategy)
+    )
+    for s in all_known_strategies:
+        pnl_today_s = (
+            realized_pnl_today_by_strategy.get(s, 0.0)
+            + mtm_today_by_strategy.get(s, 0.0)
+            - mtm_prev_by_strategy.get(s, 0.0)
+        )
+        contrib_ret = daily_contribution_return(pnl_today_s, pool_equity_prev_day)
+        daily_strategy_contribution_returns.setdefault(s, []).append((today, contrib_ret))
+    pool_ret_today = sum(
+        daily_strategy_contribution_returns[s][-1][1]
+        for s in all_known_strategies
+        if daily_strategy_contribution_returns.get(s)
+    )
+    daily_pool_returns.append((today, pool_ret_today))
+
+
 def simulate_shared_pool(
     bids: list,
     daily_curves: dict[str, list[tuple[date, float]]],
@@ -595,31 +643,17 @@ def simulate_shared_pool(
             )
 
         # ─── Phase 5d per-day per-strategy contribution decomposition ───
-        # By construction: pool_pnl_today = Σ_s (realized_today_s
-        #   + mtm_today_s − mtm_prev_s). Dividing by yesterday's equity gives
-        # contribution returns whose sum equals the pool return for this day.
-        pool_equity_prev_day = (
-            equity_curve[-1][1] if equity_curve else initial_capital
+        # Helper extracted in Phase 5e (spec § 2 lock #7).
+        _decompose_day_contributions(
+            today=d,
+            realized_pnl_today_by_strategy=realized_pnl_today_by_strategy,
+            mtm_prev_by_strategy=mtm_prev_by_strategy,
+            mtm_today_by_strategy=mtm_today_by_strategy,
+            equity_curve=equity_curve,
+            initial_capital=initial_capital,
+            daily_strategy_contribution_returns=daily_strategy_contribution_returns,
+            daily_pool_returns=daily_pool_returns,
         )
-        all_known_strategies = (
-            set(realized_pnl_today_by_strategy)
-            | set(mtm_prev_by_strategy)
-            | set(mtm_today_by_strategy)
-        )
-        for s in all_known_strategies:
-            pnl_today_s = (
-                realized_pnl_today_by_strategy.get(s, 0.0)
-                + mtm_today_by_strategy.get(s, 0.0)
-                - mtm_prev_by_strategy.get(s, 0.0)
-            )
-            contrib_ret = daily_contribution_return(pnl_today_s, pool_equity_prev_day)
-            daily_strategy_contribution_returns.setdefault(s, []).append((d, contrib_ret))
-        pool_ret_today = sum(
-            daily_strategy_contribution_returns[s][-1][1]
-            for s in all_known_strategies
-            if daily_strategy_contribution_returns.get(s)
-        )
-        daily_pool_returns.append((d, pool_ret_today))
 
         # ─── RECORD ───
         equity_curve.append((d, cash + positions_value))

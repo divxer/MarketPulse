@@ -1570,3 +1570,79 @@ def test_phase5d_provenance_threaded_to_result():
     assert r.contribution_lambda == 0.7
     assert r.contribution_policy == "contribution_adjusted_sharpe_60d_v0"
     assert r.bid_policy == "contribution_adjusted_sharpe_60d_v0"
+
+
+def test_phase5e_decompose_day_contributions_sums_to_pool_return() -> None:
+    """# Layer: invariant
+    _decompose_day_contributions mutates accumulator dicts/lists in place such
+    that Σ daily_strategy_contribution_returns[s][-1] == daily_pool_returns[-1]
+    for the current day. This is an algebraic identity (shared denominator) —
+    holds for any fixture, any strategy count.
+    """
+    from datetime import date
+
+    from marketpulse.backtest.portfolio_simulator import _decompose_day_contributions
+
+    # 3 synthetic strategies with arbitrary realized + MTM PnL
+    today = date(2026, 5, 15)
+    realized = {"a": 100.0, "b": -50.0, "c": 0.0}
+    mtm_prev = {"a": 200.0, "b": 100.0, "c": 50.0}
+    mtm_today = {"a": 220.0, "b": 90.0, "c": 55.0}
+    equity_curve: list[tuple[date, float]] = [(date(2026, 5, 14), 10_000.0)]
+    initial_capital = 10_000.0
+    daily_contribs: dict[str, list[tuple[date, float]]] = {}
+    daily_pool: list[tuple[date, float]] = []
+
+    _decompose_day_contributions(
+        today=today,
+        realized_pnl_today_by_strategy=realized,
+        mtm_prev_by_strategy=mtm_prev,
+        mtm_today_by_strategy=mtm_today,
+        equity_curve=equity_curve,
+        initial_capital=initial_capital,
+        daily_strategy_contribution_returns=daily_contribs,
+        daily_pool_returns=daily_pool,
+    )
+
+    # Outcome: each strategy got one append, pool got one append
+    assert "a" in daily_contribs and len(daily_contribs["a"]) == 1
+    assert "b" in daily_contribs and len(daily_contribs["b"]) == 1
+    assert "c" in daily_contribs and len(daily_contribs["c"]) == 1
+    assert len(daily_pool) == 1
+    # Invariant: Σ contribution returns == pool return for the day
+    sum_contribs = sum(daily_contribs[s][-1][1] for s in ("a", "b", "c"))
+    assert abs(sum_contribs - daily_pool[-1][1]) < 1e-12
+
+
+def test_phase5e_decompose_day_contributions_empty_equity_curve_uses_initial_capital() -> None:
+    """# Layer: invariant
+    When equity_curve is empty (day 0 of backtest), helper uses initial_capital
+    as the denominator for daily_contribution_return.
+    """
+    from datetime import date
+
+    from marketpulse.backtest.portfolio_simulator import _decompose_day_contributions
+
+    today = date(2026, 4, 1)
+    realized = {"a": 50.0}
+    mtm_prev: dict[str, float] = {}
+    mtm_today = {"a": 25.0}
+    equity_curve: list[tuple[date, float]] = []
+    initial_capital = 10_000.0
+    daily_contribs: dict[str, list[tuple[date, float]]] = {}
+    daily_pool: list[tuple[date, float]] = []
+
+    _decompose_day_contributions(
+        today=today,
+        realized_pnl_today_by_strategy=realized,
+        mtm_prev_by_strategy=mtm_prev,
+        mtm_today_by_strategy=mtm_today,
+        equity_curve=equity_curve,
+        initial_capital=initial_capital,
+        daily_strategy_contribution_returns=daily_contribs,
+        daily_pool_returns=daily_pool,
+    )
+
+    # Outcome: (50 + 25 − 0) / 10_000 = 0.0075
+    expected = (50.0 + 25.0 - 0.0) / 10_000.0
+    assert abs(daily_contribs["a"][-1][1] - expected) < 1e-12
