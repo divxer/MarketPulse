@@ -1708,3 +1708,198 @@ def test_phase5e_warm_pool_produces_at_least_one_rank_flip(phase5d_warm_pool):
     r = phase5d_warm_pool["shared"]
     total_flips = sum(1 for b in r.bid_history if b.would_change_rank)
     assert total_flips > 0, "Fixture too tame — no rank flips produced"
+
+
+def test_phase5e_effective_allocation_sums_to_one_when_capital_allocated(
+    phase5d_warm_pool,
+):
+    """# Layer: invariant
+    Spec § 8 scenario #23. Σ effective_allocation == 1.0 when any capital
+    was allocated, else == 0.0 (lock #20 conditional simplex).
+    """
+    r = phase5d_warm_pool["shared"]
+    total = sum(c.effective_allocation for c in r.per_strategy_stats.values())
+    won_capital = sum(
+        b.position_size for b in r.bid_history if b.outcome == "won"
+    )
+    if won_capital > 0:
+        assert abs(total - 1.0) < 1e-9
+    else:
+        assert total == 0.0
+
+
+def test_phase5e_rank_drift_sum_to_zero_permutation_identity(phase5d_warm_pool):
+    """# Layer: invariant
+    Spec § 8 scenario #24 + lock #19. Σ rank_drift_from_signal == 0 by
+    permutation identity — both rankings are permutations of the same set
+    (full per_strategy_stats.keys(), lexicographic tie-break).
+    """
+    r = phase5d_warm_pool["shared"]
+    drifts = [c.rank_drift_from_signal for c in r.per_strategy_stats.values()]
+    assert sum(drifts) == 0
+
+
+def test_phase5e_warm_pool_produces_at_least_one_nonzero_drift(phase5d_warm_pool):
+    """# Layer: behavioral
+    Spec § 8 scenario #25. Warm-pool fixture is engineered to fire ≥1 cap
+    or clamp so |rank_drift_from_signal| > 0 for at least one strategy.
+    If this fails, the fixture has drifted — fix the fixture (more
+    aggressive caps, more divergent curves).
+
+    Note: in the current B6 fixture, caps are DISABLED. Drift currently
+    requires the contribution-adjusted ranking to differ from raw —
+    which IS the case in the retuned fixture (B7 confirmed ≥1 rank flip).
+    But rank_drift_from_signal compares BID-RANK to CAPITAL-RANK, which
+    differs from would_change_rank (raw vs adjusted bid ranking).
+
+    If this test fails, the assertion to relax is `len(nonzero) > 0` — but
+    only after confirming the underlying logic is sound by re-checking
+    other invariants. Don't weaken silently.
+    """
+    r = phase5d_warm_pool["shared"]
+    nonzero = [
+        c.rank_drift_from_signal for c in r.per_strategy_stats.values()
+        if c.rank_drift_from_signal != 0
+    ]
+    assert len(nonzero) > 0, (
+        "Warm-pool produced zero drift across all strategies — fixture too tame"
+    )
+
+
+def test_phase5e_observability_fields_present_on_every_strategy_contribution(
+    phase5d_warm_pool,
+):
+    """# Layer: invariant
+    Spec § 8 scenario #27 + lock #16. effective_allocation and
+    rank_drift_from_signal MUST be present on every StrategyContribution
+    returned by the simulator. Downstream consumers (Phase 6 optimizer)
+    rely on this guarantee.
+    """
+    r = phase5d_warm_pool["shared"]
+    assert len(r.per_strategy_stats) > 0
+    for _s, c in r.per_strategy_stats.items():
+        assert hasattr(c, "effective_allocation")
+        assert hasattr(c, "rank_drift_from_signal")
+        assert isinstance(c.effective_allocation, float)
+        assert isinstance(c.rank_drift_from_signal, int)
+        assert 0.0 <= c.effective_allocation <= 1.0
+    total = sum(c.effective_allocation for c in r.per_strategy_stats.values())
+    assert total > 0.0, "Simulator returned default zeros — lock #16 violated"
+
+
+def _build_phase5e_determinism_inputs():
+    """Build a minimal 3-strategy bid set + curves for the determinism test.
+
+    Self-contained (does not depend on the warm-pool fixture). Two
+    invocations of simulate_shared_pool with these inputs MUST produce
+    identical rank_drift_from_signal values per strategy — lock #19
+    lexicographic tie-break guarantees deterministic rank assignment.
+    """
+    import math as _math
+    from dataclasses import dataclass
+    from datetime import UTC, date, datetime, timedelta
+
+    @dataclass(frozen=True)
+    class _BidInput:
+        strategy: str
+        ticker: str
+        event_time: datetime
+        event_price: float
+        horizon_price: float
+        horizon_date: date
+        forward_return: float
+        benchmark_forward_return: float
+
+    def _pair(ticker, strategy, event_date, event_price, horizon_date,
+              horizon_price, benchmark_return=0.01):
+        return _BidInput(
+            strategy=strategy, ticker=ticker,
+            event_time=datetime.combine(event_date, datetime.min.time(), tzinfo=UTC),
+            event_price=event_price, horizon_price=horizon_price,
+            horizon_date=horizon_date,
+            forward_return=(horizon_price - event_price) / event_price,
+            benchmark_forward_return=benchmark_return,
+        )
+
+    base_date = date(2026, 1, 1)
+    days = 90
+    a_curve = [
+        (base_date + timedelta(days=i),
+         10_000.0 * (1.0 + 0.003 * i) * (1.0 + 0.02 * _math.sin(i * 0.4)))
+        for i in range(days)
+    ]
+    b_curve = [
+        (base_date + timedelta(days=i),
+         10_000.0 * (1.0 + 0.002 * i) * (1.0 + 0.03 * _math.cos(i * 0.6)))
+        for i in range(days)
+    ]
+    c_curve = [
+        (base_date + timedelta(days=i),
+         10_000.0 * (1.0 + 0.0025 * i) * (1.0 - 0.025 * _math.sin(i * 0.5 + 0.5)))
+        for i in range(days)
+    ]
+    bids = []
+    for i in range(0, 40, 2):
+        bid_date = base_date + timedelta(days=20 + i)
+        horizon_date = bid_date + timedelta(days=5)
+        bids.append(_pair(f"AA{i:02d}", "det_a", bid_date, 100.0, horizon_date, 106.0))
+        bids.append(_pair(f"BB{i:02d}", "det_b", bid_date, 100.0, horizon_date, 102.0))
+        bids.append(_pair(f"CC{i:02d}", "det_c", bid_date, 100.0, horizon_date, 98.0))
+    daily_curves = {"det_a": a_curve, "det_b": b_curve, "det_c": c_curve}
+    return bids, daily_curves
+
+
+def test_phase5e_rank_drift_tie_break_determinism_lock19() -> None:
+    """# Layer: invariant
+    Spec § 8 scenario #29 + lock #19. Two identical runs over the SAME
+    inputs produce IDENTICAL rank_drift values per strategy. Tie-break
+    discipline (lexicographic ascending by strategy key) guarantees
+    deterministic rank assignment.
+
+    Self-contained: builds its own minimal 3-strategy fixture so this test
+    does not couple to the warm-pool fixture construction. simulate_shared_pool
+    is pure given inputs — two runs MUST produce identical output.
+    """
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+
+    bids, daily_curves = _build_phase5e_determinism_inputs()
+    common_kwargs = dict(
+        bids=bids, daily_curves=daily_curves,
+        horizon=5, initial_capital=10_000.0, base_position_size=500.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=False,
+        sector_caps_enabled=False, correlation_caps_enabled=False,
+        contribution_enabled=True, contribution_lambda=2.0,
+    )
+    r1 = simulate_shared_pool(**common_kwargs)
+    r2 = simulate_shared_pool(**common_kwargs)
+    assert set(r1.per_strategy_stats.keys()) == set(r2.per_strategy_stats.keys())
+    for s in r1.per_strategy_stats:
+        assert (
+            r1.per_strategy_stats[s].rank_drift_from_signal
+            == r2.per_strategy_stats[s].rank_drift_from_signal
+        ), f"Non-deterministic rank_drift for strategy {s}"
+
+
+def test_phase5e_conditional_simplex_zero_state_lock20() -> None:
+    """# Layer: invariant
+    Spec § 8 scenario #30 + lock #20. When NO bids win (all blocked or
+    bid set is empty), Σ effective_allocation == 0.0 AND every value is
+    exactly 0.0 — the zero-vector state, not a degenerate fractional split.
+    """
+    from datetime import date
+
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+
+    # Empty bids → no won capital → zero state
+    r = simulate_shared_pool(
+        bids=[], daily_curves={"a": [(date(2026, 1, 1), 10_000.0)]},
+        horizon=5, initial_capital=10_000.0, base_position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=False,
+        sector_caps_enabled=False, correlation_caps_enabled=False,
+    )
+    total = sum(c.effective_allocation for c in r.per_strategy_stats.values())
+    assert total == 0.0
+    for c in r.per_strategy_stats.values():
+        assert c.effective_allocation == 0.0
