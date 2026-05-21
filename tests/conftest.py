@@ -89,3 +89,81 @@ def client(db_url: str):
     app = create_app()
     with TestClient(app) as c:
         yield c
+
+
+@pytest.fixture
+def phase5d_warm_pool():
+    """Phase 5e Thread B fixture (spec § 2 lock #9).
+
+    Produces a backtest result with:
+      - >=1 bid carrying non-None pool_corr (warm-up complete)
+      - >=1 strategy showing non-zero rank_drift_from_signal (rank flip path executed)
+
+    Construction: 2 strategies with anti-correlated daily curves, bids on
+    every other day over a 60-day window starting from day 30 (so by the time
+    a bid is evaluated, the strategy has >=30 days of contribution-return
+    history -> pool_corr_excluding_self returns non-None).
+
+    Returns the dict from simulate_shared_pool. The 'shared' key holds
+    the PortfolioBacktestResult.
+    """
+    from dataclasses import dataclass
+    from datetime import UTC, date, datetime, timedelta
+
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+
+    @dataclass(frozen=True)
+    class _BidInput:
+        strategy: str
+        ticker: str
+        event_time: datetime
+        event_price: float
+        horizon_price: float
+        horizon_date: date
+        forward_return: float
+        benchmark_forward_return: float
+
+    def _pair(ticker, strategy, event_date, event_price, horizon_date,
+              horizon_price, benchmark_return=0.01):
+        return _BidInput(
+            strategy=strategy, ticker=ticker,
+            event_time=datetime.combine(event_date, datetime.min.time(), tzinfo=UTC),
+            event_price=event_price, horizon_price=horizon_price,
+            horizon_date=horizon_date,
+            forward_return=(horizon_price - event_price) / event_price,
+            benchmark_forward_return=benchmark_return,
+        )
+
+    base_date = date(2026, 1, 1)
+    days = 120
+    # Strategy A: monotone growth
+    a_curve = [
+        (base_date + timedelta(days=i), 10_000.0 * (1.005 ** i))
+        for i in range(days)
+    ]
+    # Strategy B: anti-correlated zigzag riding the same growth trajectory
+    b_curve = [
+        (base_date + timedelta(days=i),
+         10_000.0 * (1.005 ** i) * (1.0 - 0.005 * (i % 2)))
+        for i in range(days)
+    ]
+
+    bids = []
+    for i in range(0, 60, 2):
+        bid_date = base_date + timedelta(days=30 + i)
+        horizon_date = bid_date + timedelta(days=5)
+        bids.append(_pair(f"AA{i:02d}", "wp_a", bid_date, 100.0, horizon_date, 105.0))
+        bids.append(_pair(f"BB{i:02d}", "wp_b", bid_date, 100.0, horizon_date, 105.0))
+
+    daily_curves = {"wp_a": a_curve, "wp_b": b_curve}
+
+    shared = simulate_shared_pool(
+        bids=bids, daily_curves=daily_curves,
+        horizon=5, initial_capital=10_000.0, base_position_size=500.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=False,
+        sector_caps_enabled=False, correlation_caps_enabled=False,
+        contribution_enabled=True,
+        contribution_lambda=1.0,
+    )
+    return {"shared": shared}

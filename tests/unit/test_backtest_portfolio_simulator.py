@@ -1642,3 +1642,20 @@ def test_phase5e_decompose_day_contributions_empty_equity_curve_uses_initial_cap
     # Outcome: (50 + 25 − 0) / 10_000 = 0.0075
     expected = (50.0 + 25.0 - 0.0) / 10_000.0
     assert abs(daily_contribs["a"][-1][1] - expected) < 1e-12
+
+
+def test_phase5e_warm_pool_fixture_produces_non_none_pool_corr(phase5d_warm_pool):
+    """# Layer: behavioral
+    The fixture itself must produce non-None pool_corr on >= 1 bid.
+
+    If this test fails, the behavioral assertions in B7 and D20 are vacuous —
+    the same trap that bit us in 5d Task 8. The fixture must be retuned
+    (more bids, longer history, more divergent curves) until this passes.
+    """
+    bids_with_corr = [
+        b for b in phase5d_warm_pool["shared"].bid_history
+        if b.pool_corr is not None
+    ]
+    assert len(bids_with_corr) > 0, (
+        "Warm-pool fixture did not warm up pool_corr — fix the fixture"
+    )
