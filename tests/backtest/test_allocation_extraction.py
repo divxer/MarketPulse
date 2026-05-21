@@ -88,14 +88,19 @@ def test_simulate_shared_pool_matches_frozen_baseline(phase5d_warm_pool):
     )
 
 
-def test_extraction_marker_pre():
-    """Pre-extraction marker. Removed in 6a-0.4 once the extraction
-    lands. Asserts portfolio_simulator still owns the inline weight/
-    size/dedup/allocate logic."""
+def test_extraction_marker_post():
+    """Asserts the heavy lifting moved out of portfolio_simulator into
+    allocate_for_day."""
     from pathlib import Path
-    src = Path("marketpulse/backtest/portfolio_simulator.py").read_text()
-    assert "compute_position_sizes" in src
-    assert "compute_adjusted_bid_weight" in src or "compute_bid_weights" in src
+    sim_src = Path("marketpulse/backtest/portfolio_simulator.py").read_text()
+    alloc_src = Path("marketpulse/backtest/allocation.py").read_text()
+    # The kernel now lives in allocation.py
+    assert "compute_position_sizes" in alloc_src
+    assert ("compute_adjusted_bid_weight" in alloc_src
+            or "compute_bid_weights" in alloc_src)
+    # portfolio_simulator calls into the kernel rather than owning it
+    assert "allocate_for_day(" in sim_src
+    assert "from marketpulse.backtest.allocation import" in sim_src
 
 
 def test_allocation_dataclasses_exist():
