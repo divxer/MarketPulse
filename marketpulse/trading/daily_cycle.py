@@ -21,6 +21,7 @@ from decimal import Decimal
 from typing import Literal
 
 from marketpulse.backtest.allocation import (
+    ALLOCATOR_VERSION,
     AllocationContext,
     AllocationResult,
     PositionSnapshot,
@@ -30,7 +31,7 @@ from marketpulse.trading.bid_aggregator import BidAggregator
 from marketpulse.trading.calendar import NYTradingCalendar
 from marketpulse.trading.clock import Clock
 from marketpulse.trading.execution_engine import ExecutionEngine
-from marketpulse.trading.forward_engine import ForwardExecutionEngine
+from marketpulse.trading.forward_engine import EXECUTION_ENGINE_VERSION
 from marketpulse.trading.kill_switch import KillSwitchState
 from marketpulse.trading.price_provider import PriceProvider
 from marketpulse.trading.repository import Repository
@@ -88,8 +89,8 @@ def _make_order_request(
         ),
         allocation_run_id=allocation_run_id,
         strategy_version=winner.strategy_version,
-        allocator_version="v0",
-        execution_engine_version=ForwardExecutionEngine.VERSION,
+        allocator_version=ALLOCATOR_VERSION,
+        execution_engine_version=EXECUTION_ENGINE_VERSION,
         weight=winner.weight,
         raw_bid_weight=winner.raw_bid_weight,
         pool_corr=winner.pool_corr,

@@ -24,7 +24,8 @@ from marketpulse.trading.types import (
     TickResult,
 )
 
-VERSION = "v0"
+EXECUTION_ENGINE_VERSION = "phase6a-v1"
+VERSION = EXECUTION_ENGINE_VERSION  # back-compat alias for any introspection
 
 
 def _dump(order_request: OrderRequest) -> dict:

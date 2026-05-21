@@ -189,17 +189,21 @@ class Repository:
         ):
             return  # same state
         if prior_status == "completed_with_errors" and new_status == "completed":
+            # Spread caller context FIRST so the explicit recovery-marker
+            # keys below always win — caller's context cannot accidentally
+            # shadow tick_date / prior_status / new_status /
+            # prior_tick_completed_id even if a future caller adds such keys.
             self.write_audit_event(
                 event_type=AuditEventType.TICK_REPROCESSED_COMPLETED,
                 order_id=None,
                 strategy=None,
                 reason="recovered_from_errors",
                 context={
+                    **context,
                     "tick_date": context["tick_date"],
                     "prior_status": prior_status,
                     "new_status": new_status,
                     "prior_tick_completed_id": prior.id,
-                    **context,
                 },
                 timestamp=timestamp,
             )

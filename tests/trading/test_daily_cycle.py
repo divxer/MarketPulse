@@ -113,6 +113,41 @@ def test_daily_cycle_places_orders_and_writes_tick_completed(session):
     assert any(a.event_type == "TICK_COMPLETED" for a in audits)
 
 
+def test_daily_cycle_stamps_real_version_constants(session):
+    """Lock xxviii (replay determinism): paper_order.allocator_version
+    and execution_engine_version MUST be the actual constants from
+    allocation.py / forward_engine.py, NOT hardcoded "v0" stubs.
+    Review-fix regression — prevents the daily_cycle from drifting back
+    to hardcoded version strings."""
+    from marketpulse.backtest.allocation import ALLOCATOR_VERSION
+    from marketpulse.db.models import PaperOrder
+    from marketpulse.trading import daily_cycle
+    from marketpulse.trading.forward_engine import EXECUTION_ENGINE_VERSION
+
+    deps = _make_deps(
+        session,
+        fake_now=datetime(2026, 5, 21, 21, 30, tzinfo=UTC),
+        allocator=_stub_allocator(expected_winners=[
+            _winner_for("AAPL", "momentum", date(2026, 5, 21)),
+        ]),
+    )
+    daily_cycle.run(**deps)
+
+    order = session.execute(select(PaperOrder)).scalars().first()
+    assert order is not None
+    assert order.allocator_version == ALLOCATOR_VERSION, (
+        f"expected allocator_version={ALLOCATOR_VERSION!r}, got "
+        f"{order.allocator_version!r} — daily_cycle hardcoded back to a stub?"
+    )
+    assert order.execution_engine_version == EXECUTION_ENGINE_VERSION, (
+        f"expected execution_engine_version={EXECUTION_ENGINE_VERSION!r}, got "
+        f"{order.execution_engine_version!r}"
+    )
+    # Sanity: the constants should look like real semver tags, not "v0"
+    assert ALLOCATOR_VERSION != "v0"
+    assert EXECUTION_ENGINE_VERSION != "v0"
+
+
 def test_daily_cycle_same_day_rerun_is_no_op(session):
     """6a-L7: same-day rerun → 0 new orders, 0 new TICK_COMPLETED rows."""
     from marketpulse.db.models import PaperAuditEvent, PaperOrder
