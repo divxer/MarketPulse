@@ -299,3 +299,47 @@ def test_compute_adjusted_bid_weight_none_corr_short_circuits() -> None:
     assert adjusted == 1.5
     assert multiplier == 1.0
     assert rewarded is False
+
+
+def test_phase5d_kwargs_from_metadata_none_returns_safe_defaults() -> None:
+    """# Layer: invariant
+    When metadata is None (cold-start / strategy not in today's WEIGHT block),
+    helper returns a dict of safe defaults matching BidRecord dataclass defaults.
+    Phase 5e lock #7 dropped pool_corr_excludes_self — the dict has 7 keys, not 8.
+    """
+    from marketpulse.backtest.contribution import phase5d_kwargs_from_metadata
+    kwargs = phase5d_kwargs_from_metadata(None, "strategy_a")
+    assert kwargs == {
+        "raw_bid_weight": None,
+        "pool_corr": None,
+        "contribution_multiplier": 1.0,
+        "adjusted_bid_weight": None,
+        "effective_corr_window": 0,
+        "rewarded_for_negative_corr": False,
+        "would_change_rank": False,
+    }
+
+
+def test_phase5d_kwargs_from_metadata_some_unpacks_all_fields() -> None:
+    """# Layer: invariant
+    When metadata is populated, helper unpacks all 7 fields verbatim.
+    """
+    from marketpulse.backtest.contribution import (
+        BidWeightMetadata,
+        phase5d_kwargs_from_metadata,
+    )
+    meta = BidWeightMetadata(
+        raw=1.5, pool_corr=0.3, multiplier=0.85,
+        adjusted=1.275, effective_window=42,
+        rewarded_for_negative_corr=False, would_change_rank=True,
+    )
+    kwargs = phase5d_kwargs_from_metadata(meta, "strategy_b")
+    assert kwargs == {
+        "raw_bid_weight": 1.5,
+        "pool_corr": 0.3,
+        "contribution_multiplier": 0.85,
+        "adjusted_bid_weight": 1.275,
+        "effective_corr_window": 42,
+        "rewarded_for_negative_corr": False,
+        "would_change_rank": True,
+    }

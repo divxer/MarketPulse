@@ -151,3 +151,42 @@ def compute_adjusted_bid_weight(
     adjusted = raw_sharpe * multiplier
     rewarded = (pool_corr < 0) and (multiplier > 1.0)
     return adjusted, multiplier, rewarded
+
+
+def phase5d_kwargs_from_metadata(
+    metadata: BidWeightMetadata | None,
+    strategy: str,  # noqa: ARG001 — kept for future debug/log injection
+) -> dict[str, object]:
+    """Build the Phase 5d BidRecord telemetry kwargs from metadata.
+
+    Spec § 2 lock #7. Replaces the inline `_phase5d_kwargs` closure that
+    previously lived in portfolio_simulator.py's daily loop. Moving it here
+    establishes contribution.py as the public surface for Phase 5d schema
+    decisions (BidWeightMetadata + this serializer).
+
+    When metadata is None, returns safe defaults matching BidRecord dataclass
+    defaults (cold-start / strategy-skipped-WEIGHT case). Phase 5e dropped
+    pool_corr_excludes_self — the returned dict has 7 keys, not 8.
+
+    The `strategy` argument is unused in v0 but reserved for future
+    log-injection / debug-trace use.
+    """
+    if metadata is None:
+        return {
+            "raw_bid_weight": None,
+            "pool_corr": None,
+            "contribution_multiplier": 1.0,
+            "adjusted_bid_weight": None,
+            "effective_corr_window": 0,
+            "rewarded_for_negative_corr": False,
+            "would_change_rank": False,
+        }
+    return {
+        "raw_bid_weight": metadata.raw,
+        "pool_corr": metadata.pool_corr,
+        "contribution_multiplier": metadata.multiplier,
+        "adjusted_bid_weight": metadata.adjusted,
+        "effective_corr_window": metadata.effective_window,
+        "rewarded_for_negative_corr": metadata.rewarded_for_negative_corr,
+        "would_change_rank": metadata.would_change_rank,
+    }
