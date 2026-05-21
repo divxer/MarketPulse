@@ -44,12 +44,14 @@
             {% if b.rewarded_for_negative_corr %}<span class="mp-chip mp-chip--up" title="hedge boost (ρ<0)">↗</span>{% endif %}
             {% if b.would_change_rank %}<span class="mp-chip" title="adjusted weight 改变了排名">⇅</span>{% endif %}
           </td>
-          <td class="num mono tnum">
+          <td class="num mono tnum"
+              title="{% if b.strategy in strategies_with_sizing_overrides %}${{ '{:.0f}'.format(b.position_size) }} (custom limits — see strategy config){% else %}${{ '{:.0f}'.format(b.position_size) }}{% endif %}">
             {% if b.outcome == 'size_too_small' %}
               <span title="raw size = ${{ '{:.0f}'.format(b.position_size) }} (below ${{ '{:.0f}'.format(min_position) }} floor)">—</span>
             {% else %}
               ${{ "{:,.0f}".format(b.position_size) }}
             {% endif %}
+            {% if b.size_clamped_by_override %}<span class="mp-chip mp-chip--warn" title="clamped by strategy override max">📐</span>{% endif %}
           </td>
           <td>
             {% if b.outcome == 'won' %}<span class="mp-chip mp-chip--up">✓ won</span>
