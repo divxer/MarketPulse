@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -122,3 +123,87 @@ def test_write_tick_completed_once_appends_reprocessed_on_recovery(session):
     assert rows[0].context["status"] == "completed_with_errors"
     assert rows[1].event_type == "TICK_REPROCESSED_COMPLETED"
     assert rows[1].context["new_status"] == "completed"
+
+
+def _sample_order_request():
+    from marketpulse.trading.types import AllocationRunId, OrderRequest
+    return OrderRequest(
+        strategy="s", ticker="AAPL", quantity=10,
+        event_time=datetime(2026, 5, 21, 14, 30, tzinfo=UTC),
+        allocation_date=date(2026, 5, 21),
+        event_price=Decimal("150"), horizon_date=date(2026, 5, 28),
+        horizon_price=Decimal("155"),
+        allocation_run_id=AllocationRunId("paper-2026-05-21"),
+        strategy_version="v0", allocator_version="v0",
+        execution_engine_version="v0",
+        weight=1.0, raw_bid_weight=1.0, pool_corr=0.1,
+        contribution_multiplier=1.0, adjusted_bid_weight=1.0,
+        effective_corr_window=60, rewarded_for_negative_corr=False,
+        would_change_rank=False, size_clamped_by_override=False,
+    )
+
+
+def test_insert_paper_order_and_find_by_key(session):
+    from marketpulse.trading.repository import Repository
+
+    repo = Repository(session=session)
+    req = _sample_order_request()
+    with repo.transaction():
+        order = repo.insert_paper_order(
+            order_request=req,
+            idempotency_key="abc123",
+            placed_at=datetime(2026, 5, 21, 17, 30, tzinfo=UTC),
+        )
+    assert order.id is not None
+    assert order.status == "PLACED"
+
+    found = repo.find_paper_order_by_idempotency_key("abc123")
+    assert found is not None
+    assert found.id == order.id
+
+
+def test_update_paper_order_status_allowed_transitions(session):
+    """6a-L6: PLACED → ENTRY_FILLED ok; PLACED → CANCELLED ok."""
+    from marketpulse.trading.repository import Repository
+
+    repo = Repository(session=session)
+    with repo.transaction():
+        order = repo.insert_paper_order(
+            order_request=_sample_order_request(),
+            idempotency_key="abc123",
+            placed_at=datetime(2026, 5, 21, 17, 30, tzinfo=UTC),
+        )
+    with repo.transaction():
+        repo.update_paper_order_status(
+            order_id=order.id,
+            new_status="ENTRY_FILLED",
+            filled_at=datetime(2026, 5, 21, 17, 31, tzinfo=UTC),
+        )
+    refreshed = repo.find_paper_order_by_id(order.id)
+    assert refreshed.status == "ENTRY_FILLED"
+
+
+def test_update_paper_order_status_illegal_raises(session):
+    """6a-L6: ENTRY_FILLED → CANCELLED is illegal (terminal)."""
+    from marketpulse.trading.repository import Repository
+    from marketpulse.trading.types import InvariantError
+
+    repo = Repository(session=session)
+    with repo.transaction():
+        order = repo.insert_paper_order(
+            order_request=_sample_order_request(),
+            idempotency_key="abc",
+            placed_at=datetime(2026, 5, 21, 17, 30, tzinfo=UTC),
+        )
+    with repo.transaction():
+        repo.update_paper_order_status(
+            order_id=order.id, new_status="ENTRY_FILLED",
+            filled_at=datetime(2026, 5, 21, 17, 31, tzinfo=UTC),
+        )
+    with pytest.raises(InvariantError):
+        with repo.transaction():
+            repo.update_paper_order_status(
+                order_id=order.id, new_status="CANCELLED",
+                cancelled_at=datetime(2026, 5, 21, 17, 32, tzinfo=UTC),
+                cancel_reason="oops",
+            )

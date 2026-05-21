@@ -18,8 +18,21 @@ from sqlalchemy.orm import Session
 
 from marketpulse.db.models import (
     PaperAuditEvent,
+    PaperCashLedger,
+    PaperFill,
+    PaperOrder,
+    PaperPosition,
 )
-from marketpulse.trading.types import AuditEventType
+from marketpulse.trading.types import AuditEventType, InvariantError, OrderRequest
+
+# Allowed status transitions (6a-L6)
+_ALLOWED_ORDER_TRANSITIONS = {
+    ("PLACED", "ENTRY_FILLED"),
+    ("PLACED", "CANCELLED"),
+}
+_ALLOWED_POSITION_TRANSITIONS = {
+    ("OPEN", "CLOSED"),
+}
 
 
 class Repository:
@@ -236,3 +249,77 @@ class Repository:
         # TICK_COMPLETED
         s = row.context.get("status")
         return "completed" if s == "completed" else "completed_with_errors"
+
+    # === paper_order CRUD + status transitions (6a-L6) ===
+
+    def insert_paper_order(
+        self,
+        *,
+        order_request: OrderRequest,
+        idempotency_key: str,
+        placed_at: datetime,
+    ) -> PaperOrder:
+        row = PaperOrder(
+            idempotency_key=idempotency_key,
+            allocation_run_id=order_request.allocation_run_id,
+            strategy=order_request.strategy,
+            ticker=order_request.ticker,
+            quantity=order_request.quantity,
+            event_time=order_request.event_time,
+            allocation_date=order_request.allocation_date,
+            horizon_date=order_request.horizon_date,
+            placed_at=placed_at,
+            event_price=order_request.event_price,
+            horizon_price=order_request.horizon_price,
+            status="PLACED",
+            strategy_version=order_request.strategy_version,
+            allocator_version=order_request.allocator_version,
+            execution_engine_version=order_request.execution_engine_version,
+            weight=order_request.weight,
+            raw_bid_weight=order_request.raw_bid_weight,
+            pool_corr=order_request.pool_corr,
+            contribution_multiplier=order_request.contribution_multiplier,
+            adjusted_bid_weight=order_request.adjusted_bid_weight,
+            effective_corr_window=order_request.effective_corr_window,
+            rewarded_for_negative_corr=order_request.rewarded_for_negative_corr,
+            would_change_rank=order_request.would_change_rank,
+            size_clamped_by_override=order_request.size_clamped_by_override,
+        )
+        self._session.add(row)
+        self._session.flush()
+        return row
+
+    def find_paper_order_by_id(self, order_id: int) -> PaperOrder | None:
+        return self._session.get(PaperOrder, order_id)
+
+    def find_paper_order_by_idempotency_key(self, key: str) -> PaperOrder | None:
+        return self._session.execute(
+            select(PaperOrder).where(PaperOrder.idempotency_key == key)
+        ).scalars().first()
+
+    def update_paper_order_status(
+        self,
+        *,
+        order_id: int,
+        new_status: str,
+        filled_at: datetime | None = None,
+        cancelled_at: datetime | None = None,
+        cancel_reason: str | None = None,
+    ) -> PaperOrder:
+        order = self.find_paper_order_by_id(order_id)
+        if order is None:
+            raise InvariantError(f"unknown order_id={order_id}")
+        if (order.status, new_status) not in _ALLOWED_ORDER_TRANSITIONS:
+            raise InvariantError(
+                f"illegal status transition {order.status!r} → "
+                f"{new_status!r} on order {order_id}"
+            )
+        order.status = new_status
+        if filled_at is not None:
+            order.filled_at = filled_at
+        if cancelled_at is not None:
+            order.cancelled_at = cancelled_at
+        if cancel_reason is not None:
+            order.cancel_reason = cancel_reason
+        self._session.flush()
+        return order
