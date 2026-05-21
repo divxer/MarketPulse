@@ -129,6 +129,15 @@ def simulate_shared_pool(
     # NEW Phase 5d contribution-adjusted Sharpe (reserved — wired in T6)
     contribution_enabled: bool = False,
     contribution_lambda: float = 0.5,
+    # NEW Phase 5e (spec § 2 lock #6 + #12) — per-strategy sizing override.
+    # Map strategy name to (base_override, min_override, max_override). Any
+    # tuple element may be None to inherit the global default. Overrides
+    # apply in BOTH sizing_enabled=True (vol-target × alpha-conviction) and
+    # sizing_enabled=False (fixed) paths. Signal-layer purity preserved:
+    # overrides never enter sigma/alpha/mean_alpha computations.
+    per_strategy_overrides: dict[
+        str, tuple[float | None, float | None, float | None]
+    ] | None = None,
 ) -> PortfolioBacktestResult:
     """Phase 5a shared-pool simulator. See spec § 2 for algorithm.
 
@@ -401,14 +410,17 @@ def simulate_shared_pool(
         # ALLOCATE consumes position_sizes[strategy] for cap arithmetic and
         # records the requested size on every BidRecord outcome.
         if sizing_enabled and strategies_today:
-            position_sizes, raw_sizes_below_min = compute_position_sizes(
-                strategies_today, daily_curves,
-                as_of=d,
-                base=base_position_size,
-                target_vol=target_vol,
-                min_position=min_position,
-                max_position=max_position,
-                lookback_days=lookback_days,
+            position_sizes, raw_sizes_below_min, clamped_by_override = (
+                compute_position_sizes(
+                    strategies_today, daily_curves,
+                    as_of=d,
+                    base=base_position_size,
+                    target_vol=target_vol,
+                    min_position=min_position,
+                    max_position=max_position,
+                    lookback_days=lookback_days,
+                    per_strategy_overrides=per_strategy_overrides,
+                )
             )
 
             # Strategies returning None → skip all their bids today;
@@ -425,6 +437,9 @@ def simulate_shared_pool(
                         outcome="size_too_small",
                         winner=None,
                         position_size=raw_sizes_below_min[b.strategy],
+                        # Lock #23: bid fell below floor — raw < eff_min, not
+                        # raw > eff_max. Override-clamp attribution is False.
+                        size_clamped_by_override=False,
                         **phase5d_kwargs_from_metadata(
                             bid_weight_metadata.get(b.strategy), b.strategy,
                         ),
@@ -443,8 +458,24 @@ def simulate_shared_pool(
                 if s not in strategies_skipped_by_size
             ]
         else:
-            position_sizes = {s: base_position_size for s in strategies_today}
+            # Fixed-mode sizing: still honor per-strategy override base + clamp
+            # (spec § 2 lock #6: overrides apply in BOTH sizing modes).
+            overrides_map = per_strategy_overrides or {}
+            position_sizes = {}
+            clamped_by_override = {}
             raw_sizes_below_min = {}
+            for s in strategies_today:
+                ov_base, ov_min, ov_max = overrides_map.get(s, (None, None, None))
+                eff_base = ov_base if ov_base is not None else base_position_size
+                eff_min = ov_min if ov_min is not None else min_position
+                eff_max = ov_max if ov_max is not None else max_position
+                raw = eff_base
+                clamped_by_override[s] = raw > eff_max
+                if raw < eff_min:
+                    position_sizes[s] = None
+                    raw_sizes_below_min[s] = raw
+                else:
+                    position_sizes[s] = min(raw, eff_max)
 
         # ─── DEDUP (same-day same-ticker collision) ───
         bids_by_ticker: dict[str, list] = {}
@@ -464,6 +495,9 @@ def simulate_shared_pool(
                         weight=weights[loser.strategy],
                         outcome="dedup_loser", winner=best.strategy,
                         position_size=position_sizes[loser.strategy],
+                        size_clamped_by_override=clamped_by_override.get(
+                            loser.strategy, False,
+                        ),
                         **phase5d_kwargs_from_metadata(
                             bid_weight_metadata.get(loser.strategy), loser.strategy,
                         ),
@@ -512,6 +546,7 @@ def simulate_shared_pool(
                     weight=weights[b.strategy],
                     outcome="cap_full", winner=None,
                     position_size=requested_size,
+                    size_clamped_by_override=clamped_by_override.get(b.strategy, False),
                     **phase5d_kwargs_from_metadata(bid_weight_metadata.get(b.strategy), b.strategy),
                 ))
                 n_capacity_skipped_by_strategy[b.strategy] = (
@@ -524,6 +559,7 @@ def simulate_shared_pool(
                     weight=weights[b.strategy],
                     outcome="cash_short", winner=None,
                     position_size=requested_size,
+                    size_clamped_by_override=clamped_by_override.get(b.strategy, False),
                     **phase5d_kwargs_from_metadata(bid_weight_metadata.get(b.strategy), b.strategy),
                 ))
                 n_cash_short_skipped_by_strategy[b.strategy] = (
@@ -543,6 +579,7 @@ def simulate_shared_pool(
                     outcome="sector_cap_full", winner=None,
                     position_size=requested_size,
                     blocked_by_sector=candidate_sector,
+                    size_clamped_by_override=clamped_by_override.get(b.strategy, False),
                     **phase5d_kwargs_from_metadata(bid_weight_metadata.get(b.strategy), b.strategy),
                 ))
                 n_sector_cap_skipped_by_strategy[b.strategy] = (
@@ -576,6 +613,9 @@ def simulate_shared_pool(
                         outcome="correlation_cap_full", winner=None,
                         position_size=requested_size,
                         blocked_by_correlation_with=corr_diagnostics,
+                        size_clamped_by_override=clamped_by_override.get(
+                            b.strategy, False,
+                        ),
                         **phase5d_kwargs_from_metadata(
                             bid_weight_metadata.get(b.strategy), b.strategy,
                         ),
@@ -601,6 +641,7 @@ def simulate_shared_pool(
                 weight=weights[b.strategy],
                 outcome="won", winner=None,
                 position_size=requested_size,
+                size_clamped_by_override=clamped_by_override.get(b.strategy, False),
                 **phase5d_kwargs_from_metadata(bid_weight_metadata.get(b.strategy), b.strategy),
             ))
 

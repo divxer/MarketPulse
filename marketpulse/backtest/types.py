@@ -132,6 +132,13 @@ class BidRecord:
     effective_corr_window: int = 0
     rewarded_for_negative_corr: bool = False
     would_change_rank: bool = False
+    # NEW Phase 5e (lock #23) — clamp-attribution flag. True iff the raw
+    # sized magnitude exceeded the strategy's effective max ceiling for the
+    # day (i.e., the eff_max clamp was binding). Independent of cap clamps
+    # (cap_full, sector_cap_full, correlation_cap_full) which are separate
+    # outcomes. Defaulted so existing BidRecord construction sites continue
+    # to work; populated for ALL 7 outcome sites in portfolio_simulator.
+    size_clamped_by_override: bool = False
 
 
 @dataclass(frozen=True)

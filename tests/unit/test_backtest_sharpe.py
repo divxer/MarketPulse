@@ -378,7 +378,7 @@ def test_size_high_alpha_low_vol_yields_above_base():
         "fast": _noisy_curve(daily_return=0.015, noise=0.002, seed=1),  # high α, lowish σ
         "neutral": _noisy_curve(daily_return=0.005, noise=0.005, seed=2),
     }
-    sizes, _ = compute_position_sizes(
+    sizes, _, _ = compute_position_sizes(
         ["fast", "neutral"], daily_curves,
         as_of=date(2026, 5, 1),
     )
@@ -395,7 +395,7 @@ def test_size_low_alpha_high_vol_yields_none_below_min():
         "loser": _noisy_curve(daily_return=0.0005, noise=0.020, seed=3),  # tiny α, huge σ
         "winner": _noisy_curve(daily_return=0.015, noise=0.003, seed=4),
     }
-    sizes, raw_below = compute_position_sizes(
+    sizes, raw_below, _ = compute_position_sizes(
         ["loser", "winner"], daily_curves,
         as_of=date(2026, 5, 1),
     )
@@ -415,7 +415,7 @@ def test_size_neutral_strategy_yields_near_base():
     daily_curves = {
         "neutral": _noisy_curve(daily_return=0.01, noise=0.01, seed=5),  # σ ≈ 1% target
     }
-    sizes, _ = compute_position_sizes(
+    sizes, _, _ = compute_position_sizes(
         ["neutral"], daily_curves,
         as_of=date(2026, 5, 1), base=1000.0, target_vol=0.01,
     )
@@ -434,7 +434,7 @@ def test_size_below_min_returns_none_not_clamped_up():
     bad_curve = _noisy_curve(daily_return=0.0001, noise=0.05, seed=6)
     good_curve = _noisy_curve(daily_return=0.02, noise=0.003, seed=7)
     daily_curves = {"tiny": bad_curve, "huge": good_curve}
-    sizes, raw_below = compute_position_sizes(
+    sizes, raw_below, _ = compute_position_sizes(
         ["tiny", "huge"], daily_curves,
         as_of=date(2026, 5, 1), min_position=200.0,
     )
@@ -453,7 +453,7 @@ def test_size_above_max_clamps_to_max():
     daily_curves = {
         "low_vol": _noisy_curve(daily_return=0.001, noise=0.0005, seed=8),
     }
-    sizes, _ = compute_position_sizes(
+    sizes, _, _ = compute_position_sizes(
         ["low_vol"], daily_curves,
         as_of=date(2026, 5, 1), base=2000.0, target_vol=0.01, max_position=4000.0,
     )
@@ -469,7 +469,7 @@ def test_size_sigma_none_uses_target_vol_fallback():
     # Only 3 events → σ is None
     tiny_curve = [(date(2026, 4, 28) + timedelta(days=i), 10_000.0 * (1.01 ** i))
                   for i in range(3)]
-    sizes, _ = compute_position_sizes(
+    sizes, _, _ = compute_position_sizes(
         ["new"], {"new": tiny_curve},
         as_of=date(2026, 5, 1), base=1000.0,
     )
@@ -484,7 +484,7 @@ def test_size_zero_sigma_uses_target_vol_fallback():
 
     from marketpulse.backtest.sharpe import compute_position_sizes
     flat_curve = [(date(2026, 4, 1) + timedelta(days=i), 10_000.0) for i in range(30)]
-    sizes, _ = compute_position_sizes(
+    sizes, _, _ = compute_position_sizes(
         ["flat"], {"flat": flat_curve},
         as_of=date(2026, 5, 1), base=1000.0,
     )
@@ -503,7 +503,7 @@ def test_size_joint_bootstrap_yields_uniform_base():
         return [(date(2026, 4, 28) + timedelta(days=i), 10_000.0 * (1.01 ** i))
                 for i in range(3)]
     daily_curves = {"a": tiny(1), "b": tiny(2), "c": tiny(3)}
-    sizes, _ = compute_position_sizes(
+    sizes, _, _ = compute_position_sizes(
         list(daily_curves.keys()), daily_curves,
         as_of=date(2026, 5, 1), base=1000.0,
     )
@@ -519,7 +519,7 @@ def test_size_all_strategies_below_min_returns_all_none():
         "a": _noisy_curve(daily_return=0.00005, noise=0.05, seed=10),
         "b": _noisy_curve(daily_return=0.00005, noise=0.04, seed=11),
     }
-    sizes, raw_below = compute_position_sizes(
+    sizes, raw_below, _ = compute_position_sizes(
         ["a", "b"], daily_curves,
         as_of=date(2026, 5, 1), min_position=200.0,
     )
@@ -552,7 +552,7 @@ def test_compute_position_sizes_returns_raw_sizes_below_min_dict():
         "tiny": _noisy_curve(daily_return=0.00005, noise=0.05, seed=13),
         "big":  _noisy_curve(daily_return=0.02, noise=0.005, seed=14),
     }
-    sizes, raw_below = compute_position_sizes(
+    sizes, raw_below, _ = compute_position_sizes(
         ["tiny", "big"], daily_curves,
         as_of=date(2026, 5, 1), min_position=200.0,
     )
@@ -571,7 +571,7 @@ def test_compute_position_sizes_raw_only_for_none_strategies():
 
     from marketpulse.backtest.sharpe import compute_position_sizes
     daily_curves = {"normal": _noisy_curve(daily_return=0.005, noise=0.005, seed=15)}
-    sizes, raw_below = compute_position_sizes(
+    sizes, raw_below, _ = compute_position_sizes(
         ["normal"], daily_curves,
         as_of=date(2026, 5, 1),
     )
@@ -606,7 +606,7 @@ def test_size_negative_mean_alpha_falls_back_to_base():
         for i in range(30)
     ]  # ~ -2% daily → α ≈ -0.02
 
-    sizes, raw_below = compute_position_sizes(
+    sizes, raw_below, _ = compute_position_sizes(
         ["bad", "worse"],
         {"bad": bad_curve, "worse": worse_curve},
         as_of=date(2026, 5, 1),
@@ -648,7 +648,7 @@ def test_size_zero_mean_alpha_uses_base():
         (date(2026, 4, 1) + timedelta(days=i), 10_000.0 * (0.995 ** i))
         for i in range(30)
     ]
-    sizes, _ = compute_position_sizes(
+    sizes, _, _ = compute_position_sizes(
         ["up", "down"],
         {"up": up_curve, "down": down_curve},
         as_of=date(2026, 5, 1),

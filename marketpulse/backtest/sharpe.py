@@ -177,19 +177,32 @@ def compute_position_sizes(
     max_position: float = 4_000.0,
     lookback_days: int = 60,
     min_events: int = 5,
-) -> tuple[dict[str, float | None], dict[str, float]]:
+    # NEW Phase 5e
+    per_strategy_overrides: dict[
+        str, tuple[float | None, float | None, float | None]
+    ] | None = None,
+) -> tuple[
+    dict[str, float | None],
+    dict[str, float],
+    dict[str, bool],
+]:
     """Compute per-strategy position size (Hybrid: vol-target × alpha-conviction).
 
     Spec § 1 ⚠ box: NOT bid_weights (Sharpe) as conviction signal — would
     double-count σ. Uses rolling_alpha (raw mean return) instead.
 
-    Returns (sizes, raw_sizes_below_min):
+    Returns (sizes, raw_sizes_below_min, clamped_by_override_flags):
       - sizes: dict[strategy, float | None]. None means raw < min_position;
         caller skips with outcome=size_too_small.
       - raw_sizes_below_min: dict[strategy, float] capturing RAW pre-clamp
         size for each None-returning strategy. Caller logs this on the
         size_too_small BidRecord so the bid history shows "model wanted $42"
         not just "blocked".
+      - clamped_by_override_flags: dict[strategy, bool]. True iff the raw_size
+        for that strategy was clipped by the override's max ceiling
+        (raw > eff_max). Strategies that ended up in raw_below_min are NOT
+        marked as clamped by override — they're a different outcome
+        (size_too_small).
 
     Algorithm:
       1. For each s, compute σ_s and α_s via rolling_sigma / rolling_alpha.
@@ -201,17 +214,39 @@ def compute_position_sizes(
                      else 1.0
          α_scale   = α_s / mean_α       if α_s is not None and mean_α is not None
                      else 1.0
-         raw = base * vol_scale * α_scale
-         if raw < min_position:
+         raw = eff_base * vol_scale * α_scale
+         if raw < eff_min:
              sizes[s] = None; raw_sizes_below_min[s] = raw
          else:
-             sizes[s] = min(raw, max_position)  # ceiling clamp only
-      4. Return (sizes, raw_sizes_below_min).
+             sizes[s] = min(raw, eff_max)  # ceiling clamp only
+      4. Return (sizes, raw_sizes_below_min, clamped_by_override_flags).
+
+    Phase 5e additions (spec § 2 lock #12 + #23):
+      per_strategy_overrides: optional dict mapping strategy name to a
+        (base_override, min_override, max_override) tuple. Each tuple
+        element may be None to inherit the global default. Overrides
+        parameterize the EXECUTION layer ONLY — they do NOT affect the
+        signal-layer inputs (sigma, alpha, mean_alpha).
+
+      Returns now a 3-tuple instead of 2:
+        sizes, raw_below_min, clamped_by_override_flags
+      Where clamped_by_override_flags[s] is True iff the raw_size for
+      strategy s was clipped by the override's max ceiling (raw > eff_max).
+      Strategies that ended up in raw_below_min are NOT marked as clamped
+      by override — they're a different outcome (size_too_small).
+
+    Signal-layer purity (lock #12):
+      eff_base parameterizes the conviction multiplier in the magnitude
+      formula. eff_min and eff_max parameterize the clamp envelope.
+      None of these enter sigma, alpha, or mean_alpha computations.
 
     Contract:
       - Every entry of strategies_today MUST appear in daily_curves.
         Raises KeyError on missing.
     """
+    overrides = per_strategy_overrides or {}
+
+    # Signal-layer computation — MUST NOT depend on overrides (lock #12).
     sigmas: dict[str, float | None] = {
         s: rolling_sigma(daily_curves[s], as_of=as_of,
                          lookback_days=lookback_days, min_events=min_events)
@@ -229,9 +264,18 @@ def compute_position_sizes(
 
     sizes: dict[str, float | None] = {}
     raw_below: dict[str, float] = {}
+    clamped_by_override: dict[str, bool] = {}
     for s in strategies_today:
         sigma = sigmas[s]
         alpha = alphas[s]
+        # Resolve effective sizing parameters for THIS strategy (lock #6 +
+        # #12). Overrides parameterize the EXECUTION envelope only — they
+        # are read AFTER signal-layer (sigma/alpha/mean_alpha) computation.
+        ov_base, ov_min, ov_max = overrides.get(s, (None, None, None))
+        eff_base = ov_base if ov_base is not None else base
+        eff_min = ov_min if ov_min is not None else min_position
+        eff_max = ov_max if ov_max is not None else max_position
+
         vol_scale = target_vol / sigma if (sigma is not None and sigma > 0) else 1.0
         # Conviction scale guard: only divide by mean_alpha when it's strictly
         # positive. If the pool is in a drawdown (mean_alpha < 0), dividing
@@ -244,10 +288,17 @@ def compute_position_sizes(
             alpha_scale = alpha / mean_alpha
         else:
             alpha_scale = 1.0
-        raw = base * vol_scale * alpha_scale
-        if raw < min_position:
+        raw = eff_base * vol_scale * alpha_scale
+
+        # Lock #23: track whether the override max was binding. Clamp
+        # attribution is True iff the raw size would have exceeded eff_max —
+        # independent of whether the strategy ultimately got filtered into
+        # raw_below_min (which is a different attribution).
+        clamped_by_override[s] = raw > eff_max
+
+        if raw < eff_min:
             sizes[s] = None
             raw_below[s] = raw
         else:
-            sizes[s] = min(raw, max_position)
-    return sizes, raw_below
+            sizes[s] = min(raw, eff_max)
+    return sizes, raw_below, clamped_by_override
