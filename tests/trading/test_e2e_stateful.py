@@ -67,7 +67,13 @@ def _stub_allocator(*, horizon_date, horizon_price=155.0,
     from marketpulse.backtest.allocation import AllocationResult, AllocationWinner
 
     def _alloc(*, bids, existing_positions, cash_available,
-               allocation_context, sizing_context):
+               allocation_context, sizing_context,
+               # Phase 6a fix1: forward-mode kernel context kwargs
+               daily_curves=None,
+               daily_strategy_contribution_returns=None,
+               daily_pool_returns=None,
+               sector_provider=None,
+               price_provider=None):
         if not bids:
             return AllocationResult(
                 winners=(), blocked=(),
