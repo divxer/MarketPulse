@@ -151,3 +151,48 @@ def test_allocation_dataclasses_exist():
     assert PositionSnapshot is not None
     assert BlockedBidReason is not None
     assert callable(allocate_for_day)
+
+
+def test_allocation_module_does_not_reference_phase5_only_concerns():
+    """6a-L1: allocate_for_day extracts ONLY BID→SIZE→DEDUP→ALLOC.
+    CLOSE, MTM, RECORD, equity-curve update, contribution decomposition,
+    and rolling-stats finalization stay in portfolio_simulator.py.
+
+    Strips Python comments and docstrings before searching so the test
+    does not false-fire on documentation that mentions these tokens.
+    """
+    import io
+    import tokenize
+    from pathlib import Path
+
+    def _strip_comments_and_docstrings(src: str) -> str:
+        out: list[str] = []
+        prev_type: int | None = None
+        tokens = tokenize.tokenize(io.BytesIO(src.encode("utf-8")).readline)
+        for tok in tokens:
+            if tok.type == tokenize.COMMENT:
+                continue
+            if tok.type == tokenize.STRING and prev_type in (
+                tokenize.INDENT, tokenize.NEWLINE, None,
+            ):
+                # Likely a module/class/function docstring — skip.
+                continue
+            out.append(tok.string)
+            prev_type = tok.type
+        return " ".join(out)
+
+    src = _strip_comments_and_docstrings(
+        Path("marketpulse/backtest/allocation.py").read_text()
+    )
+    forbidden = [
+        "daily_equity_curve",
+        "mark_to_market",
+        "decompose_day_contributions",
+        "compute_rolling_metrics",
+        "finalize_strategy_contribution",
+    ]
+    for token in forbidden:
+        assert token not in src, (
+            f"6a-L1 boundary violation: '{token}' leaked into "
+            f"marketpulse/backtest/allocation.py"
+        )
