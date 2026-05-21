@@ -9,6 +9,8 @@ os.environ.setdefault("APP_PASSWORD_HASH", "$2b$12$abcdefghijklmnopqrstuv")
 os.environ.setdefault("SESSION_SECRET", "x" * 32)
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")
 
+pytest_plugins = ['pytester']
+
 
 @pytest.fixture(autouse=True)
 def _clear_quote_cache() -> None:
@@ -193,3 +195,48 @@ def phase5d_warm_pool():
         contribution_lambda=2.0,
     )
     return {"shared": shared}
+
+
+# Phase 5e lock #22 — test taxonomy enforcement.
+# Phase 5e+ tests MUST include a # Layer: invariant or # Layer: behavioral
+# tag in their docstring. The hook fails test collection if any such test
+# is missing the tag, preventing taxonomy drift across future phases.
+
+import re  # noqa: E402
+
+_LAYER_TAG_RE = re.compile(r"#\s*Layer:\s*(invariant|behavioral)\b")
+
+
+def _is_phase5e_or_later_test(item) -> bool:
+    """Heuristic: a test belongs to Phase 5e+ if its name contains 'phase5e'
+    OR if its function docstring already contains a Layer tag (opt-in by author).
+    """
+    name = item.name.lower()
+    if "phase5e" in name or "phase5d_warm_pool" in name:
+        return True
+    # If author already wrote a Layer tag, they're opting in to the taxonomy.
+    doc = getattr(item.function, "__doc__", None) or ""
+    return bool(_LAYER_TAG_RE.search(doc))
+
+
+def pytest_collection_modifyitems(config, items):
+    """Verify every Phase 5e+ test carries a # Layer: tag in its docstring.
+
+    Spec § 2 lock #22. Prevents 'silent taxonomy drift' — when an author
+    forgets the tag, the test is silently uncategorized; over time the
+    invariant/behavioral discipline decays. This hook makes the failure
+    visible at collection time.
+    """
+    untagged: list[str] = []
+    for item in items:
+        if not _is_phase5e_or_later_test(item):
+            continue
+        doc = getattr(item.function, "__doc__", None) or ""
+        if not _LAYER_TAG_RE.search(doc):
+            untagged.append(item.nodeid)
+    if untagged:
+        raise pytest.UsageError(
+            "Phase 5e+ tests missing required '# Layer: invariant' or "
+            "'# Layer: behavioral' tag in docstring:\n  "
+            + "\n  ".join(untagged)
+        )
