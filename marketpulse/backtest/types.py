@@ -97,6 +97,11 @@ class StrategyContribution:
     avg_pool_corr: float | None = None
     n_would_change_rank: int = 0
 
+    # NEW Phase 5e Thread D — always populated by simulator, invariant-grade
+    # (spec § 2 lock #14, #15, #16)
+    effective_allocation: float = 0.0
+    rank_drift_from_signal: int = 0
+
 
 @dataclass(frozen=True)
 class BidRecord:

@@ -553,3 +553,48 @@ def test_portfolio_result_phase5d_provenance_defaults() -> None:
     assert r.contribution_enabled is False
     assert r.contribution_policy == "contribution_adjusted_sharpe_60d_v0"
     assert r.contribution_lambda == 0.5
+
+
+def test_phase5e_observability_fields_default_to_zero() -> None:
+    """# Layer: invariant
+    Spec § 2 lock #14 (structural presence). StrategyContribution gains 2 new
+    fields, both defaulted: effective_allocation: float = 0.0,
+    rank_drift_from_signal: int = 0.
+
+    Manual construction (test fixture) produces structurally-present but
+    semantically-null values — "no run yet" state. Simulator output
+    populates real values.
+    """
+    from marketpulse.backtest.types import StrategyContribution
+    c = StrategyContribution(
+        strategy="x", display_name="X",
+        n_trades=0, n_dedup_skipped=0,
+        n_capacity_skipped=0, n_cash_short_skipped=0,
+        n_size_too_small_skipped=0,
+        n_sector_cap_skipped=0, n_correlation_cap_skipped=0,
+        contribution_pnl=0.0, avg_exposure=0.0, avg_bid_weight=0.0,
+        avg_position_size=0.0, n_bids=0, n_floor_hits=0,
+    )
+    # Defaults
+    assert c.effective_allocation == 0.0
+    assert c.rank_drift_from_signal == 0
+
+
+def test_phase5e_observability_fields_accept_populated_values() -> None:
+    """# Layer: invariant
+    Both new fields accept real values (positive float and signed int).
+    """
+    from marketpulse.backtest.types import StrategyContribution
+    c = StrategyContribution(
+        strategy="x", display_name="X",
+        n_trades=5, n_dedup_skipped=1,
+        n_capacity_skipped=0, n_cash_short_skipped=0,
+        n_size_too_small_skipped=0,
+        n_sector_cap_skipped=0, n_correlation_cap_skipped=0,
+        contribution_pnl=100.0, avg_exposure=0.2, avg_bid_weight=1.0,
+        avg_position_size=500.0, n_bids=9, n_floor_hits=0,
+        effective_allocation=0.42,
+        rank_drift_from_signal=-2,
+    )
+    assert c.effective_allocation == 0.42
+    assert c.rank_drift_from_signal == -2
