@@ -125,3 +125,20 @@ def test_load_fails_when_name_not_snake_case(tmp_path):
     )
     with pytest.raises(ValueError, match="name.*snake_case"):
         load_strategies(definitions_dir=tmp_path)
+
+
+def test_phase5e_strategy_dataclass_has_phase5e_sizing_fields_defaulted() -> None:
+    """# Layer: invariant
+    Strategy dataclass gains 3 optional sizing override fields (Phase 5e § 3.3).
+    All defaulted to None so existing YAML files load without modification
+    (backward-compat lock #4).
+    """
+    from marketpulse.strategies.types import Strategy
+    s = Strategy(
+        name="x", display_name="X", version="v1",
+        description="test", applies_when="always",
+        expected_horizons=[5], instructions="do x",
+    )
+    assert s.base_position_size is None
+    assert s.min_position is None
+    assert s.max_position is None

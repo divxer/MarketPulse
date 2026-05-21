@@ -13,3 +13,7 @@ class Strategy:
     applies_when: str
     expected_horizons: list[int]
     instructions: str
+    # NEW Phase 5e (all defaulted — backward-compat with existing YAMLs)
+    base_position_size: float | None = None
+    min_position: float | None = None
+    max_position: float | None = None
