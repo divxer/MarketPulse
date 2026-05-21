@@ -16,6 +16,8 @@
           <th class="num">PnL ($)</th>
           <th class="num">avg exposure</th>
           <th class="num">avg bid w</th>
+          <th class="num">avg pool ρ</th>
+          <th class="num">rank Δ</th>
           <th class="num">avg size</th>
         </tr>
       </thead>
@@ -46,6 +48,13 @@
             </td>
             <td class="num mono tnum">{{ "{:.1%}".format(c.avg_exposure) }}</td>
             <td class="num mono tnum">{{ "{:.2f}".format(c.avg_bid_weight) }}</td>
+            <td class="num mono tnum">
+              {% if c.avg_pool_corr is none %}—{% else %}{{ "{:+.2f}".format(c.avg_pool_corr) }}{% endif %}
+            </td>
+            <td class="num mono tnum"
+                title="bids 因 adjusted 改变排名的次数">
+              {% if c.n_would_change_rank > 0 %}{{ c.n_would_change_rank }}{% else %}—{% endif %}
+            </td>
             <td class="num mono tnum">
               {% if c.n_trades == 0 and c.n_size_too_small_skipped > 0 %}
                 <span class="mp-chip mp-chip--down" title="所有 bids 均 < min_position">sub-min</span>

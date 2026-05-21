@@ -9,6 +9,7 @@ for the implemented steps.
 """
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import TYPE_CHECKING
@@ -18,6 +19,12 @@ if TYPE_CHECKING:
 
     from marketpulse.backtest.correlation import PriceProvider
 
+from marketpulse.backtest.contribution import (
+    BidWeightMetadata,
+    compute_adjusted_bid_weight,
+    daily_contribution_return,
+    pool_corr_excluding_self,
+)
 from marketpulse.backtest.correlation import find_correlation_neighbors
 from marketpulse.backtest.metrics import compute_metrics
 from marketpulse.backtest.sharpe import compute_bid_weights, compute_position_sizes
@@ -69,6 +76,9 @@ def simulate_shared_pool(
     correlation_cap_pct: float = 0.40,
     correlation_threshold: float = 0.60,
     price_provider: PriceProvider | None = None,
+    # NEW Phase 5d contribution-adjusted Sharpe (reserved — wired in T6)
+    contribution_enabled: bool = False,
+    contribution_lambda: float = 0.5,
 ) -> PortfolioBacktestResult:
     """Phase 5a shared-pool simulator. See spec § 2 for algorithm.
 
@@ -88,8 +98,15 @@ def simulate_shared_pool(
     per-strategy contribution; max_strategy_exposure + hhi_concentration on
     the pool-level result).
     """
+    # Phase 5a provenance — use f-string to thread lookback_days
     bid_policy = f"rolling_sharpe_{lookback_days}d_v0"
+    # Phase 5b
     sizing_policy = "vol_target_conviction_v0" if sizing_enabled else "fixed_v0"
+
+    # Phase 5d: bid_policy upgrade + composite provenance
+    if contribution_enabled:
+        bid_policy = f"contribution_adjusted_sharpe_{lookback_days}d_v0"
+    contribution_policy = f"contribution_adjusted_sharpe_{lookback_days}d_v0"
 
     # Phase 5c risk_policy composition (spec § 10b)
     if sector_caps_enabled and correlation_caps_enabled:
@@ -142,6 +159,9 @@ def simulate_shared_pool(
             sector_caps_enabled=sector_caps_enabled,
             correlation_caps_enabled=correlation_caps_enabled,
             risk_policy=risk_policy,
+            contribution_enabled=contribution_enabled,
+            contribution_policy=contribution_policy,
+            contribution_lambda=contribution_lambda,
         )
 
     db_dates: set[date] = set()
@@ -187,7 +207,47 @@ def simulate_shared_pool(
     capital_in_use_by_day: list[float] = []
     exposure_by_strategy_by_day: dict[str, list[float]] = {}
 
+    # Phase 5d per-day per-strategy accumulators (spec § 5).
+    # realized_pnl_today_by_strategy is RESET every loop iteration; the other
+    # three lists/dicts accumulate across the run for Phase 5d telemetry and
+    # Task 6's pool_corr_excluding_self LOO subtraction.
+    realized_pnl_today_by_strategy: dict[str, float] = {}
+    daily_strategy_contribution_returns: dict[str, list[tuple[date, float]]] = {}
+    daily_pool_returns: list[tuple[date, float]] = []
+    pool_corr_by_strategy: dict[str, list[float | None]] = {}
+
+    prev_d: date | None = None
     for d in calendar:
+        # Phase 5d: snapshot per-strategy unrealized PnL using YESTERDAY's mark
+        # BEFORE the CLOSE step. `open_positions` at this point is the set of
+        # positions that were open at the END of the previous day. We use
+        # prev_d (not d) as the "current" arg to elapsed_fraction so the mark
+        # is yesterday's mark, not today's.
+        mtm_prev_by_strategy: dict[str, float] = {}
+        if prev_d is not None:
+            for pos in open_positions:
+                if pos.entry_date == prev_d:
+                    # Opened yesterday → same-day no-MTM rule applied yesterday
+                    unrealized_prev = 0.0
+                else:
+                    fraction_prev = elapsed_fraction(
+                        calendar, entry=pos.entry_date,
+                        horizon=pos.horizon_date, current=prev_d,
+                    )
+                    est_price_prev = pos.entry_price + (
+                        pos.horizon_price - pos.entry_price
+                    ) * fraction_prev
+                    unrealized_prev = pos.position_size * (
+                        est_price_prev / pos.entry_price - 1.0
+                    )
+                mtm_prev_by_strategy[pos.strategy] = (
+                    mtm_prev_by_strategy.get(pos.strategy, 0.0) + unrealized_prev
+                )
+
+        # Phase 5d: reset per-day realized PnL bucket; populated in CLOSE.
+        realized_pnl_today_by_strategy.clear()
+
+
         # ─── CLOSE ───
         still_open: list[_OpenPosition] = []
         for pos in open_positions:
@@ -197,6 +257,11 @@ def simulate_shared_pool(
                 trade_returns_by_strategy.setdefault(pos.strategy, []).append(realized_ret)
                 trade_realized_pnl_by_strategy.setdefault(pos.strategy, []).append(
                     realized_ret * pos.position_size
+                )
+                # Phase 5d: also accumulate into per-day bucket (cleared each loop)
+                realized_pnl_today_by_strategy[pos.strategy] = (
+                    realized_pnl_today_by_strategy.get(pos.strategy, 0.0)
+                    + realized_ret * pos.position_size
                 )
             else:
                 still_open.append(pos)
@@ -211,13 +276,101 @@ def simulate_shared_pool(
 
         # ─── WEIGHT COMPUTE ───
         strategies_today = sorted({b.strategy for b in todays_bids})
-        weights: dict[str, float] = {}
+        weights_raw: dict[str, float | None] = {}
+        weights: dict[str, float | None] = {}
         floor_hits: set[str] = set()
+        bid_weight_metadata: dict[str, BidWeightMetadata] = {}
+
         if strategies_today:
-            weights, floor_hits = compute_bid_weights(
+            weights_raw, floor_hits = compute_bid_weights(
                 strategies_today, daily_curves,
                 as_of=d, lookback_days=lookback_days,
             )
+
+            # NEW Phase 5d: always compute both raw and adjusted, always populate
+            # bid_weight_metadata. The contribution_enabled toggle only chooses
+            # which dict drives DEDUP/ALLOC.
+            weights_adjusted: dict[str, float | None] = {}
+            for s in strategies_today:
+                raw = weights_raw.get(s)
+                pool_corr, eff_window = pool_corr_excluding_self(
+                    daily_strategy_contribution_returns.get(s, []),
+                    daily_pool_returns,
+                    as_of=d,
+                    lookback_days=lookback_days,
+                    min_overlap=30,
+                )
+                adjusted, multiplier, rewarded = compute_adjusted_bid_weight(
+                    raw_sharpe=raw,
+                    pool_corr=pool_corr,
+                    lam=contribution_lambda,
+                    clip_min=0.5,
+                    clip_max=1.2,
+                )
+                weights_adjusted[s] = adjusted
+                bid_weight_metadata[s] = BidWeightMetadata(
+                    raw=raw, pool_corr=pool_corr,
+                    multiplier=multiplier, adjusted=adjusted,
+                    effective_window=eff_window,
+                    rewarded_for_negative_corr=rewarded,
+                    would_change_rank=False,  # computed below
+                )
+                pool_corr_by_strategy.setdefault(s, []).append(pool_corr)
+
+            # Compute would_change_rank for EVERY strategy (regardless of toggle)
+            sorted_raw = sorted(
+                strategies_today,
+                key=lambda s: (-(weights_raw.get(s) or 0.0), s),
+            )
+            sorted_adj = sorted(
+                strategies_today,
+                key=lambda s: (-(weights_adjusted.get(s) or 0.0), s),
+            )
+            rank_raw = {s: i for i, s in enumerate(sorted_raw)}
+            rank_adj = {s: i for i, s in enumerate(sorted_adj)}
+            for s in strategies_today:
+                if rank_raw[s] != rank_adj[s]:
+                    bid_weight_metadata[s] = dataclasses.replace(
+                        bid_weight_metadata[s], would_change_rank=True,
+                    )
+
+            # The toggle only chooses which weight drives DEDUP/ALLOC
+            weights = weights_adjusted if contribution_enabled else weights_raw
+
+        # Phase 5d: helper to thread 8 telemetry fields onto every BidRecord
+        # constructor below (7 sites). Default-arg capture binds *this
+        # iteration's* bid_weight_metadata snapshot, avoiding loop-variable
+        # late-binding (ruff B023). Safe because all BidRecord sites are in
+        # the same iteration scope. Missing-strategy fallback matches the
+        # BidRecord dataclass defaults so the bid still records cleanly when
+        # WEIGHT was skipped (e.g., strategy never entered today's WEIGHT
+        # block).
+        def _phase5d_kwargs(
+            strategy: str,
+            _meta_map: dict[str, BidWeightMetadata] = bid_weight_metadata,
+        ) -> dict:
+            meta = _meta_map.get(strategy)
+            if meta is None:
+                return {
+                    "raw_bid_weight": None,
+                    "pool_corr": None,
+                    "contribution_multiplier": 1.0,
+                    "adjusted_bid_weight": None,
+                    "effective_corr_window": 0,
+                    "pool_corr_excludes_self": True,
+                    "rewarded_for_negative_corr": False,
+                    "would_change_rank": False,
+                }
+            return {
+                "raw_bid_weight": meta.raw,
+                "pool_corr": meta.pool_corr,
+                "contribution_multiplier": meta.multiplier,
+                "adjusted_bid_weight": meta.adjusted,
+                "effective_corr_window": meta.effective_window,
+                "pool_corr_excludes_self": True,
+                "rewarded_for_negative_corr": meta.rewarded_for_negative_corr,
+                "would_change_rank": meta.would_change_rank,
+            }
 
         # n_floor_hits telemetry (post-floor-hit set is the source of truth)
         for s in floor_hits:
@@ -253,6 +406,7 @@ def simulate_shared_pool(
                         outcome="size_too_small",
                         winner=None,
                         position_size=raw_sizes_below_min[b.strategy],
+                        **_phase5d_kwargs(b.strategy),
                     ))
                     n_size_too_small_by_strategy[b.strategy] = (
                         n_size_too_small_by_strategy.get(b.strategy, 0) + 1
@@ -289,6 +443,7 @@ def simulate_shared_pool(
                         weight=weights[loser.strategy],
                         outcome="dedup_loser", winner=best.strategy,
                         position_size=position_sizes[loser.strategy],
+                        **_phase5d_kwargs(loser.strategy),
                     ))
                     n_dedup_skipped_by_strategy[loser.strategy] = (
                         n_dedup_skipped_by_strategy.get(loser.strategy, 0) + 1
@@ -334,6 +489,7 @@ def simulate_shared_pool(
                     weight=weights[b.strategy],
                     outcome="cap_full", winner=None,
                     position_size=requested_size,
+                    **_phase5d_kwargs(b.strategy),
                 ))
                 n_capacity_skipped_by_strategy[b.strategy] = (
                     n_capacity_skipped_by_strategy.get(b.strategy, 0) + 1
@@ -345,6 +501,7 @@ def simulate_shared_pool(
                     weight=weights[b.strategy],
                     outcome="cash_short", winner=None,
                     position_size=requested_size,
+                    **_phase5d_kwargs(b.strategy),
                 ))
                 n_cash_short_skipped_by_strategy[b.strategy] = (
                     n_cash_short_skipped_by_strategy.get(b.strategy, 0) + 1
@@ -363,6 +520,7 @@ def simulate_shared_pool(
                     outcome="sector_cap_full", winner=None,
                     position_size=requested_size,
                     blocked_by_sector=candidate_sector,
+                    **_phase5d_kwargs(b.strategy),
                 ))
                 n_sector_cap_skipped_by_strategy[b.strategy] = (
                     n_sector_cap_skipped_by_strategy.get(b.strategy, 0) + 1
@@ -395,6 +553,7 @@ def simulate_shared_pool(
                         outcome="correlation_cap_full", winner=None,
                         position_size=requested_size,
                         blocked_by_correlation_with=corr_diagnostics,
+                        **_phase5d_kwargs(b.strategy),
                     ))
                     n_correlation_cap_skipped_by_strategy[b.strategy] = (
                         n_correlation_cap_skipped_by_strategy.get(b.strategy, 0) + 1
@@ -417,6 +576,7 @@ def simulate_shared_pool(
                 weight=weights[b.strategy],
                 outcome="won", winner=None,
                 position_size=requested_size,
+                **_phase5d_kwargs(b.strategy),
             ))
 
         # Phase 5c: snapshot per-day sector exposure (post-ALLOCATE).
@@ -433,10 +593,15 @@ def simulate_shared_pool(
 
         # ─── MTM ─── (linear interpolation per spec § 2 + Phase 4)
         positions_value = 0.0
+        # Phase 5d: accumulate today's per-strategy unrealized PnL component
+        # using the SAME per-position mark formula as the line above. Sum by
+        # strategy → fed into the day-level contribution decomposition below.
+        mtm_today_by_strategy: dict[str, float] = {}
         for pos in open_positions:
             if pos.entry_date == d:
                 # Newly opened: no same-day MTM (matches Phase 4 invariant)
                 positions_value += pos.position_size
+                unrealized_today = 0.0
             else:
                 fraction = elapsed_fraction(
                     calendar, entry=pos.entry_date,
@@ -446,6 +611,39 @@ def simulate_shared_pool(
                     pos.horizon_price - pos.entry_price
                 ) * fraction
                 positions_value += pos.position_size * (est_price / pos.entry_price)
+                unrealized_today = pos.position_size * (
+                    est_price / pos.entry_price - 1.0
+                )
+            mtm_today_by_strategy[pos.strategy] = (
+                mtm_today_by_strategy.get(pos.strategy, 0.0) + unrealized_today
+            )
+
+        # ─── Phase 5d per-day per-strategy contribution decomposition ───
+        # By construction: pool_pnl_today = Σ_s (realized_today_s
+        #   + mtm_today_s − mtm_prev_s). Dividing by yesterday's equity gives
+        # contribution returns whose sum equals the pool return for this day.
+        pool_equity_prev_day = (
+            equity_curve[-1][1] if equity_curve else initial_capital
+        )
+        all_known_strategies = (
+            set(realized_pnl_today_by_strategy)
+            | set(mtm_prev_by_strategy)
+            | set(mtm_today_by_strategy)
+        )
+        for s in all_known_strategies:
+            pnl_today_s = (
+                realized_pnl_today_by_strategy.get(s, 0.0)
+                + mtm_today_by_strategy.get(s, 0.0)
+                - mtm_prev_by_strategy.get(s, 0.0)
+            )
+            contrib_ret = daily_contribution_return(pnl_today_s, pool_equity_prev_day)
+            daily_strategy_contribution_returns.setdefault(s, []).append((d, contrib_ret))
+        pool_ret_today = sum(
+            daily_strategy_contribution_returns[s][-1][1]
+            for s in all_known_strategies
+            if daily_strategy_contribution_returns.get(s)
+        )
+        daily_pool_returns.append((d, pool_ret_today))
 
         # ─── RECORD ───
         equity_curve.append((d, cash + positions_value))
@@ -457,6 +655,9 @@ def simulate_shared_pool(
                 sum(p.position_size for p in open_positions if p.strategy == s)
                 / initial_capital
             )
+
+        # Phase 5d: advance previous-day pointer for tomorrow's mtm_prev snapshot.
+        prev_d = d
 
     # ─── FINALIZE ───
     # Aggregate metrics over the COMBINED pool's daily curve
@@ -516,6 +717,22 @@ def simulate_shared_pool(
                 rec.position_size
             )
 
+    # Phase 5d: count would_change_rank per BID from all_bid_records
+    n_would_change_rank_by_strategy: dict[str, int] = {}
+    for b in all_bid_records:
+        if b.would_change_rank:
+            n_would_change_rank_by_strategy[b.strategy] = (
+                n_would_change_rank_by_strategy.get(b.strategy, 0) + 1
+            )
+
+    # Phase 5d: avg_pool_corr per strategy (time-avg over non-None values)
+    avg_pool_corr_by_strategy: dict[str, float | None] = {}
+    for s, corr_list in pool_corr_by_strategy.items():
+        defined = [c for c in corr_list if c is not None]
+        avg_pool_corr_by_strategy[s] = (
+            sum(defined) / len(defined) if defined else None
+        )
+
     per_strategy_stats: dict[str, StrategyContribution] = {}
     for s in sorted(daily_curves.keys()):
         # Phase 5b: realized PnL uses per-trade actual position size (variable),
@@ -548,6 +765,8 @@ def simulate_shared_pool(
             avg_position_size=avg_position_size,
             n_bids=n_bids_by_strategy.get(s, 0),
             n_floor_hits=n_floor_hits_by_strategy.get(s, 0),
+            avg_pool_corr=avg_pool_corr_by_strategy.get(s),
+            n_would_change_rank=n_would_change_rank_by_strategy.get(s, 0),
         )
 
     # Phase 5b Task 7: portfolio-level concentration telemetry.
@@ -628,4 +847,7 @@ def simulate_shared_pool(
         sector_caps_enabled=sector_caps_enabled,
         correlation_caps_enabled=correlation_caps_enabled,
         risk_policy=risk_policy,
+        contribution_enabled=contribution_enabled,
+        contribution_policy=contribution_policy,
+        contribution_lambda=contribution_lambda,
     )

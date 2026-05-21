@@ -93,6 +93,10 @@ class StrategyContribution:
     n_bids: int
     n_floor_hits: int
 
+    # NEW Phase 5d (both defaulted)
+    avg_pool_corr: float | None = None
+    n_would_change_rank: int = 0
+
 
 @dataclass(frozen=True)
 class BidRecord:
@@ -120,6 +124,15 @@ class BidRecord:
     # matching outcome). Frozen-dataclass-safe — string and tuple are hashable.
     blocked_by_sector: str | None = None
     blocked_by_correlation_with: tuple[tuple[str, float], ...] = ()
+    # NEW Phase 5d (all defaulted for backward-compat with existing fixtures)
+    raw_bid_weight: float | None = None
+    pool_corr: float | None = None
+    contribution_multiplier: float = 1.0
+    adjusted_bid_weight: float | None = None
+    effective_corr_window: int = 0
+    pool_corr_excludes_self: bool = True
+    rewarded_for_negative_corr: bool = False
+    would_change_rank: bool = False
 
 
 @dataclass(frozen=True)
@@ -179,3 +192,7 @@ class PortfolioBacktestResult:
     sector_caps_enabled: bool = True                              # NEW Phase 5c-1
     correlation_caps_enabled: bool = True                         # NEW Phase 5c-2
     risk_policy: str = "cap40_corr06_enforced_v0"                 # NEW Phase 5c composite tag
+    # NEW Phase 5d provenance
+    contribution_enabled: bool = False
+    contribution_policy: str = "contribution_adjusted_sharpe_60d_v0"
+    contribution_lambda: float = 0.5

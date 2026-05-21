@@ -116,3 +116,31 @@ def test_lab_backtest_shared_mode_renders_cap_policy_in_hero(
     db_session.commit()
     r = client.get("/lab/backtest?mode=shared-pool")
     assert "cap40_corr06_enforced_v0" in r.text or "sector_cap_policy" in r.text
+
+
+def test_lab_backtest_shared_mode_contribution_off_by_default(
+    client, monkeypatch, db_session,
+):
+    """Default shared-pool render does not show contribution modifier or bid_policy upgrade."""
+    _login(client, monkeypatch)
+    _seed_event(db_session, ticker="A1", strategy="momentum_breakout")
+    db_session.commit()
+    r = client.get("/lab/backtest?mode=shared-pool")
+    assert r.status_code == 200
+    # Hero shows the Phase 5a string when disabled
+    assert "rolling_sharpe_60d_v0" in r.text
+    # No "1−0.5ρ" inline modifier in disabled mode
+    assert "1−0.5ρ" not in r.text or "1−" not in r.text  # tolerant
+
+
+def test_lab_backtest_shared_mode_avg_pool_corr_column_visible(
+    client, monkeypatch, db_session,
+):
+    """Strategy table includes 'avg pool ρ' column header."""
+    _login(client, monkeypatch)
+    _seed_event(db_session, ticker="A1", strategy="momentum_breakout")
+    db_session.commit()
+    r = client.get("/lab/backtest?mode=shared-pool")
+    assert r.status_code == 200
+    # Outcome: avg pool ρ column header is present
+    assert "avg pool ρ" in r.text or "pool ρ" in r.text or "avg pool" in r.text

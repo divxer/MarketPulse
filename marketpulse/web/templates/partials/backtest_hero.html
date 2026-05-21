@@ -6,8 +6,9 @@
     {% if mode == 'shared-pool' %}
       <p class="mp-hero__desc">
         6 个策略共享单一 $10k 资本池,通过 {{ lookback_days }}-day 滚动 Sharpe
+        {% if shared_result and shared_result.contribution_enabled %}× <strong>1−{{ "{:.1f}".format(shared_result.contribution_lambda) }}ρ</strong> 贡献调整(clip [0.5, 1.2]){% endif %}
         加权竞标分配。撞 ticker 时高 Sharpe 策略赢。
-        <strong>bid_policy=rolling_sharpe_60d_v0</strong>。
+        <strong>bid_policy={{ shared_result.bid_policy if shared_result else 'rolling_sharpe_60d_v0' }}</strong>。
       </p>
       {% if sizing_policy == 'vol_target_conviction_v0' %}
         <p class="mp-hero__desc">
