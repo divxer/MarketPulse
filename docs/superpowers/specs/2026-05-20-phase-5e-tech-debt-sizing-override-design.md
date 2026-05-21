@@ -21,16 +21,22 @@ No new features beyond the sizing override. No new modules. No DB migration. No 
 ## 2 — Locked decisions
 
 1. **Sequencing**: single plan, refactor first → test hardening → sizing override → final integration.
-2. **Refactor depth**: medium — extract `_phase5d_kwargs` helper to `contribution.py`, extract per-day decomposition block to `_decompose_day_contributions` helper, promote `min_overlap=30` to module constant, drop `BidRecord.pool_corr_excludes_self` field.
+2. **Refactor depth**: medium — extract `_phase5d_kwargs` helper to `contribution.py`, extract per-day decomposition block to `_decompose_day_contributions` helper, promote `min_overlap=30` to module constant, drop `BidRecord.pool_corr_excludes_self` field AND introduce `POOL_CORR_MODE` module constant (see lock #7).
 3. **Override knobs**: all three sizing knobs (`base_position_size`, `min_position`, `max_position`) overridable per strategy YAML. `target_vol` stays global.
 4. **YAML schema**: optional `sizing:` block, partial overrides allowed. Strategies without the block inherit global defaults. Existing 6 YAMLs continue working unmodified (zero migration required).
 5. **Validation**: strict at load time. Loader merges overrides with globals, then validates `min ≤ base ≤ max`, all values `> 0`. ConfigError on violation, message includes strategy name + offending values.
 6. **Apply scope**: overrides apply to BOTH `sizing_enabled=True` (vol-target × conviction × clip) AND `sizing_enabled=False` (fixed mode uses overridden base).
-7. **`pool_corr_excludes_self` removal**: dropped as YAGNI. The forward-flag field is always True in v0, no consumer reads it. Removal is forward-compat for kwarg callers (only kwarg construction in production).
+7. **`pool_corr_excludes_self` → `POOL_CORR_MODE` constant**: the per-BidRecord field is dropped (always-True noise), BUT the variant-discriminator semantic is preserved as a module-level constant in `contribution.py`: `POOL_CORR_MODE: Literal["LOO_ONLY_v0"] = "LOO_ONLY_v0"`. This keeps the future-extensibility hook (a v1 non-LOO variant would version-bump the constant) without polluting every BidRecord with a frozen-True field. The constant is exported from `contribution.py` and referenced once in `portfolio_simulator.py`'s WEIGHT block as a provenance assertion comment.
 8. **UI surfacing**: bid history `size` column tooltip shows "$<size> (custom limits: $<min>/$<max>)" when the bid's strategy has overrides. No new BidRecord field; pass `strategies_with_sizing_overrides: set[str]` as separate template context.
 9. **Test fixture**: one shared `phase5d_warm_pool` pytest fixture (90-day calendar, 2 anti-correlated strategies, bids every other day for 60 days). Lives in `tests/conftest.py` or dedicated fixture module. Smoke-tested itself.
 10. **Strategy dataclass extension**: 3 optional fields (`base_position_size`, `min_position`, `max_position` — each `float | None = None`). Existing fields unchanged.
 11. **Override map shape**: `dict[str, tuple[float | None, float | None, float | None]]` — strategy → (base, min, max). None at any position means "inherit global".
+12. **Execution contract — sizing override is a post-processing clamp, NOT an alternative sizing engine.** Phrased explicitly so future readers cannot misread the override as a parallel signal pathway:
+    - Global sizing (Phase 5b `compute_position_sizes`: vol-target × alpha-conviction) is the **authoritative** size producer. The per-strategy `(base, min, max)` overrides act ONLY as the **final clamp envelope** on that authoritative output.
+    - Override values do NOT enter the signal layer. They do NOT affect rolling Sharpe, bid weights, pool correlation, contribution adjustment, or any pre-allocation computation.
+    - The override is a **post-hoc clamp** applied after the vol-target × conviction math (or after the fixed-mode constant). Single clip operation, no second sizing engine, no double-clipping.
+    - This is a hard architectural invariant. Any future change that lets overrides feed back into signal-layer computations would constitute a Phase boundary violation and requires a fresh spec.
+13. **Test taxonomy — invariant tests vs behavioral tests are explicitly tagged.** Every new test in Phase 5e carries a `# Layer: invariant` or `# Layer: behavioral` comment at its docstring header (see § 6). Invariant tests assert structural properties that must hold regardless of synthetic-market dynamics (Σ contribution_returns == pool_return, no NaN, monotonic position-size clipping, override never relaxes global ceiling). Behavioral tests assert dynamics-dependent properties (rank flips occur, correlation has expected sign, avg_pool_corr is non-None given sufficient warm-up). This taxonomy prevents test drift in 5f+ where fixture dynamics evolve.
 
 ---
 
@@ -44,7 +50,7 @@ Thread A (Refactor, lowest risk)
   ├── A2: phase5d_kwargs_from_metadata public helper
   ├── A3: Replace inline closure at 7 BidRecord sites
   ├── A4: Extract _decompose_day_contributions helper
-  └── A5: Drop pool_corr_excludes_self field
+  └── A5: Drop pool_corr_excludes_self field + add POOL_CORR_MODE constant
 
 Thread B (Test hardening)
   ├── B6: phase5d_warm_pool fixture + self-smoke test
@@ -165,6 +171,36 @@ def _decompose_day_contributions(
     daily_pool_returns.append((today, pool_ret_today))
 ```
 
+**`POOL_CORR_MODE` constant (A5):**
+
+The `pool_corr_excludes_self: bool = True` field on `BidRecord` is removed (always-True noise; no consumer reads it). The variant-discriminator semantic moves to a module-level `Literal` constant in `contribution.py`:
+
+```python
+# marketpulse/backtest/contribution.py
+from typing import Literal
+
+POOL_CORR_MODE: Literal["LOO_ONLY_v0"] = "LOO_ONLY_v0"
+"""Discriminator for the pool-correlation computation variant.
+
+v0 ships LOO (leave-one-out via subtraction) as the only mode.
+A future non-LOO variant (e.g., counterfactual A-less simulation,
+or pool-conditional correlation) would version-bump this constant
+to e.g. 'LOO_OR_CF_v1' and `pool_corr_excluding_self` would dispatch
+on the mode. v0 hardcodes LOO; the constant exists to anchor the
+extension surface, not to be branched on yet.
+"""
+```
+
+Referenced once in `portfolio_simulator.py` as a provenance assertion comment alongside the `pool_corr_excluding_self` call:
+
+```python
+# WEIGHT block in portfolio_simulator.py
+# Provenance: POOL_CORR_MODE == "LOO_ONLY_v0" — spec § 2 lock #7
+pool_corr, eff_window = pool_corr_excluding_self(...)
+```
+
+The constant does NOT appear on any dataclass or wire format. Future v1 introductions add a discriminator field then; v0 stays clean.
+
 ### 3.3 Sizing override mechanics
 
 **YAML schema (optional `sizing:` block):**
@@ -241,7 +277,17 @@ def compute_position_sizes(
     per_strategy_overrides: dict[str, tuple[float | None, float | None, float | None]] | None = None,
 ) -> dict[str, float]:
     """For each strategy in `strategies`, returns the effective position size
-    in dollars. Per-strategy overrides take precedence over globals."""
+    in dollars.
+
+    Execution-contract invariant (spec § 2 lock #12):
+    Per-strategy overrides are a POST-PROCESSING CLAMP applied ONLY at the
+    final clip step. They do NOT enter the vol-target × alpha-conviction
+    signal computation — `eff_base` parameterizes only the conviction
+    baseline, NOT the signal numerator. Equivalently: the override values
+    influence the CLAMP ENVELOPE for the size, never the SIGNAL that
+    determines where within that envelope the size lands. This is a hard
+    architectural boundary; do not loosen it without a fresh spec.
+    """
     overrides = per_strategy_overrides or {}
     sizes: dict[str, float] = {}
     for s in strategies:
@@ -282,6 +328,44 @@ shared_result = simulate_shared_pool(
 ```
 
 Route surfaces `strategies_with_sizing_overrides` from the loaded strategies dict (computed alongside the override map).
+
+### 3.4 Architectural boundary — signal vs execution
+
+This diagram captures the spec § 2 lock #12 invariant as a layer map. Every Phase 5e change must respect this boundary:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                       SIGNAL LAYER                              │
+│  rolling Sharpe · pool_corr_excluding_self · contribution       │
+│  multiplier · compute_adjusted_bid_weight · rank ordering       │
+│                                                                 │
+│  Inputs: market data, equity curves, daily pool returns         │
+│  Outputs: weights (raw + adjusted), BidWeightMetadata           │
+│                                                                 │
+│  ❌ NO read of per-strategy sizing overrides                    │
+│  ❌ NO read of (base, min, max) per-strategy values             │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         │  weights, metadata
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                  EXECUTION LAYER                                │
+│  SIZE step (compute_position_sizes):                            │
+│    1. vol-target × alpha-conviction math (signal-driven)        │
+│    2. CLAMP envelope = (eff_min, eff_max) — POST-PROCESSING     │
+│       └── per-strategy override is consulted HERE and ONLY HERE │
+│                                                                 │
+│  DEDUP · ALLOC (sector cap · correlation cap · capacity cap)    │
+│                                                                 │
+│  Inputs: weights, metadata, per_strategy_overrides              │
+│  Outputs: BidRecords (with outcome), positions                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Invariant check for code review:**
+- If a Phase 5e change reads `per_strategy_overrides` (or `Strategy.min_position` etc.) ABOVE the SIZE step's final clip, the change is wrong. Reject.
+- If a Phase 5e change uses an override value as a signal-layer input (e.g., scaling a rolling Sharpe by a strategy-specific size factor), the change is wrong. Reject.
+- The override map is read in exactly two locations: `compute_position_sizes` (clip envelope) and the route layer's `strategies_with_sizing_overrides` set (UI surfacing only).
 
 ---
 
@@ -339,23 +423,38 @@ Route layer:
 
 ## 6 — Testing strategy
 
+### 6.0 Test taxonomy (locked — spec § 2 lock #13)
+
+Every new test added in Phase 5e MUST carry one of these tags as the first line of its docstring:
+
+- **`# Layer: invariant`** — asserts a structural property that holds regardless of synthetic-market dynamics. Examples: `Σ contribution_returns == pool_return`, no NaN/Inf, `result >= eff_min`, override never relaxes global ceiling. These tests fail ONLY when the implementation breaks; they survive fixture rewrites.
+- **`# Layer: behavioral`** — asserts a dynamics-dependent property: rank flips occur, `pool_corr` has expected sign, `avg_pool_corr` is non-None given sufficient warm-up. These tests depend on the synthetic-market fixture being well-shaped; they can become vacuous if the fixture changes.
+
+**Why this matters:** behavioral tests that masquerade as invariant tests are the failure mode that produced the tautological-test gap in Phase 5d (warm-up didn't trigger → "pass" assertions were vacuous). By tagging explicitly, future engineers can audit: "is this test telling me about my implementation, or about my fixture?"
+
+**Heuristic check:** if a test passes when the production code is reverted to a no-op (e.g., always return None, always return 0), it's vacuous. Invariant tests should FAIL on a no-op; behavioral tests may pass (depending on the no-op's interaction with the fixture). Author each test with this in mind.
+
 ### 6.1 Thread A (Refactor) — verified by existing 915 tests
 
-- A1: 1 new test asserting `MIN_OVERLAP_DAYS == 30` (anchors the constant).
-- A2: 2 new tests for `phase5d_kwargs_from_metadata`: None branch returns safe defaults dict; Some branch returns unpacked metadata.
+All Thread A tests are **invariant**: they assert pure-function I/O contracts that don't depend on market dynamics.
+
+- A1: 1 new test asserting `MIN_OVERLAP_DAYS == 30`. `# Layer: invariant`
+- A2: 2 new tests for `phase5d_kwargs_from_metadata`: None branch returns safe defaults dict; Some branch returns unpacked metadata. `# Layer: invariant`
 - A3: No new tests; existing 915 must pass.
-- A4: 1 new test asserting `_decompose_day_contributions` produces invariant `Σ contribution_returns == pool_return` for a synthetic 3-strategy day.
-- A5: 1 modified test (the `pool_corr_excludes_self` assertion in `test_backtest_types_phase5a.py` is deleted).
+- A4: 1 new test asserting `_decompose_day_contributions` produces invariant `Σ contribution_returns == pool_return` for a synthetic 3-strategy day. `# Layer: invariant`
+- A5: 1 modified test (the `pool_corr_excludes_self` assertion in `test_backtest_types_phase5a.py` is deleted); 1 new test asserts `POOL_CORR_MODE == "LOO_ONLY_v0"`. `# Layer: invariant`
 
 ### 6.2 Thread B (Test hardening) — load-bearing fixture
 
-**Fixture self-smoke (B6):**
+Thread B introduces a mix of invariant and behavioral tests. The taxonomy split is critical here because Thread B's whole purpose is to close 5d's tautology gap — so we explicitly mark which assertions survive fixture rewrites and which depend on fixture shape.
+
+**Fixture self-smoke (B6):** `# Layer: behavioral` — the fixture's job IS to produce specific dynamics.
 
 ```python
 def test_warm_pool_fixture_produces_non_none_pool_corr(phase5d_warm_pool):
-    """The fixture itself must produce non-None pool_corr on >= 1 bid.
-
-    If this test fails, the cross-validation tests in B7 are vacuous —
+    """# Layer: behavioral
+    The fixture itself must produce non-None pool_corr on >= 1 bid.
+    If this test fails, the behavioral assertions in B7 are vacuous —
     the same trap that bit us in 5d Task 8.
     """
     bids_with_corr = [
@@ -371,6 +470,12 @@ def test_warm_pool_fixture_produces_non_none_pool_corr(phase5d_warm_pool):
 
 ```python
 def test_phase5e_avg_pool_corr_matches_bid_history_mean(phase5d_warm_pool):
+    """# Layer: invariant
+    The aggregate `c.avg_pool_corr` is, by construction, the mean of all
+    non-None `b.pool_corr` for bids of that strategy. This holds for ANY
+    fixture — vacuous-fixture-safe because the equality is verified per
+    strategy by reconstructing the expected mean from the same data.
+    """
     r = phase5d_warm_pool["shared"]
     for s, c in r.per_strategy_stats.items():
         bid_corrs = [b.pool_corr for b in r.bid_history
@@ -383,18 +488,32 @@ def test_phase5e_avg_pool_corr_matches_bid_history_mean(phase5d_warm_pool):
         assert abs(c.avg_pool_corr - expected) < 1e-9
 
 
-def test_phase5e_n_would_change_rank_matches_bid_count(phase5d_warm_pool):
+def test_phase5e_n_would_change_rank_aggregate_consistency(phase5d_warm_pool):
+    """# Layer: invariant
+    Per-strategy `n_would_change_rank` summed across strategies MUST equal
+    the total count of `would_change_rank=True` BidRecords. This holds for
+    ANY fixture (including empty) — pure aggregation consistency.
+    """
     r = phase5d_warm_pool["shared"]
     total_flips = sum(1 for b in r.bid_history if b.would_change_rank)
     aggregate = sum(c.n_would_change_rank for c in r.per_strategy_stats.values())
     assert total_flips == aggregate
-    # Strong precondition: prove the rank-flip path executes at least once
-    assert total_flips > 0, (
-        "Warm-pool fixture did not produce any rank flip — fixture too tame"
-    )
+
+
+def test_phase5e_warm_pool_produces_at_least_one_rank_flip(phase5d_warm_pool):
+    """# Layer: behavioral
+    The warm-pool fixture is engineered to produce ≥1 rank flip via
+    anti-correlated curves. If this test fails, the fixture has drifted
+    and the rank-flip code path is no longer exercised — fix the fixture.
+    """
+    r = phase5d_warm_pool["shared"]
+    total_flips = sum(1 for b in r.bid_history if b.would_change_rank)
+    assert total_flips > 0, "Fixture too tame — no rank flips produced"
 ```
 
-**Tightened web assertions (B8):**
+**Why the split matters:** the B7 cross-validation tests (aggregation consistency, mean reconstruction) are now PURE invariants — they would catch a regression where finalization drops bids, miscounts flags, or uses the wrong mean formula, regardless of fixture dynamics. The "at least one rank flip occurs" assertion is a BEHAVIORAL guard on the fixture itself, isolated as a separate test so it can fail independently without obscuring the invariant signal.
+
+**Tightened web assertions (B8):** `# Layer: invariant` — assert literal template-rendering contract.
 
 ```python
 # OLD: assert "1−0.5ρ" not in r.text or "1−" not in r.text  # tolerant
@@ -406,7 +525,9 @@ assert "avg pool ρ" in r.text and "rank Δ" in r.text  # both columns
 
 ### 6.3 Thread C (Sizing override) — 13 new tests
 
-**YAML loader (C11, 6 tests):**
+All Thread C tests are **invariant** unless explicitly marked otherwise. They assert pure-function I/O contracts, validation behavior, and the post-processing-clamp invariant.
+
+**YAML loader (C11, 6 tests):** all `# Layer: invariant`
 
 1. No `sizing:` block → strategy fields all None.
 2. Partial: only `base_position_size` → other 2 None.
@@ -415,17 +536,17 @@ assert "avg pool ρ" in r.text and "rank Δ" in r.text  # both columns
 5. Invalid: `base > max` → ConfigError.
 6. Invalid: negative `min_position` → ConfigError with field name + value.
 
-**`compute_position_sizes` (C13, 3 tests):**
+**`compute_position_sizes` (C13, 3 tests):** all `# Layer: invariant`
 
-1. Full override applied: passes 3 overridden values; result clipped to overridden bounds.
+1. Full override applied: passes 3 overridden values; result clipped to overridden bounds. **Additionally asserts the lock #12 boundary:** the signal-layer inputs (sigma, alpha) are NOT scaled by the override; identical signal inputs with different overrides produce sizes that differ ONLY in the clip envelope.
 2. Partial override (only `min`): asserts overridden min, inherited base + max.
-3. No override = bit-equivalent Phase 5b: assert result identical to a baseline call without `per_strategy_overrides`.
+3. No override = bit-equivalent Phase 5b: assert result identical to a baseline call without `per_strategy_overrides` for ALL 6 production strategies on a fixed input.
 
-**Integration (C14, 1 test):**
+**Integration (C14, 1 test):** `# Layer: invariant`
 
-1. One strategy has `sizing:` block in YAML; run `run_shared_pool_backtest`; assert that strategy's `BidRecord.position_size` reflects the overridden values (e.g., never below custom `min_position`).
+1. One strategy has `sizing:` block in YAML; run `run_shared_pool_backtest`; assert that strategy's `BidRecord.position_size` always satisfies `eff_min ≤ size ≤ eff_max` (clip envelope respected). This is a pure post-condition that holds independent of dynamics.
 
-**UI (C15, 1 test):**
+**UI (C15, 1 test):** `# Layer: invariant`
 
 1. After backtest with one strategy having overrides, assert `strategies_with_sizing_overrides` set is in the template context AND the bid history HTML contains the tooltip text for at least one row.
 
@@ -446,30 +567,34 @@ Full suite green; ~935 tests total (915 + 20 new).
 
 ## 8 — Required test scenarios
 
-| # | Scenario                                                          | Task |
-|---|-------------------------------------------------------------------|------|
-| 1 | `MIN_OVERLAP_DAYS` constant anchored at 30                        | A1   |
-| 2 | `phase5d_kwargs_from_metadata(None, s)` returns safe defaults    | A2   |
-| 3 | `phase5d_kwargs_from_metadata(meta, s)` unpacks all 7 fields     | A2   |
-| 4 | `_decompose_day_contributions` invariant on 3 synthetic strategies | A4   |
-| 5 | `BidRecord.pool_corr_excludes_self` field gone (compile-time)    | A5   |
-| 6 | Warm-pool fixture produces ≥1 bid with non-None `pool_corr`      | B6   |
-| 7 | `avg_pool_corr` matches mean of bid_history non-None values       | B7   |
-| 8 | `n_would_change_rank` matches bid_history flag count AND > 0     | B7   |
-| 9 | Hero default-off: `"贡献调整" not in r.text`                       | B8   |
-| 10 | Strategy table: `"avg pool ρ"` AND `"rank Δ"` both present       | B8   |
-| 11 | No `sizing:` block → Strategy fields all None                     | C11  |
-| 12 | Partial `sizing:` (only base) → other 2 None                      | C11  |
-| 13 | Full `sizing:` valid → all 3 set                                  | C11  |
-| 14 | `sizing.min > sizing.max` → ConfigError with both values         | C11  |
-| 15 | `sizing.base > sizing.max` → ConfigError                          | C11  |
-| 16 | Negative `sizing.min_position` → ConfigError with field + value   | C11  |
-| 17 | `compute_position_sizes` honors full override                     | C13  |
-| 18 | `compute_position_sizes` honors partial override                  | C13  |
-| 19 | `compute_position_sizes` no-override = bit-equivalent Phase 5b   | C13  |
-| 20 | Orchestrator integration: overridden strategy's BidRecord size ≥ overridden min | C14 |
-| 21 | UI: `strategies_with_sizing_overrides` set populated when YAML has block | C15 |
-| 22 | UI: bid history tooltip contains "custom limits" text for overridden strategy bids | C15 |
+| #  | Scenario                                                                          | Task | Layer       |
+|----|-----------------------------------------------------------------------------------|------|-------------|
+| 1  | `MIN_OVERLAP_DAYS` constant anchored at 30                                        | A1   | invariant   |
+| 2  | `phase5d_kwargs_from_metadata(None, s)` returns safe defaults                     | A2   | invariant   |
+| 3  | `phase5d_kwargs_from_metadata(meta, s)` unpacks all 7 fields                      | A2   | invariant   |
+| 4  | `_decompose_day_contributions` invariant on 3 synthetic strategies                | A4   | invariant   |
+| 5  | `BidRecord.pool_corr_excludes_self` field gone (compile-time)                     | A5   | invariant   |
+| 5b | `POOL_CORR_MODE == "LOO_ONLY_v0"` constant anchored                               | A5   | invariant   |
+| 6  | Warm-pool fixture produces ≥1 bid with non-None `pool_corr`                       | B6   | behavioral  |
+| 7  | `avg_pool_corr` matches mean of bid_history non-None values (per strategy)        | B7   | invariant   |
+| 8  | `n_would_change_rank` per-strategy sum == total bid_history flag count            | B7   | invariant   |
+| 8b | Warm-pool fixture produces ≥1 rank flip                                           | B7   | behavioral  |
+| 9  | Hero default-off: `"贡献调整" not in r.text`                                       | B8   | invariant   |
+| 10 | Strategy table: `"avg pool ρ"` AND `"rank Δ"` both present                        | B8   | invariant   |
+| 11 | No `sizing:` block → Strategy fields all None                                     | C11  | invariant   |
+| 12 | Partial `sizing:` (only base) → other 2 None                                      | C11  | invariant   |
+| 13 | Full `sizing:` valid → all 3 set                                                  | C11  | invariant   |
+| 14 | `sizing.min > sizing.max` → ConfigError with both values                          | C11  | invariant   |
+| 15 | `sizing.base > sizing.max` → ConfigError                                          | C11  | invariant   |
+| 16 | Negative `sizing.min_position` → ConfigError with field + value                   | C11  | invariant   |
+| 17 | `compute_position_sizes` honors full override + lock #12 boundary check           | C13  | invariant   |
+| 18 | `compute_position_sizes` honors partial override                                  | C13  | invariant   |
+| 19 | `compute_position_sizes` no-override = bit-equivalent Phase 5b (all 6 strategies) | C13  | invariant   |
+| 20 | Orchestrator integration: `eff_min ≤ BidRecord.position_size ≤ eff_max`            | C14  | invariant   |
+| 21 | UI: `strategies_with_sizing_overrides` set populated when YAML has block          | C15  | invariant   |
+| 22 | UI: bid history tooltip contains "custom limits" text for overridden strategy bids| C15  | invariant   |
+
+**Counts:** 22 invariant tests + 2 behavioral tests (fixture-shape guards) = 24 new tests. Invariant tests dominate (~92%) because Phase 5e's core deliverables are structural contracts, not new dynamics.
 
 ---
 
@@ -480,5 +605,34 @@ Full suite green; ~935 tests total (915 + 20 new).
 - YAML migration of existing 6 strategy files. No existing YAMLs change.
 - Removal of `max_neighbor_exposure = 0.0` placeholder from Phase 5c. Stays as v0 placeholder.
 - New BidRecord field for "has sizing override". Tooltip uses separate template context.
+- Heavy refactor (extract `caps.py`, `sizing.py`, `_compute_weights_with_metadata` helper, BidRecordAssembler layer). Medium refactor only in 5e.
 - Live trading. (Phase 6.)
 - Strategy evolution. (Phase 7.)
+
+---
+
+## 10 — System-evolution status (forward-warning)
+
+**Phase 5e marks the last "local-constraint" phase before Phase 6.**
+
+The Phase 5a-5e arc has been adding constraints and telemetry to a fundamentally **per-strategy independent** computation model:
+- 5a: each strategy bids independently, dedup picks one winner per ticker.
+- 5b: each strategy's size derives independently from its own sigma + alpha.
+- 5c: caps apply post-sizing as filters (sector, correlation neighbors).
+- 5d: contribution-adjusted Sharpe touches WEIGHT but the LOO subtraction is still per-strategy decomposition of an already-realized pool.
+- 5e: per-strategy overrides clamp the size envelope, still independently.
+
+**Phase 6 will introduce coupling** in at least three ways that escape the per-strategy frame:
+
+1. **Live-trading execution constraints** (slippage, market hours, fill probability) couple all simultaneous orders.
+2. **Pool-level risk budgets** (e.g., portfolio VaR, max correlated-cluster exposure beyond the v0 neighbor sum) require global optimization, not per-strategy filtering.
+3. **Real-time bid arbitration** (vs. backtest's batch dedup) introduces ordering dependencies that the current "rank by weight, allocate in order" model cannot express.
+
+This means Phase 6 will likely require a **fresh architectural layer** (a `pool_optimizer.py` or similar) sitting between ALLOC and the execution boundary, with its own contract spec. The 5e refactor preparation (extracted `_decompose_day_contributions`, `_phase5d_kwargs_from_metadata`, `MIN_OVERLAP_DAYS` / `POOL_CORR_MODE` constants) deliberately keeps the simulator's per-day loop legible so Phase 6's combinatorial layer can plug in cleanly.
+
+**Architectural drift acknowledged but deferred:**
+
+- `phase5d_kwargs_from_metadata` lives in `contribution.py` (signal module) but is technically presentation-layer (BidRecord serialization). This is mild drift accepted in 5e to avoid spawning a new module. Phase 6 should formalize a `BidRecordAssembler` layer if telemetry threading grows further.
+- `_decompose_day_contributions` stays in `portfolio_simulator.py` because it mutates simulator-local accumulators. Pure-function extraction would require returning ~3 large structures per day, complicating the hot path. Acceptable for 5e.
+
+**Bottom line:** Phase 5e is **system stabilization and constraint layering**, NOT feature expansion. It is the last natural step before Phase 6's combinatorial optimization complexity. Architectural decisions in 5e (especially the lock #12 signal-vs-execution boundary) are designed to survive that transition.
