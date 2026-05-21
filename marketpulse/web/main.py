@@ -78,6 +78,24 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # noqa: ARG001
+        # Phase 6a paper-trading initialization (idempotent — Repository
+        # guards against double-seeding via PaperCashLedger row count).
+        from decimal import Decimal
+
+        from marketpulse.db.base import session_scope
+        from marketpulse.trading.clock import WallClock
+        from marketpulse.trading.repository import Repository
+
+        gen = session_scope()
+        db = next(gen)
+        try:
+            Repository(session=db).ensure_initial_deposit(
+                amount=Decimal(settings.paper_initial_deposit),
+                timestamp=WallClock().now(),
+            )
+        finally:
+            db.close()
+
         if not scheduler.running:
             scheduler.start()
         try:
