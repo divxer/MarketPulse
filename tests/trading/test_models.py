@@ -35,3 +35,31 @@ def test_paper_order_has_versioning_columns():
 
     cols = {c.name for c in inspect(PaperOrder).columns}
     assert {"strategy_version", "allocator_version", "execution_engine_version"} <= cols
+
+
+def test_migration_creates_and_drops_paper_tables(tmp_path, monkeypatch):
+    """0010 migration creates all 5 paper_* tables on upgrade; drops them on downgrade."""
+    import subprocess
+
+    db_file = tmp_path / "smoke.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_file}")
+
+    # Force settings cache invalidation if needed
+    from marketpulse.config import get_settings
+    get_settings.cache_clear()
+
+    subprocess.run(["uv", "run", "alembic", "upgrade", "head"], check=True)
+
+    # All 5 tables exist
+    from sqlalchemy import create_engine, inspect
+    eng = create_engine(f"sqlite:///{db_file}")
+    insp = inspect(eng)
+    tables = set(insp.get_table_names())
+    assert {"paper_order", "paper_fill", "paper_position",
+            "paper_cash_ledger", "paper_audit_event"} <= tables
+
+    # Downgrade by one revision and confirm removal.
+    subprocess.run(["uv", "run", "alembic", "downgrade", "-1"], check=True)
+    insp = inspect(eng)
+    tables = set(insp.get_table_names())
+    assert "paper_order" not in tables
