@@ -38,8 +38,18 @@ No new features beyond the sizing override + observability metrics. No new modul
     - The override is a **post-hoc clamp** applied after the vol-target × conviction math (or after the fixed-mode constant). Single clip operation, no second sizing engine, no double-clipping.
     - This is a hard architectural invariant. Any future change that lets overrides feed back into signal-layer computations would constitute a Phase boundary violation and requires a fresh spec.
 13. **Test taxonomy — invariant tests vs behavioral tests are explicitly tagged.** Every new test in Phase 5e carries a `# Layer: invariant` or `# Layer: behavioral` comment at its docstring header (see § 6). Invariant tests assert structural properties that must hold regardless of synthetic-market dynamics (Σ contribution_returns == pool_return, no NaN, monotonic position-size clipping, override never relaxes global ceiling). Behavioral tests assert dynamics-dependent properties (rank flips occur, correlation has expected sign, avg_pool_corr is non-None given sufficient warm-up). This taxonomy prevents test drift in 5f+ where fixture dynamics evolve.
-14. **Allocation observability — default-ON, no gating flag.** The two new metrics (`effective_allocation`, `rank_drift_from_signal`) are computed at finalization on EVERY backtest run. No `observability_enabled` flag. Rationale: gating would reintroduce the same "silent missing telemetry" failure mode that the warm-pool fixture in Thread B was created to prevent. If display-level filtering is ever needed, add a UI-only / API-only switch — never a computation gate. Stats are either present and complete, or the run did not happen.
+14. **Allocation observability — default-ON, no gating flag.** The two new metrics (`effective_allocation`, `rank_drift_from_signal`) are computed at finalization on EVERY backtest run. No `observability_enabled` flag. Rationale: gating would reintroduce the same "silent missing telemetry" failure mode that the warm-pool fixture in Thread B was created to prevent. If display-level filtering is ever needed, add a UI-only / API-only switch — never a computation gate. **Stats are either present and complete, or the run did not happen.**
 15. **Allocation metrics are INVARIANT-grade telemetry, not stochastic.** `effective_allocation` and `rank_drift_from_signal` are deterministic functions of (final per-strategy capital, bid sequence). Given fixed inputs, the metrics return identical outputs every run. Their tests therefore live in the invariant taxonomy (lock #13). The ONLY behavioral aspect is whether a given fixture *triggers* a non-zero drift — that fixture-shape question is isolated as a separate behavioral guard test, never conflated with the metric's correctness. This separation prevents the metric from drifting into the same ambiguity class that bit `n_would_change_rank` in Phase 5d.
+16. **Allocation metrics are part of the CORE BACKTEST CONTRACT, not diagnostics.** Because lock #14 guarantees `effective_allocation` and `rank_drift_from_signal` are always populated, downstream consumers MAY assume their presence unconditionally:
+    - Phase 6's optimizer (or any future allocation-tier consumer) may read these fields without a `hasattr` check, a feature-flag check, or a None-fallback.
+    - The `StrategyContribution` dataclass schema treats these fields as load-bearing, on the same tier as `contribution_pnl` and `avg_exposure`.
+    - Any future spec that proposes gating, removing, or conditionally populating these fields constitutes a backward-incompatible contract change requiring a fresh design doc.
+    - Equivalent restatement: there is no "diagnostics mode" for Phase 5e. The metrics are not opt-in observability for engineers; they are state the system carries because the system needs them to evolve.
+17. **`OBSERVABILITY_MODE` version anchor (no runtime branching).** Mirroring the `POOL_CORR_MODE` pattern from lock #7, `contribution.py` (or a new `marketpulse/backtest/observability.py` if cleaner — implementer choice) exports a module-level `Literal` constant:
+    ```python
+    OBSERVABILITY_MODE: Literal["v1"] = "v1"
+    ```
+    Referenced once near the metric computation site as a provenance comment (e.g., `# Provenance: OBSERVABILITY_MODE == "v1" — spec § 2 lock #17`). The constant exists ONLY as a version anchor for future metric-schema evolution; NOTHING branches on it at runtime. A future v2 would bump the constant and add new fields to `StrategyContribution` without removing v1 fields (additive evolution). v0 / null state is not legal — there is no "before observability."
 
 ---
 
@@ -69,12 +79,12 @@ Thread C (Sizing override feature)
   ├── C14: Orchestrator threads override map
   └── C15: bid history tooltip when strategy has overrides
 
-Thread D (Allocation observability — default-on, invariant-grade)
-  ├── D16: effective_allocation field on StrategyContribution
-  ├── D17: rank_drift_from_signal field on StrategyContribution
+Thread D (Allocation observability — default-on, invariant-grade, core contract)
+  ├── D16: effective_allocation + rank_drift_from_signal fields on StrategyContribution
+  ├── D17: OBSERVABILITY_MODE = "v1" constant (lock #17)
   ├── D18: Finalization populates both fields from bid_history + avg_bid_weight
   ├── D19: Strategy table UI — 2 new columns (eff. alloc, rank Δ vs signal)
-  └── D20: 3 metric tests (2 invariant + 1 fixture-shape behavioral guard)
+  └── D20: 4 metric tests (3 invariant + 1 fixture-shape behavioral guard)
 
 Final
   └── 21: Full suite + ruff + module-import smoke + route smoke
@@ -468,7 +478,36 @@ Cells:
 
 **No new BidRecord fields.** Both metrics are per-strategy aggregates only.
 
-**No backward-compat issue.** Default values (`0.0`, `0`) mean a pre-Phase-5e `StrategyContribution` constructed without these fields would land in the "no drift" state — semantically correct for legacy reconstruction, though no production code constructs `StrategyContribution` outside the simulator anyway.
+**No backward-compat issue.** Default values (`0.0`, `0`) mean a pre-Phase-5e `StrategyContribution` constructed without these fields would land in the "no drift" state — semantically correct for legacy reconstruction, though no production code constructs `StrategyContribution` outside the simulator anyway. Note that per spec § 2 lock #16, the simulator MUST populate these fields on every run; defaults exist only for fixture / test construction.
+
+**`OBSERVABILITY_MODE` constant** (spec § 2 lock #17):
+
+```python
+# marketpulse/backtest/contribution.py (or marketpulse/backtest/observability.py)
+from typing import Literal
+
+OBSERVABILITY_MODE: Literal["v1"] = "v1"
+"""Version anchor for the allocation-observability schema.
+
+v1 = effective_allocation + rank_drift_from_signal on StrategyContribution.
+
+Future v2 would add additive fields (e.g., per-day allocation history,
+constraint-binding indicators) without removing v1 fields. There is no
+v0 or null state; the metrics are part of the core backtest contract
+from Phase 5e onward. Lock #16 + #17.
+"""
+```
+
+Referenced once in `portfolio_simulator.py`'s finalization block as a provenance comment alongside the metric computation:
+
+```python
+# Provenance: OBSERVABILITY_MODE == "v1" — spec § 2 lock #17.
+# These metrics are core contract, not diagnostics (lock #16).
+effective_allocation_by_strategy = {...}
+rank_drift_by_strategy = {...}
+```
+
+**Downstream contract guarantee (lock #16):** Phase 6's optimizer and any future allocation-tier consumer may read `StrategyContribution.effective_allocation` and `.rank_drift_from_signal` unconditionally — no `hasattr` checks, no feature-flag checks, no None-fallbacks. The simulator's invariant test in `test_phase5e_effective_allocation_sums_to_one_or_zero` (D20.1) enforces this contract on every commit.
 
 ---
 
@@ -653,7 +692,7 @@ All Thread C tests are **invariant** unless explicitly marked otherwise. They as
 
 1. After backtest with one strategy having overrides, assert `strategies_with_sizing_overrides` set is in the template context AND the bid history HTML contains the tooltip text for at least one row.
 
-### 6.4 Thread D (Allocation observability) — 3 new tests
+### 6.4 Thread D (Allocation observability) — 5 new tests
 
 All metric-correctness tests are **invariant** (deterministic functions of bid_history — see lock #15). The fixture-shape guard is **behavioral**.
 
@@ -717,6 +756,56 @@ def test_phase5e_warm_pool_produces_at_least_one_nonzero_drift(phase5d_warm_pool
 
 **Why this split is load-bearing:** the invariant tests (D20.1, D20.2) catch any regression in the metric implementation — wrong formula, wrong rank ordering, off-by-one in the sum. The behavioral guard (D20.3) catches fixture drift. If a future change makes the fixture too tame, only D20.3 fails — D20.1 and D20.2 still validate the production code on whatever data the fixture produces, including degenerate cases. This is exactly the property that Phase 5d's `n_would_change_rank` tests lacked.
 
+**Constant anchor (D17):**
+
+```python
+def test_phase5e_observability_mode_v1():
+    """# Layer: invariant
+    Anchors the OBSERVABILITY_MODE constant. Lock #17 forbids null/v0
+    states; this test ensures any future schema-bump (v2) is a conscious
+    edit that updates this assertion, not an accidental rename.
+    """
+    from marketpulse.backtest.contribution import OBSERVABILITY_MODE
+    assert OBSERVABILITY_MODE == "v1"
+```
+
+**Lock #16 contract test (D20.4):**
+
+```python
+def test_phase5e_observability_fields_present_on_every_strategy_contribution(
+    phase5d_warm_pool,
+):
+    """# Layer: invariant
+    Lock #16 contract: effective_allocation and rank_drift_from_signal
+    MUST be present on every StrategyContribution returned by the
+    simulator. Downstream consumers (Phase 6 optimizer) rely on this.
+
+    This test fails if any code path returns a StrategyContribution
+    without the Phase 5e fields populated (would manifest as a default
+    0.0 / 0 leak from the dataclass default, which is acceptable
+    semantically but would indicate the simulator path didn't compute
+    the metric — a contract violation).
+
+    Verified by: every per_strategy_stats entry has BOTH fields, AND
+    at least one has effective_allocation > 0 (proving the simulator
+    actually computed them rather than just returning defaults).
+    """
+    r = phase5d_warm_pool["shared"]
+    assert len(r.per_strategy_stats) > 0
+    for s, c in r.per_strategy_stats.items():
+        # Fields are present (hasattr would catch removal)
+        assert hasattr(c, "effective_allocation")
+        assert hasattr(c, "rank_drift_from_signal")
+        # Types are correct
+        assert isinstance(c.effective_allocation, float)
+        assert isinstance(c.rank_drift_from_signal, int)
+        # Range is sane
+        assert 0.0 <= c.effective_allocation <= 1.0
+    # Simulator actually computed something (not just defaults)
+    total = sum(c.effective_allocation for c in r.per_strategy_stats.values())
+    assert total > 0.0, "Simulator returned default zeros — contract violated"
+```
+
 **Final integration (16):**
 
 Full suite green; ~935 tests total (915 + 20 new).
@@ -763,8 +852,10 @@ Full suite green; ~935 tests total (915 + 20 new).
 | 23 | Σ `effective_allocation` == 1.0 (when capital allocated) or 0.0 (when none)       | D20  | invariant   |
 | 24 | Σ `rank_drift_from_signal` == 0 (permutation identity)                            | D20  | invariant   |
 | 25 | Warm-pool fixture produces ≥1 strategy with non-zero `rank_drift_from_signal`     | D20  | behavioral  |
+| 26 | `OBSERVABILITY_MODE == "v1"` constant anchored                                     | D17  | invariant   |
+| 27 | Lock #16 contract — `effective_allocation` field present on EVERY `StrategyContribution` returned from simulator (no `getattr` / None fallback ever needed) | D20  | invariant |
 
-**Counts:** 24 invariant tests + 3 behavioral tests (fixture-shape guards) = 27 new tests. Invariant tests dominate (~89%) because Phase 5e's core deliverables are structural contracts and deterministic telemetry, not new dynamics.
+**Counts:** 25 invariant tests + 3 behavioral tests (fixture-shape guards) = 28 new tests. Invariant tests dominate (~89%) because Phase 5e's core deliverables are structural contracts and deterministic telemetry, not new dynamics.
 
 ---
 
