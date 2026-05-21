@@ -21,3 +21,13 @@ def test_pool_corr_mode_anchored_at_loo_only_v0() -> None:
     """
     from marketpulse.backtest.policy import POOL_CORR_MODE
     assert POOL_CORR_MODE == "LOO_ONLY_v0"
+
+
+def test_observability_mode_anchored_at_v1() -> None:
+    """# Layer: invariant
+    Spec § 2 lock #17. Anchors the OBSERVABILITY_MODE constant at "v1".
+    Future schema bumps (v2 adds more fields to StrategyContribution)
+    require conscious update of this test.
+    """
+    from marketpulse.backtest.policy import OBSERVABILITY_MODE
+    assert OBSERVABILITY_MODE == "v1"

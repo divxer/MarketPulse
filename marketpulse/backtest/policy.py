@@ -35,3 +35,18 @@ This separation prevents the smell where a constant accumulates implicit
 semantic meaning across phases without ever being exercised. v0 stays
 pure; v2 adds dispatch as new code.
 """
+
+OBSERVABILITY_MODE: Literal["v1"] = "v1"
+"""Version anchor for the allocation-observability schema.
+
+Spec § 2 lock #17 + #21. v1 = effective_allocation + rank_drift_from_signal
+on StrategyContribution.
+
+Documentary-only in v0: referenced as a provenance comment near the
+metric computation site, never branched on at runtime. Future v2 would
+ADD fields to StrategyContribution (additive evolution) and bump this
+constant; v1 fields stay.
+
+There is no v0 or null state — the metrics are part of the core
+backtest contract from Phase 5e onward (lock #16).
+"""
