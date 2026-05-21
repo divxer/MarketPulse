@@ -97,12 +97,16 @@ def phase5d_warm_pool():
 
     Produces a backtest result with:
       - >=1 bid carrying non-None pool_corr (warm-up complete)
-      - >=1 strategy showing non-zero rank_drift_from_signal (rank flip path executed)
+      - >=1 BidRecord with would_change_rank=True (rank flip path exercised)
 
-    Construction: 2 strategies with anti-correlated daily curves, bids on
-    every other day over a 60-day window starting from day 30 (so by the time
-    a bid is evaluated, the strategy has >=30 days of contribution-return
-    history -> pool_corr_excluding_self returns non-None).
+    Construction: 3 strategies with distinct-shape daily curves (different
+    sinusoid phases/amplitudes) and non-uniform bid forward returns per
+    strategy. Bids fire every other day over a 60-day window starting day
+    30, so by evaluation each strategy has >=30 days of contribution
+    history → pool_corr_excluding_self returns non-None. Three strategies
+    (not two) are required because pairwise LOO correlations between two
+    symmetric strategies are degenerate (identical multipliers, never flip
+    rank). contribution_lambda=2.0 amplifies the multiplier spread.
 
     Returns the dict from simulate_shared_pool. The 'shared' key holds
     the PortfolioBacktestResult.
@@ -136,26 +140,48 @@ def phase5d_warm_pool():
 
     base_date = date(2026, 1, 1)
     days = 120
-    # Strategy A: monotone growth
+    # 3 strategies with DIFFERENT-SHAPED daily curves so leave-one-out
+    # contribution correlations diverge per strategy.
+    # With 2 symmetric strategies the LOO correlations are pairwise
+    # symmetric → identical multipliers → no rank flips. Three curves
+    # with distinct noise patterns + non-uniform bid outcomes per
+    # strategy produce per-strategy pool_corrs that differ enough to
+    # flip the integer rank.
+    import math as _math
     a_curve = [
-        (base_date + timedelta(days=i), 10_000.0 * (1.005 ** i))
+        (base_date + timedelta(days=i),
+         10_000.0 * (1.0 + 0.003 * i) * (1.0 + 0.03 * _math.sin(i * 0.5)))
         for i in range(days)
     ]
-    # Strategy B: anti-correlated zigzag riding the same growth trajectory
     b_curve = [
         (base_date + timedelta(days=i),
-         10_000.0 * (1.005 ** i) * (1.0 - 0.005 * (i % 2)))
+         10_000.0 * (1.0 + 0.002 * i) * (1.0 + 0.04 * _math.cos(i * 0.7)))
+        for i in range(days)
+    ]
+    c_curve = [
+        (base_date + timedelta(days=i),
+         10_000.0 * (1.0 + 0.0025 * i) * (1.0 - 0.05 * _math.sin(i * 0.3 + 1.0)))
         for i in range(days)
     ]
 
+    # Non-uniform bid forward returns per strategy so daily PnL series
+    # have different shapes (necessary for LOO corr to differ per strategy).
+    # Pattern oscillates between profit and loss to add variance.
     bids = []
     for i in range(0, 60, 2):
         bid_date = base_date + timedelta(days=30 + i)
         horizon_date = bid_date + timedelta(days=5)
-        bids.append(_pair(f"AA{i:02d}", "wp_a", bid_date, 100.0, horizon_date, 105.0))
-        bids.append(_pair(f"BB{i:02d}", "wp_b", bid_date, 100.0, horizon_date, 105.0))
+        # wp_a: alternating big-win / small-win
+        a_price = 108.0 if (i // 2) % 2 == 0 else 102.0
+        # wp_b: alternating small-win / big-loss
+        b_price = 103.0 if (i // 2) % 3 == 0 else 96.0
+        # wp_c: alternating loss / win on a different period
+        c_price = 97.0 if (i // 2) % 2 == 1 else 107.0
+        bids.append(_pair(f"AA{i:02d}", "wp_a", bid_date, 100.0, horizon_date, a_price))
+        bids.append(_pair(f"BB{i:02d}", "wp_b", bid_date, 100.0, horizon_date, b_price))
+        bids.append(_pair(f"CC{i:02d}", "wp_c", bid_date, 100.0, horizon_date, c_price))
 
-    daily_curves = {"wp_a": a_curve, "wp_b": b_curve}
+    daily_curves = {"wp_a": a_curve, "wp_b": b_curve, "wp_c": c_curve}
 
     shared = simulate_shared_pool(
         bids=bids, daily_curves=daily_curves,
@@ -164,6 +190,6 @@ def phase5d_warm_pool():
         sizing_enabled=False,
         sector_caps_enabled=False, correlation_caps_enabled=False,
         contribution_enabled=True,
-        contribution_lambda=1.0,
+        contribution_lambda=2.0,
     )
     return {"shared": shared}
