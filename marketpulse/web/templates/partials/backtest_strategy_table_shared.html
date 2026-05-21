@@ -18,6 +18,8 @@
           <th class="num">avg bid w</th>
           <th class="num">avg pool ρ</th>
           <th class="num">rank Δ</th>
+          <th class="num">eff. alloc</th>
+          <th class="num" title="bid rank − capital rank: + means under-allocated vs signal">rank Δ vs signal</th>
           <th class="num">avg size</th>
         </tr>
       </thead>
@@ -54,6 +56,11 @@
             <td class="num mono tnum"
                 title="bids 因 adjusted 改变排名的次数">
               {% if c.n_would_change_rank > 0 %}{{ c.n_would_change_rank }}{% else %}—{% endif %}
+            </td>
+            <td class="num mono tnum">{{ "{:.1%}".format(c.effective_allocation) }}</td>
+            <td class="num mono tnum"
+                title="bid rank vs capital rank: + means signal said higher rank than execution delivered (caps fired); − means lower-ranked strategies were blocked, leaving capital for this one">
+              {% if c.rank_drift_from_signal == 0 %}—{% else %}{{ "{:+d}".format(c.rank_drift_from_signal) }}{% endif %}
             </td>
             <td class="num mono tnum">
               {% if c.n_trades == 0 and c.n_size_too_small_skipped > 0 %}
