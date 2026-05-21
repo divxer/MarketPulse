@@ -200,13 +200,12 @@ def test_update_paper_order_status_illegal_raises(session):
             order_id=order.id, new_status="ENTRY_FILLED",
             filled_at=datetime(2026, 5, 21, 17, 31, tzinfo=UTC),
         )
-    with pytest.raises(InvariantError):
-        with repo.transaction():
-            repo.update_paper_order_status(
-                order_id=order.id, new_status="CANCELLED",
-                cancelled_at=datetime(2026, 5, 21, 17, 32, tzinfo=UTC),
-                cancel_reason="oops",
-            )
+    with pytest.raises(InvariantError), repo.transaction():
+        repo.update_paper_order_status(
+            order_id=order.id, new_status="CANCELLED",
+            cancelled_at=datetime(2026, 5, 21, 17, 32, tzinfo=UTC),
+            cancel_reason="oops",
+        )
 
 
 def test_insert_position_then_fill_then_update_entry_fill(session):
