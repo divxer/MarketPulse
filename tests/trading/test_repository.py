@@ -207,3 +207,95 @@ def test_update_paper_order_status_illegal_raises(session):
                 cancelled_at=datetime(2026, 5, 21, 17, 32, tzinfo=UTC),
                 cancel_reason="oops",
             )
+
+
+def test_insert_position_then_fill_then_update_entry_fill(session):
+    """Tests the ENTRY-flow ordering from spec § 4.6."""
+    from marketpulse.trading.repository import Repository
+
+    repo = Repository(session=session)
+    with repo.transaction():
+        order = repo.insert_paper_order(
+            order_request=_sample_order_request(),
+            idempotency_key="abc",
+            placed_at=datetime(2026, 5, 21, 17, 30, tzinfo=UTC),
+        )
+        # 1. Insert position with entry_fill_id=NULL
+        position = repo.insert_paper_position(
+            order_id=order.id, strategy="s", ticker="AAPL",
+            quantity=10, entry_price=Decimal("150"),
+            entry_date=date(2026, 5, 21), horizon_date=date(2026, 5, 28),
+            opened_at=datetime(2026, 5, 21, 17, 31, tzinfo=UTC),
+        )
+        assert position.status == "OPEN"
+        assert position.entry_fill_id is None
+
+        # 2. Insert ENTRY fill referencing position
+        fill = repo.insert_paper_fill(
+            order_id=order.id, position_id=position.id,
+            side="ENTRY", price=Decimal("150"), quantity=10,
+            filled_at=datetime(2026, 5, 21, 17, 31, tzinfo=UTC),
+            cash_delta=Decimal("-1500"), realized_pnl=None,
+        )
+
+        # 3. UPDATE position.entry_fill_id
+        repo.update_paper_position_entry_fill(
+            position_id=position.id, entry_fill_id=fill.id,
+        )
+
+    refreshed = session.get(type(position), position.id)
+    assert refreshed.entry_fill_id == fill.id
+
+
+def test_cash_ledger_computes_balance_inside_transaction(session):
+    """6a round-3 fix: repository computes balance_after; engine passes
+    only delta."""
+    from marketpulse.db.models import PaperCashLedger
+    from marketpulse.trading.repository import Repository
+
+    repo = Repository(session=session)
+    # Seed initial deposit
+    with repo.transaction():
+        repo.insert_cash_ledger_entry_for_fill(
+            timestamp=datetime(2026, 5, 21, 0, 0, tzinfo=UTC),
+            delta=Decimal("10000"),
+            reason="INITIAL_DEPOSIT",
+            fill_id=None,
+        )
+
+    # Add an entry fill cash outflow
+    with repo.transaction():
+        repo.insert_cash_ledger_entry_for_fill(
+            timestamp=datetime(2026, 5, 21, 17, 31, tzinfo=UTC),
+            delta=Decimal("-1500"),
+            reason="ENTRY_FILL",
+            fill_id=None,  # FK relaxed for unit test
+        )
+
+    rows = session.execute(
+        select(PaperCashLedger).order_by(PaperCashLedger.id),
+    ).scalars().all()
+    assert rows[0].balance_after == Decimal("10000")
+    assert rows[1].balance_after == Decimal("8500")
+    assert repo.cash_balance() == Decimal("8500")
+
+
+def test_ensure_initial_deposit_strictly_idempotent(session):
+    """3 consecutive calls produce exactly 1 INITIAL_DEPOSIT row.
+    Locks the at-most-once contract; on SQLite the write-lock
+    serializes the count→insert sequence safely."""
+    from marketpulse.db.models import PaperCashLedger
+    from marketpulse.trading.repository import Repository
+
+    repo = Repository(session=session)
+    ts = datetime(2026, 5, 21, tzinfo=UTC)
+    for _ in range(3):
+        repo.ensure_initial_deposit(amount=Decimal("10000"), timestamp=ts)
+    rows = session.execute(
+        select(PaperCashLedger).where(
+            PaperCashLedger.reason == "INITIAL_DEPOSIT",
+        ),
+    ).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].delta == Decimal("10000")
+    assert rows[0].balance_after == Decimal("10000")

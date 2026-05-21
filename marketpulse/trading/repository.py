@@ -11,9 +11,10 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Literal
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
 from marketpulse.db.models import (
@@ -323,3 +324,192 @@ class Repository:
             order.cancel_reason = cancel_reason
         self._session.flush()
         return order
+
+    # === paper_position / paper_fill / paper_cash_ledger writers ===
+
+    def insert_paper_position(
+        self,
+        *,
+        order_id: int,
+        strategy: str,
+        ticker: str,
+        quantity: int,
+        entry_price: Decimal,
+        entry_date: date,
+        horizon_date: date,
+        opened_at: datetime,
+    ) -> PaperPosition:
+        row = PaperPosition(
+            order_id=order_id,
+            entry_fill_id=None,
+            exit_fill_id=None,
+            strategy=strategy,
+            ticker=ticker,
+            quantity=quantity,
+            entry_price=entry_price,
+            entry_date=entry_date,
+            horizon_date=horizon_date,
+            status="OPEN",
+            opened_at=opened_at,
+        )
+        self._session.add(row)
+        self._session.flush()
+        return row
+
+    def update_paper_position_entry_fill(
+        self, *, position_id: int, entry_fill_id: int,
+    ) -> None:
+        pos = self._session.get(PaperPosition, position_id)
+        if pos is None:
+            raise InvariantError(f"unknown position_id={position_id}")
+        pos.entry_fill_id = entry_fill_id
+        self._session.flush()
+
+    def update_paper_position_exit(
+        self,
+        *,
+        position_id: int,
+        exit_fill_id: int,
+        exit_price: Decimal,
+        realized_pnl: Decimal,
+        closed_at: datetime,
+    ) -> None:
+        pos = self._session.get(PaperPosition, position_id)
+        if pos is None:
+            raise InvariantError(f"unknown position_id={position_id}")
+        if (pos.status, "CLOSED") not in _ALLOWED_POSITION_TRANSITIONS:
+            raise InvariantError(
+                f"illegal position transition {pos.status!r} → CLOSED"
+            )
+        pos.exit_fill_id = exit_fill_id
+        pos.exit_price = exit_price
+        pos.realized_pnl = realized_pnl
+        pos.closed_at = closed_at
+        pos.status = "CLOSED"
+        self._session.flush()
+
+    def insert_paper_fill(
+        self,
+        *,
+        order_id: int,
+        position_id: int,
+        side: str,
+        price: Decimal,
+        quantity: int,
+        filled_at: datetime,
+        cash_delta: Decimal,
+        realized_pnl: Decimal | None,
+    ) -> PaperFill:
+        row = PaperFill(
+            order_id=order_id,
+            position_id=position_id,
+            side=side,
+            price=price,
+            quantity=quantity,
+            filled_at=filled_at,
+            cash_delta=cash_delta,
+            realized_pnl=realized_pnl,
+        )
+        self._session.add(row)
+        self._session.flush()
+        return row
+
+    def insert_cash_ledger_entry_for_fill(
+        self,
+        *,
+        timestamp: datetime,
+        delta: Decimal,
+        reason: str,
+        fill_id: int | None,
+    ) -> PaperCashLedger:
+        """Repository computes balance_after inside the transaction (round-3
+        lock). Engine never juggles balance arithmetic."""
+        latest = self._session.execute(
+            select(PaperCashLedger).order_by(desc(PaperCashLedger.id))
+        ).scalars().first()
+        prior_balance = (
+            latest.balance_after if latest is not None else Decimal("0")
+        )
+        new_balance = prior_balance + delta
+        row = PaperCashLedger(
+            timestamp=timestamp,
+            delta=delta,
+            reason=reason,
+            fill_id=fill_id,
+            balance_after=new_balance,
+        )
+        self._session.add(row)
+        self._session.flush()
+        return row
+
+    def cash_balance(self) -> Decimal:
+        """Lock xxi: latest balance_after by monotonic id."""
+        latest = self._session.execute(
+            select(PaperCashLedger).order_by(desc(PaperCashLedger.id))
+        ).scalars().first()
+        return latest.balance_after if latest is not None else Decimal("0")
+
+    def ensure_initial_deposit(
+        self, *, amount: Decimal, timestamp: datetime,
+    ) -> None:
+        """Idempotent. Called at app startup. Uses self.transaction() — no
+        naked commit (round-3 fix)."""
+        with self.transaction():
+            count = self._session.execute(
+                select(func.count(PaperCashLedger.id))
+            ).scalar()
+            if count == 0:
+                self._session.add(PaperCashLedger(
+                    timestamp=timestamp,
+                    delta=amount,
+                    reason="INITIAL_DEPOSIT",
+                    fill_id=None,
+                    balance_after=amount,
+                ))
+
+    # === Engine-facing queries ===
+
+    def find_orders_for_entry(self, *, as_of: date) -> list[PaperOrder]:
+        """tick() Phase A query: PLACED orders with allocation_date <= as_of."""
+        return list(self._session.execute(
+            select(PaperOrder)
+            .where(PaperOrder.status == "PLACED")
+            .where(PaperOrder.allocation_date <= as_of)
+            .order_by(PaperOrder.id)
+        ).scalars().all())
+
+    def find_positions_for_exit(self, *, as_of: date) -> list[PaperPosition]:
+        """tick() Phase B query: OPEN positions with horizon_date <= as_of."""
+        return list(self._session.execute(
+            select(PaperPosition)
+            .where(PaperPosition.status == "OPEN")
+            .where(PaperPosition.horizon_date <= as_of)
+            .order_by(PaperPosition.id)
+        ).scalars().all())
+
+    def open_positions_snapshot(self) -> list[PaperPosition]:
+        return list(self._session.execute(
+            select(PaperPosition).where(PaperPosition.status == "OPEN")
+            .order_by(PaperPosition.id)
+        ).scalars().all())
+
+    def count_positions_status(self, status: str) -> int:
+        return self._session.execute(
+            select(func.count(PaperPosition.id))
+            .where(PaperPosition.status == status)
+        ).scalar() or 0
+
+    # === Kill switch DB-state read (6a-2.4 rule #3) ===
+
+    def latest_kill_switch_state(self) -> bool:
+        """Returns True iff the latest KILL_SWITCH_FLIPPED audit row's
+        context.active is True. Returns False if never flipped."""
+        row = self._session.execute(
+            select(PaperAuditEvent).where(
+                PaperAuditEvent.event_type
+                == AuditEventType.KILL_SWITCH_FLIPPED.value,
+            ).order_by(desc(PaperAuditEvent.id))
+        ).scalars().first()
+        if row is None:
+            return False
+        return bool(row.context.get("active", False))
