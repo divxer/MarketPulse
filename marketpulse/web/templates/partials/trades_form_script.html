@@ -3,6 +3,12 @@
     // Trade kinds POST to /trades; split → /splits; dividend → /dividends.
     function onEventKindChange(kind) {
       const form = document.getElementById('event-form');
+      const seg = document.getElementById('event-kind-seg');
+      seg.querySelectorAll('button').forEach(btn => {
+        const m = (btn.getAttribute('onclick') || '').match(/'([^']+)'/);
+        btn.classList.toggle('is-active', m && m[1] === kind);
+      });
+      document.getElementById('event-kind').value = kind;
       const tradeFields = form.querySelectorAll('.trade-field');
       const splitFields = form.querySelectorAll('.split-field');
       const dividendFields = form.querySelectorAll('.dividend-field');
