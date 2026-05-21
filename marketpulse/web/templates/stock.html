@@ -241,6 +241,8 @@
                      class="border rounded px-2 py-1 w-24 text-sm" />
               <input name="price" type="number" step="any" min="0" placeholder="价格 $" required
                      value="{{ "%.2f"|format(quote.price) }}" class="border rounded px-2 py-1 w-24 text-sm" />
+              <input name="fees" type="number" step="any" min="0" placeholder="手续费 $" value="0"
+                     class="border rounded px-2 py-1 w-24 text-sm" />
               <input name="executed_at" type="date" class="border rounded px-2 py-1 text-sm" />
               <button class="mp-btn mp-btn--navy">提交</button>
             </div>
