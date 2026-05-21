@@ -27,6 +27,7 @@ from marketpulse.backtest.contribution import (
 )
 from marketpulse.backtest.correlation import find_correlation_neighbors
 from marketpulse.backtest.metrics import compute_metrics
+from marketpulse.backtest.policy import MIN_OVERLAP_DAYS
 from marketpulse.backtest.sharpe import compute_bid_weights, compute_position_sizes
 from marketpulse.backtest.trading_calendar import (
     build_calendar,
@@ -298,7 +299,7 @@ def simulate_shared_pool(
                     daily_pool_returns,
                     as_of=d,
                     lookback_days=lookback_days,
-                    min_overlap=30,
+                    min_overlap=MIN_OVERLAP_DAYS,
                 )
                 adjusted, multiplier, rewarded = compute_adjusted_bid_weight(
                     raw_sharpe=raw,
