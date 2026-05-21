@@ -161,6 +161,7 @@ def simulate_shared_pool(
             risk_policy=risk_policy,
             contribution_enabled=contribution_enabled,
             contribution_policy=contribution_policy,
+            contribution_lambda=contribution_lambda,
         )
 
     db_dates: set[date] = set()
@@ -716,6 +717,22 @@ def simulate_shared_pool(
                 rec.position_size
             )
 
+    # Phase 5d: count would_change_rank per BID from all_bid_records
+    n_would_change_rank_by_strategy: dict[str, int] = {}
+    for b in all_bid_records:
+        if b.would_change_rank:
+            n_would_change_rank_by_strategy[b.strategy] = (
+                n_would_change_rank_by_strategy.get(b.strategy, 0) + 1
+            )
+
+    # Phase 5d: avg_pool_corr per strategy (time-avg over non-None values)
+    avg_pool_corr_by_strategy: dict[str, float | None] = {}
+    for s, corr_list in pool_corr_by_strategy.items():
+        defined = [c for c in corr_list if c is not None]
+        avg_pool_corr_by_strategy[s] = (
+            sum(defined) / len(defined) if defined else None
+        )
+
     per_strategy_stats: dict[str, StrategyContribution] = {}
     for s in sorted(daily_curves.keys()):
         # Phase 5b: realized PnL uses per-trade actual position size (variable),
@@ -748,6 +765,8 @@ def simulate_shared_pool(
             avg_position_size=avg_position_size,
             n_bids=n_bids_by_strategy.get(s, 0),
             n_floor_hits=n_floor_hits_by_strategy.get(s, 0),
+            avg_pool_corr=avg_pool_corr_by_strategy.get(s),
+            n_would_change_rank=n_would_change_rank_by_strategy.get(s, 0),
         )
 
     # Phase 5b Task 7: portfolio-level concentration telemetry.
@@ -830,4 +849,5 @@ def simulate_shared_pool(
         risk_policy=risk_policy,
         contribution_enabled=contribution_enabled,
         contribution_policy=contribution_policy,
+        contribution_lambda=contribution_lambda,
     )

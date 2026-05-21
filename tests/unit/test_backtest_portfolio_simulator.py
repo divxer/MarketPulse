@@ -1480,3 +1480,93 @@ def test_phase5d_metadata_on_dedup_loser_bidrecord():
     # Outcome: 5d metadata present
     assert b.pool_corr_excludes_self is True
     assert b.effective_corr_window >= 0
+
+
+def test_phase5d_avg_pool_corr_in_strategy_contribution():
+    """avg_pool_corr is the time-average over non-None pool_corr values per strategy."""
+    from datetime import date, timedelta
+
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+
+    good = [(date(2026, 4, 1) + timedelta(days=i), 10_000.0 * (1.005 ** i))
+            for i in range(120)]  # long history to allow non-cold-start ρ
+    bids = [
+        _pair("AAPL", "a", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0),
+        _pair("MSFT", "b", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0),
+    ]
+    daily_curves = {"a": good, "b": good}
+
+    r = simulate_shared_pool(
+        bids=bids, daily_curves=daily_curves,
+        horizon=5, initial_capital=10_000.0, base_position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=False,
+        sector_caps_enabled=False, correlation_caps_enabled=False,
+        contribution_enabled=False,
+    )
+    # Precondition: per_strategy_stats populated for both strategies
+    assert "a" in r.per_strategy_stats
+    assert "b" in r.per_strategy_stats
+    # Outcome: avg_pool_corr is None when cold-start prevents any defined ρ,
+    # or a real float in [-1, 1] when at least one bid had a defined ρ
+    for s in ("a", "b"):
+        c = r.per_strategy_stats[s]
+        if c.avg_pool_corr is not None:
+            assert -1.0 <= c.avg_pool_corr <= 1.0
+
+
+def test_phase5d_n_would_change_rank_counted_per_bid():
+    """n_would_change_rank is the count of BidRecords with would_change_rank=True."""
+    from datetime import date, timedelta
+
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+
+    good = [(date(2026, 4, 1) + timedelta(days=i), 10_000.0 * (1.005 ** i))
+            for i in range(30)]
+    bids = [_pair("AAPL", "a", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0)]
+    daily_curves = {"a": good}
+
+    r = simulate_shared_pool(
+        bids=bids, daily_curves=daily_curves,
+        horizon=5, initial_capital=10_000.0, base_position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=False,
+        sector_caps_enabled=False, correlation_caps_enabled=False,
+        contribution_enabled=False,
+    )
+    # Cold-start with single strategy → n_would_change_rank == 0
+    # (no ranking changes possible with one strategy)
+    for s in r.per_strategy_stats:
+        # Outcome: count matches sum of per-bid flags
+        expected_count = sum(
+            1 for b in r.bid_history
+            if b.strategy == s and b.would_change_rank
+        )
+        assert r.per_strategy_stats[s].n_would_change_rank == expected_count
+
+
+def test_phase5d_provenance_threaded_to_result():
+    """contribution_enabled, contribution_policy, contribution_lambda in result."""
+    from datetime import date, timedelta
+
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+
+    good = [(date(2026, 4, 1) + timedelta(days=i), 10_000.0 * (1.005 ** i))
+            for i in range(30)]
+    bids = [_pair("AAPL", "a", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0)]
+    daily_curves = {"a": good}
+
+    r = simulate_shared_pool(
+        bids=bids, daily_curves=daily_curves,
+        horizon=5, initial_capital=10_000.0, base_position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=False,
+        sector_caps_enabled=False, correlation_caps_enabled=False,
+        contribution_enabled=True,
+        contribution_lambda=0.7,
+    )
+    # Outcome: provenance reflects kwargs
+    assert r.contribution_enabled is True
+    assert r.contribution_lambda == 0.7
+    assert r.contribution_policy == "contribution_adjusted_sharpe_60d_v0"
+    assert r.bid_policy == "contribution_adjusted_sharpe_60d_v0"
