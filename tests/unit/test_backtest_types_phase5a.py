@@ -439,3 +439,115 @@ def test_portfolio_result_caps_disabled_provenance() -> None:
     assert r.sector_caps_enabled is False
     assert r.correlation_caps_enabled is False
     assert r.risk_policy == "caps_disabled_v0"
+
+
+# ─── Phase 5d extensions ───
+
+def test_bid_record_phase5d_fields_have_safe_defaults() -> None:
+    """Phase 5d adds 8 fields to BidRecord, all defaulted for backward-compat."""
+    from datetime import date
+
+    from marketpulse.backtest.types import BidRecord
+
+    # Construct with NO Phase 5d kwargs — all 8 fields should default to neutral
+    b = BidRecord(
+        date=date(2026, 5, 1), strategy="x", ticker="AAPL",
+        weight=1.5, outcome="won", winner=None, position_size=1000.0,
+    )
+    assert b.raw_bid_weight is None
+    assert b.pool_corr is None
+    assert b.contribution_multiplier == 1.0
+    assert b.adjusted_bid_weight is None
+    assert b.effective_corr_window == 0
+    assert b.pool_corr_excludes_self is True
+    assert b.rewarded_for_negative_corr is False
+    assert b.would_change_rank is False
+
+
+def test_bid_record_phase5d_fields_populated() -> None:
+    """Phase 5d fields accept real values without raising."""
+    from datetime import date
+
+    from marketpulse.backtest.types import BidRecord
+
+    b = BidRecord(
+        date=date(2026, 5, 1), strategy="x", ticker="AAPL",
+        weight=1.275, outcome="won", winner=None, position_size=1000.0,
+        raw_bid_weight=1.5,
+        pool_corr=0.3,
+        contribution_multiplier=0.85,
+        adjusted_bid_weight=1.275,
+        effective_corr_window=42,
+        pool_corr_excludes_self=True,
+        rewarded_for_negative_corr=False,
+        would_change_rank=True,
+    )
+    assert b.raw_bid_weight == 1.5
+    assert b.pool_corr == 0.3
+    assert b.contribution_multiplier == 0.85
+    assert b.adjusted_bid_weight == 1.275
+    assert b.effective_corr_window == 42
+    assert b.would_change_rank is True
+
+
+def test_strategy_contribution_phase5d_fields_have_safe_defaults() -> None:
+    """Phase 5d adds 2 fields to StrategyContribution, both defaulted."""
+    from marketpulse.backtest.types import StrategyContribution
+
+    c = StrategyContribution(
+        strategy="x", display_name="X",
+        n_trades=5, n_dedup_skipped=1,
+        n_capacity_skipped=0, n_cash_short_skipped=0,
+        n_size_too_small_skipped=0,
+        n_sector_cap_skipped=0, n_correlation_cap_skipped=0,
+        contribution_pnl=100.0, avg_exposure=0.20, avg_bid_weight=1.0,
+        avg_position_size=1200.0, n_bids=9, n_floor_hits=0,
+    )
+    # Defaults
+    assert c.avg_pool_corr is None
+    assert c.n_would_change_rank == 0
+
+
+def test_strategy_contribution_phase5d_fields_populated() -> None:
+    """Phase 5d StrategyContribution fields accept real values."""
+    from marketpulse.backtest.types import StrategyContribution
+
+    c = StrategyContribution(
+        strategy="x", display_name="X",
+        n_trades=5, n_dedup_skipped=1,
+        n_capacity_skipped=0, n_cash_short_skipped=0,
+        n_size_too_small_skipped=0,
+        n_sector_cap_skipped=0, n_correlation_cap_skipped=0,
+        contribution_pnl=100.0, avg_exposure=0.20, avg_bid_weight=1.0,
+        avg_position_size=1200.0, n_bids=9, n_floor_hits=0,
+        avg_pool_corr=0.42,
+        n_would_change_rank=7,
+    )
+    assert c.avg_pool_corr == 0.42
+    assert c.n_would_change_rank == 7
+
+
+def test_portfolio_result_phase5d_provenance_defaults() -> None:
+    """Phase 5d adds 3 PortfolioBacktestResult provenance fields, all defaulted."""
+    from datetime import date
+
+    from marketpulse.backtest.types import PortfolioBacktestResult
+
+    r = PortfolioBacktestResult(
+        horizon=5, n_trades=0, n_dedup_total=0,
+        avg_capital_utilization=0.0,
+        max_strategy_exposure=0.0, hhi_concentration=0.0,
+        max_sector_exposure=0.0, max_sector_exposure_by_sector={},
+        sector_breakdown={}, max_neighbor_exposure=0.0,
+        n_correlation_cap_events=0,
+        cumulative_return=0.0, annual_return=0.0,
+        sharpe=None, sortino=None, max_drawdown=0.0, calmar=None,
+        win_rate=0.0, avg_win_pct=0.0, avg_loss_pct=0.0,
+        daily_equity_curve=[(date(2026, 4, 1), 10_000.0)],
+        excess_vs_spy=0.0,
+        per_strategy_stats={}, bid_history=[],
+    )
+    # Default contribution provenance — disabled, lambda=0.5, policy string
+    assert r.contribution_enabled is False
+    assert r.contribution_policy == "contribution_adjusted_sharpe_60d_v0"
+    assert r.contribution_lambda == 0.5
