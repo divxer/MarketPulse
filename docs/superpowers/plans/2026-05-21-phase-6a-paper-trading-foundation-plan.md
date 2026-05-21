@@ -85,88 +85,127 @@ All sub-task commits land here. A single final PR merges to main at the end of 6
 
 **Lock 6a-L9:** `AllocationContext` carries every input the allocator needs as an explicit named field. No hidden `today` dependency.
 
-### Task 6a-0.1: Snapshot Phase 5 baseline outputs
+### Task 6a-0.1: Capture a frozen pre-extraction baseline fixture
+
+**Goal:** Save a JSON fixture of `simulate_shared_pool(**warm_pool)` *before any extraction*. Post-extraction (Task 6a-0.4) compares against it field-by-field. This is the actual regression guard — spot-checks are not sufficient for the riskiest change in 6a.
 
 **Files:**
 - Create: `tests/backtest/test_allocation_extraction.py`
+- Create: `tests/backtest/fixtures/phase5_warm_pool_baseline.json` (generated, committed)
 
-- [ ] **Step 1: Write a baseline-snapshot test (will pass before extraction)**
+- [ ] **Step 1: Write the baseline harness**
 
 ```python
 # tests/backtest/test_allocation_extraction.py
-"""6a-0 regression suite. Cross-validates that simulate_shared_pool
-produces identical PortfolioBacktestResult before and after the
-allocate_for_day extraction.
-
-Layer: behavioral — operates on real Phase 5 inputs.
-"""
 # Layer: behavioral
+"""6a-0 regression: simulate_shared_pool's PortfolioBacktestResult is
+behaviorally + public-field equal pre/post the allocate_for_day
+extraction.
+
+Per 6a-0 contract (spec § 2): behavioral + public-field equality, NOT
+byte-identical. Numeric outputs and all bid_history records compared
+field-by-field; intentionally versioned/provenance strings excluded.
+"""
 
 from __future__ import annotations
 
 import dataclasses
 import json
-from datetime import date
+import os
+from pathlib import Path
 
 import pytest
 
 from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
 
+BASELINE_PATH = Path(__file__).parent / "fixtures" / "phase5_warm_pool_baseline.json"
 
-def _dump_result_public_fields(result) -> dict:
-    """Serialize PortfolioBacktestResult to a comparable dict.
-    Excludes any intentionally versioned/provenance fields (6a-0 contract:
-    behavioral + public-field equality, NOT byte-identical)."""
-    d = dataclasses.asdict(result)
-    # bid_policy and contribution_policy are versioned strings; they MAY
-    # change if 6a-0 threads a new version marker. The actual numbers
-    # they produce must not.
-    d.pop("bid_policy", None)
-    d.pop("contribution_policy", None)
-    d.pop("risk_policy", None)
-    d.pop("sizing_policy", None)
-    return d
+# Versioned/provenance strings — excluded from the comparison.
+EXCLUDED_FIELDS = {"bid_policy", "contribution_policy", "risk_policy", "sizing_policy"}
+
+
+def _normalize(value):
+    """Convert dataclasses / dates / Decimal to JSON-friendly primitives
+    so the comparison is structural, not object-identity."""
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return _normalize(dataclasses.asdict(value))
+    if isinstance(value, dict):
+        return {k: _normalize(v) for k, v in value.items() if k not in EXCLUDED_FIELDS}
+    if isinstance(value, (list, tuple)):
+        return [_normalize(v) for v in value]
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    if value.__class__.__name__ == "Decimal":
+        return str(value)
+    return value
+
+
+def dump_result(result) -> dict:
+    return _normalize(result)
 
 
 @pytest.fixture
 def phase5_warm_pool_inputs(phase5d_warm_pool):
-    """Reuse the existing 5d warm-pool fixture. It already covers the
-    canonical Phase 5 happy path: shared pool + sizing + sector caps +
+    """Existing 5d warm-pool fixture in tests/conftest.py — canonical
+    Phase 5 happy path covering shared pool + sizing + sector caps +
     correlation caps + contribution decomposition."""
     return phase5d_warm_pool
 
 
-def test_warm_pool_result_snapshot(phase5_warm_pool_inputs):
-    """Captures the canonical Phase 5 result so the extraction can be
-    cross-validated. Stored as a pytest snapshot via dict equality."""
+def test_simulate_shared_pool_matches_frozen_baseline(phase5_warm_pool_inputs):
+    """Generate-or-compare regression guard.
+
+    If RUN_6A0_BASELINE=1 is set, this test WRITES the baseline JSON
+    (used once, pre-extraction). Otherwise it COMPARES the current run
+    to the committed baseline. The compare path is what catches an
+    extraction regression in 6a-0.4."""
     result = simulate_shared_pool(**phase5_warm_pool_inputs)
-    snapshot = _dump_result_public_fields(result)
+    current = dump_result(result)
 
-    # The snapshot is checked by later tests in this file.
-    # For this task we only assert the result exists and is structurally
-    # complete — actual field-equality assertions come in 6a-0.6 after
-    # extraction lands.
-    assert "bid_history" in snapshot
-    assert "per_strategy" in snapshot
-    assert "daily_equity_curve" in snapshot
-    assert isinstance(snapshot["bid_history"], list)
-    assert len(snapshot["bid_history"]) > 0, "warm pool fixture should produce bids"
+    if os.environ.get("RUN_6A0_BASELINE") == "1":
+        BASELINE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        BASELINE_PATH.write_text(json.dumps(current, indent=2, sort_keys=True))
+        pytest.skip(f"Baseline regenerated at {BASELINE_PATH}")
+
+    assert BASELINE_PATH.exists(), (
+        f"Baseline missing at {BASELINE_PATH}. "
+        f"Regenerate via: RUN_6A0_BASELINE=1 uv run pytest "
+        f"tests/backtest/test_allocation_extraction.py::"
+        f"test_simulate_shared_pool_matches_frozen_baseline"
+    )
+    expected = json.loads(BASELINE_PATH.read_text())
+    assert current == expected, (
+        "6a-0 regression: simulate_shared_pool output differs from the "
+        "committed baseline. The extraction (or some upstream change) "
+        "altered behavior. If the change is INTENTIONAL, regenerate via "
+        "RUN_6A0_BASELINE=1 and review the diff carefully."
+    )
 ```
 
-- [ ] **Step 2: Run baseline snapshot test**
+- [ ] **Step 2: Generate the baseline AGAINST UNMODIFIED Phase 5 code**
 
 ```bash
-uv run pytest tests/backtest/test_allocation_extraction.py::test_warm_pool_result_snapshot -v
+RUN_6A0_BASELINE=1 uv run pytest tests/backtest/test_allocation_extraction.py::test_simulate_shared_pool_matches_frozen_baseline -v
 ```
 
-Expected: PASS. This proves the warm-pool fixture is wired correctly and `simulate_shared_pool` runs to completion.
+Expected: SKIPPED with "Baseline regenerated at .../phase5_warm_pool_baseline.json". The fixture file now exists on disk.
 
-- [ ] **Step 3: Commit baseline harness**
+- [ ] **Step 3: Re-run WITHOUT the env var to confirm comparison passes**
 
 ```bash
-git add tests/backtest/test_allocation_extraction.py
-git commit -m "test(6a-0): add allocate_for_day extraction regression harness"
+uv run pytest tests/backtest/test_allocation_extraction.py::test_simulate_shared_pool_matches_frozen_baseline -v
 ```
+
+Expected: PASS. Same code, same output, identity comparison succeeds.
+
+- [ ] **Step 4: Commit baseline harness + fixture together**
+
+```bash
+git add tests/backtest/test_allocation_extraction.py tests/backtest/fixtures/phase5_warm_pool_baseline.json
+git commit -m "test(6a-0): frozen Phase 5 warm-pool baseline + comparison harness"
+```
+
+The baseline is now the actual regression guard. Task 6a-0.4 (extraction) must run this test (without `RUN_6A0_BASELINE`) and see PASS — that proves the extraction preserved behavior to the field level on real Phase 5 inputs.
 
 ### Task 6a-0.2: Create `marketpulse/backtest/allocation.py` with dataclasses
 
@@ -477,33 +516,31 @@ git commit -m "test(6a-0): pre-extraction marker test"
 ```python
 # Append to tests/backtest/test_allocation_extraction.py
 
-def test_warm_pool_result_unchanged_post_extraction(phase5_warm_pool_inputs):
-    """6a-0 contract: behavioral + public-field equality on Phase 5
-    fixtures pre/post extraction. Bid_history records, KPIs, sector
-    breakdown all equal field-by-field."""
+def test_post_extraction_uses_allocate_for_day(phase5_warm_pool_inputs):
+    """After extraction, simulate_shared_pool must produce the SAME
+    PortfolioBacktestResult as the committed baseline (lock 6a-L1
+    boundary check is in test_allocation_module_does_not_reference_
+    phase5_only_concerns)."""
     result = simulate_shared_pool(**phase5_warm_pool_inputs)
-    snapshot = _dump_result_public_fields(result)
-
-    # The expected snapshot is hand-captured from Step 1 baseline.
-    # Rather than store a literal blob (brittle), we re-run the
-    # current code and compare key invariants.
-    # Spot-checks that catch real drift:
-    assert len(snapshot["bid_history"]) >= 1
-    assert all(
-        "strategy" in b and "ticker" in b and "weight" in b
-        for b in snapshot["bid_history"]
+    current = dump_result(result)
+    expected = json.loads(BASELINE_PATH.read_text())
+    # This is the same assertion as
+    # test_simulate_shared_pool_matches_frozen_baseline; including it
+    # here makes the extraction-regression narrative clear in failure
+    # messages.
+    assert current == expected, (
+        "6a-0 extraction regression: post-extraction simulate_shared_pool "
+        "output differs from the pre-extraction baseline. Behavioral + "
+        "public-field equality contract violated."
     )
-    # Per-strategy keys preserved.
-    assert isinstance(snapshot["per_strategy"], list)
-    # Equity curve still increasing-or-flat number of points.
-    assert len(snapshot["daily_equity_curve"]) >= 1
 ```
 
-The actual byte-identical snapshot lives in fixtures (see `tests/conftest.py` for the warm-pool fixture). The cross-validation strategy is:
+The committed `phase5_warm_pool_baseline.json` is the cross-validation source of truth. The strategy:
 
-1. Capture `_dump_result_public_fields(...)` BEFORE extraction.
-2. Land extraction.
-3. Run the full Phase 5 test suite. Every assertion in the Phase 5 tests is the actual cross-check. If they all pass, behavioral + public-field equality holds.
+1. **Baseline captured** in 6a-0.1 against unmodified Phase 5 code.
+2. **Extraction lands** in 6a-0.4.
+3. **Same test re-runs** — `test_simulate_shared_pool_matches_frozen_baseline` must PASS without baseline regeneration. If it fails, the extraction broke behavior; revert.
+4. **Full Phase 5 suite** also runs as a secondary defense — its existing assertions catch additional drift the baseline might miss.
 
 - [ ] **Step 2: Move WEIGHT + SIZE + DEDUP + ALLOCATE from `portfolio_simulator.py` into `allocate_for_day(...)`**
 
@@ -592,7 +629,7 @@ def _snapshot_open_positions(
 uv run pytest tests/backtest/ tests/web/ -x --tb=short
 ```
 
-Expected: PASS. Every existing Phase 5 test continues to pass byte-for-byte. If anything fails, the extraction has a bug — revert and re-do the move smaller.
+Expected: PASS. Every existing Phase 5 test continues to pass (behavioral + public-field equality holds; the frozen baseline from 6a-0.1 is the primary regression guard, and the Phase 5 test assertions are the secondary). If anything fails, the extraction has a bug — revert and re-do the move smaller.
 
 - [ ] **Step 4: Update the marker test for post-extraction state**
 
@@ -1258,18 +1295,54 @@ git commit -m "feat(6a-1): Clock Protocol + WallClock + FakeClock (lock xxiii)"
 from datetime import UTC, datetime
 
 
-def test_ny_calendar_business_day_arithmetic():
+def test_sessions_in_range_inclusive_count():
+    """sessions_in_range(a, b) returns trading sessions in [a, b] inclusive."""
     from marketpulse.trading.calendar import NYTradingCalendar
 
     cal = NYTradingCalendar()
-    # 2026-05-25 is Memorial Day (US market closed). 2026-05-21 → 2026-05-26
-    # should be exactly 3 business days (Fri 22, Tue 26 — wait, 21=Thu, 22=Fri,
-    # 25=Mon closed, 26=Tue). So Thu → Tue across Memorial Day = 2 business
-    # days between, 3 if inclusive of endpoints.
-    a = date(2026, 5, 21)  # Thu
-    b = date(2026, 5, 26)  # Tue (Memorial Day on Mon 25 closed)
-    days = cal.business_days_between(a, b)
-    assert days == 3, f"expected 3 business days Thu→Tue across Memorial Day; got {days}"
+    # 2026-05-21 (Thu) → 2026-05-26 (Tue). Memorial Day 2026 is Mon 25.
+    # Sessions: Thu 21, Fri 22, (Mon 25 closed), Tue 26 — 3 sessions inclusive.
+    assert cal.sessions_in_range(date(2026, 5, 21), date(2026, 5, 26)) == 3
+    # Single-day range covering a session.
+    assert cal.sessions_in_range(date(2026, 5, 21), date(2026, 5, 21)) == 1
+    # a > b → 0.
+    assert cal.sessions_in_range(date(2026, 5, 26), date(2026, 5, 21)) == 0
+
+
+def test_sessions_after_excludes_start_includes_end():
+    """sessions_after(a, b) = sessions in (a, b] — what gap detection
+    needs. Returns 0 when last_tick == today (no missed days)."""
+    from marketpulse.trading.calendar import NYTradingCalendar
+
+    cal = NYTradingCalendar()
+    # Thu 21 → Fri 22 → 1 session after Thu (Fri itself).
+    assert cal.sessions_after(date(2026, 5, 21), date(2026, 5, 22)) == 1
+    # Same day → 0 (no gap).
+    assert cal.sessions_after(date(2026, 5, 21), date(2026, 5, 21)) == 0
+    # Thu 21 → Tue 26 across Memorial Day → Fri 22 + Tue 26 = 2 sessions.
+    assert cal.sessions_after(date(2026, 5, 21), date(2026, 5, 26)) == 2
+
+
+def test_next_business_day_semantics():
+    """next_business_day(d) = the first trading session STRICTLY AFTER d.
+
+    Test cases:
+    - Thu (session) → Fri (next session)
+    - Fri before Memorial-Day-Monday → Tue (skip closed Mon)
+    - Sat (non-session) → following Mon if open, else next session
+    """
+    from marketpulse.trading.calendar import NYTradingCalendar
+
+    cal = NYTradingCalendar()
+
+    # Thu 2026-05-21 → Fri 2026-05-22 (both sessions)
+    assert cal.next_business_day(date(2026, 5, 21)) == date(2026, 5, 22)
+
+    # Fri before Memorial Day 2026 (Mon 25 closed): Fri 22 → Tue 26
+    assert cal.next_business_day(date(2026, 5, 22)) == date(2026, 5, 26)
+
+    # Non-session input — Sat 2026-05-23: → next session (Tue 26 since Mon closed)
+    assert cal.next_business_day(date(2026, 5, 23)) == date(2026, 5, 26)
 
 
 def test_ny_calendar_today_ny_trading_date_for_post_close_utc():
@@ -1279,6 +1352,19 @@ def test_ny_calendar_today_ny_trading_date_for_post_close_utc():
     # 21:30 UTC on 2026-05-21 is 17:30 NY (post-close on the same NY day).
     utc_post_close = datetime(2026, 5, 21, 21, 30, tzinfo=UTC)
     assert cal.today_ny_trading_date(utc_post_close) == date(2026, 5, 21)
+
+
+def test_today_ny_trading_date_on_non_session_rolls_back():
+    """If clock fires on a non-session NY day (e.g., a holiday), the
+    tick_date rolls back to the previous session — preventing accidental
+    work on closed days."""
+    from marketpulse.trading.calendar import NYTradingCalendar
+
+    cal = NYTradingCalendar()
+    # 2026-05-25 (Mon) is Memorial Day, closed. 22:00 UTC = 18:00 NY.
+    holiday_utc = datetime(2026, 5, 25, 22, 0, tzinfo=UTC)
+    # Previous session = Fri 2026-05-22.
+    assert cal.today_ny_trading_date(holiday_utc) == date(2026, 5, 22)
 ```
 
 - [ ] **Step 2: Run failing tests**
@@ -1314,7 +1400,13 @@ class NYTradingCalendar:
 
     Phase 6 default. Lock xxix: timestamps are UTC; market-hours / holiday
     logic is evaluated in the instrument's exchange timezone (Phase 6
-    default = America/New_York for US equities)."""
+    default = America/New_York for US equities).
+
+    Vocabulary discipline (per round-6 review):
+        sessions_in_range(a, b)  → trading sessions in [a, b] inclusive
+        sessions_after(a, b)     → trading sessions in (a, b] exclusive-start
+    Gap detection uses sessions_after — last_processed_tick_date should
+    not be re-counted as 'missed'."""
 
     def __init__(self) -> None:
         self._cal = xcals.get_calendar("XNYS")
@@ -1322,27 +1414,56 @@ class NYTradingCalendar:
     def is_business_day(self, d: date) -> bool:
         return self._cal.is_session(d.isoformat())
 
-    def business_days_between(self, a: date, b: date) -> int:
-        """Inclusive count of trading sessions in [a, b]. If a > b, returns 0."""
+    def sessions_in_range(self, a: date, b: date) -> int:
+        """Sessions in [a, b] inclusive. If a > b, returns 0."""
         if a > b:
             return 0
-        sessions = self._cal.sessions_in_range(a.isoformat(), b.isoformat())
-        return len(sessions)
+        return len(self._cal.sessions_in_range(a.isoformat(), b.isoformat()))
+
+    def sessions_after(self, a: date, b: date) -> int:
+        """Sessions in (a, b] — exclusive of start, inclusive of end.
+        This is the right primitive for gap detection: if last_tick == today,
+        there's nothing 'missed.' If last_tick=Thu and today=Tue across
+        Memorial Day, missed = sessions_after(Thu, Tue) - 1 = 1 (Fri 22).
+        """
+        if a >= b:
+            return 0
+        # Sessions in (a, b] = sessions in [a+1day, b]
+        from datetime import timedelta
+        start = a + timedelta(days=1)
+        if start > b:
+            return 0
+        return len(self._cal.sessions_in_range(start.isoformat(), b.isoformat()))
 
     def next_business_day(self, d: date) -> date:
-        next_session = self._cal.next_session(d.isoformat())
-        return next_session.date()
+        """First trading session STRICTLY AFTER d. Works for both
+        session and non-session inputs; uses sessions_in_range with a
+        forward window rather than next_session (which has documented
+        edge-case behavior for non-session inputs in exchange_calendars).
+        """
+        from datetime import timedelta
+        # Look forward up to 10 calendar days — covers any holiday gap.
+        end = d + timedelta(days=10)
+        sessions = self._cal.sessions_in_range(
+            (d + timedelta(days=1)).isoformat(),
+            end.isoformat(),
+        )
+        if len(sessions) == 0:
+            raise RuntimeError(
+                f"no trading session within 10 days after {d}; calendar gap is unrealistic"
+            )
+        return sessions[0].date()
 
     def today_ny_trading_date(self, now_utc: datetime) -> date:
         """Convert a UTC-aware datetime to the NY trading day.
 
         For a tick fired at 17:30 NY (21:30 UTC) on a Thursday, returns
-        that Thursday's date. For pre-open (before 09:30 NY), returns
-        the same calendar day if it's a session, else the previous
-        session date.
+        that Thursday's date. For non-session NY days (weekend / holiday),
+        rolls back to the previous session date — so a tick that
+        accidentally fires on Memorial Day produces tick_date == previous
+        Friday (avoiding spurious 'today is closed' work).
 
-        Phase 6 default fire time is 17:30 NY (post-close), so the
-        post-close branch is the common path."""
+        Phase 6 default fire time is 17:30 NY (post-close)."""
         if now_utc.tzinfo is None:
             raise ValueError("today_ny_trading_date requires tz-aware datetime")
         ny_now = now_utc.astimezone(_NY)
@@ -4179,27 +4300,36 @@ uv run pytest tests/trading/test_bid_aggregator.py -v
 
 Expected: FAIL.
 
-- [ ] **Step 3: Implement BidAggregator**
+- [ ] **Step 3: Implement BidAggregator (read-only, NO horizon_price lookup)**
+
+Important design decision (round-6 review Blocker 5): **horizon_price is NOT BidAggregator's concern.** BidAggregator returns raw bid candidates with `horizon_price=None`; the daily_cycle's `_make_order_request` populates `horizon_price` via an injected `PriceProvider` BEFORE constructing the OrderRequest. This means:
+
+- Phase 6a tests use `StubPriceProvider` (deterministic).
+- Phase 6a production wires a real provider (out of scope for the foundation but the seam exists).
+- `BidCandidate.horizon_price` stays as Phase 5 outcome data if present (backtest mode); otherwise the daily_cycle fills it via the provider.
+- `ForwardExecutionEngine.tick(horizon)` continues to raise `ENGINE_INVARIANT_ERROR` if `horizon_price IS NULL` — but in normal Phase 6a forward flow it will NOT be NULL because daily_cycle filled it.
+
+The `PriceProvider` Protocol lives in `marketpulse/trading/price_provider.py` (added in Task 6a-1.7b — see below).
 
 ```python
 # marketpulse/trading/bid_aggregator.py
 """Phase 6a BidAggregator — read-only NY-day window over evaluation_event.
 
-This is intentionally dumb. No DEDUP / sizing / capping — all that is
-allocate_for_day's job (6a brainstorm Q5 lock). Events with NULL
-strategy are SKIPPED (lock 6a-1 brainstorm small-issue clarification).
-"""
+Intentionally dumb. No DEDUP / sizing / capping — that's allocate_for_day's
+job. No horizon_price lookup — that's daily_cycle's job via PriceProvider.
+Events with NULL strategy are SKIPPED (no audit in 6a; 6b may add
+BID_SKIPPED_NO_STRATEGY if needed)."""
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from marketpulse.backtest.allocation import BidCandidate
-from marketpulse.db.models import EvaluationEvent, EvaluationOutcome
+from marketpulse.db.models import EvaluationEvent
 from marketpulse.trading.calendar import NYTradingCalendar
 
 _NY = ZoneInfo("America/New_York")
@@ -4211,17 +4341,11 @@ class BidAggregator:
         self._calendar = calendar
 
     def collect_for_date(self, tick_date: date) -> list[BidCandidate]:
-        """Read evaluation_event rows whose NY-trading-day == tick_date.
-
-        Forward-only invariant (lock xxxiii): events with event_date <
-        tick_date are skipped. They remain in evaluation_event for Phase
-        5 backtest use."""
-        # NY-day window → UTC bounds
+        """Read evaluation_event rows whose event_time falls in
+        [NY-midnight(tick_date), NY-midnight(tick_date+1)) converted
+        to UTC. Forward-only (lock xxxiii): only today's events."""
         ny_start = datetime.combine(tick_date, datetime.min.time(), tzinfo=_NY)
         ny_end = ny_start + timedelta(days=1)
-        utc_start = ny_start.astimezone(_NY.utcoffset(ny_start).__class__).astimezone()  # safe utc cast
-        # Simpler & correct:
-        from datetime import UTC
         utc_start = ny_start.astimezone(UTC)
         utc_end = ny_end.astimezone(UTC)
 
@@ -4234,57 +4358,25 @@ class BidAggregator:
 
         bids: list[BidCandidate] = []
         for r in rows:
-            # Skip rows without strategy (lock 6a-1 brainstorm: no audit
-            # in 6a — 6b may add BID_SKIPPED_NO_STRATEGY later).
             if not r.strategy:
-                continue
-            # Phase 6 horizon_price is forward-known via outcome math.
-            # For the foundation we use the event_price as a placeholder
-            # horizon_price; Phase 5 outcomes provide the real value when
-            # this code is run against the historical fixture.
-            # In production, this should look up the strategy's horizon
-            # and price-provider. For 6a foundation, we mark None and
-            # let downstream wire it. (Lock xii: ForwardExecutionEngine
-            # rejects None horizon_price at exit time.)
-            outcome = self._lookup_outcome(r)
-            horizon_date, horizon_price = outcome
+                continue  # skip NULL-strategy rows (no audit in 6a)
+            # horizon_date computed deterministically; horizon_price stays
+            # None here. daily_cycle fills it via PriceProvider before
+            # constructing the OrderRequest.
+            event_date = r.event_time.astimezone(_NY).date()
+            horizon_date = event_date
+            for _ in range(5):
+                horizon_date = self._calendar.next_business_day(horizon_date)
             bids.append(BidCandidate(
                 strategy=r.strategy,
                 ticker=r.ticker,
                 event_time=r.event_time,
-                event_price=getattr(r, "event_price", 0.0) or 0.0,
+                event_price=float(getattr(r, "event_price", None) or 0.0),
                 horizon_date=horizon_date,
-                horizon_price=horizon_price,
+                horizon_price=None,  # filled by daily_cycle via PriceProvider
                 strategy_version=getattr(r, "strategy_version", "v0"),
             ))
         return bids
-
-    def _lookup_outcome(self, event) -> tuple[date, float | None]:
-        """Return (horizon_date, horizon_price). Looks up the matching
-        evaluation_outcome row when available; otherwise computes
-        horizon_date = event_date + 5 trading days and horizon_price=None.
-
-        Phase 6 forward-running mode normally has NO outcome row yet —
-        the horizon is in the future. The placeholder horizon_price=None
-        is acceptable because ForwardExecutionEngine.tick raises
-        InvariantError at exit time if horizon_price is still None
-        (lock xii). Phase 5 backtest mode hits this path against
-        historical events that DO have outcome rows."""
-        from sqlalchemy import select
-        outcome = self._session.execute(
-            select(EvaluationOutcome).where(
-                EvaluationOutcome.event_id == event.id
-            )
-        ).scalars().first()
-        if outcome is not None:
-            return (outcome.outcome_date, outcome.outcome_price)
-        # No outcome yet — forward-running case. Default horizon = +5 NY
-        # business days from event date.
-        event_date = event.event_time.astimezone(_NY).date()
-        h = event_date
-        for _ in range(5):
-            h = self._calendar.next_business_day(h)
-        return (h, None)
 ```
 
 - [ ] **Step 4: Run tests**
@@ -4605,9 +4697,13 @@ def run(
     allocation_run_id = AllocationRunId(f"paper-{tick_date.isoformat()}")
 
     # === Phase 1: gap detection ===
+    # sessions_after returns sessions in (last_processed, tick_date].
+    # That count includes tick_date itself; subtract 1 to get strictly
+    # missed sessions BETWEEN them. Round-6 fix: explicit primitive
+    # avoids the inclusive/exclusive ambiguity.
     last_processed = repository.last_processed_tick_date()
     if last_processed is not None and last_processed < tick_date:
-        missed = calendar.business_days_between(last_processed, tick_date) - 1
+        missed = calendar.sessions_after(last_processed, tick_date) - 1
         if missed > 0:
             with repository.transaction():
                 repository.write_gap_audit_once(
@@ -5277,3 +5373,382 @@ This plan covers all of the 6a spec's `Deliverables Summary` (§13):
 - 6a-L9 AllocationContext explicit fields → 6a-0.2 (dataclass shape test)
 
 **End of plan.**
+
+---
+
+## Round-6 Required Revisions (read BEFORE implementation)
+
+The original plan tasks above were drafted before the round-6 review surfaced 18 issues. The blockers 1-6 are already applied inline (frozen baseline, business_days_between semantics, PriceProvider note). Blockers 7-18 need the following adjustments applied as the agent works each affected task.
+
+### R6-1 (Blocker 7): Repository must be a single class
+
+When implementing Task 6a-2.1 / 6a-2.2 / 6a-2.3, do NOT paste the method bodies as module-level functions. Every method belongs inside `class Repository:`. The plan presents method bodies flat for readability; the implementer integrates them under the class with `self` as the first parameter. Smoke test after Task 6a-2.1: `from marketpulse.trading.repository import Repository; Repository.transaction` should resolve, not `marketpulse.trading.repository.transaction`.
+
+### R6-2 (Blocker 8): Audit transaction convention — fixed
+
+**Rule:** All repository write methods, INCLUDING `write_audit_event`, `write_duplicate_audit_once`, `write_gap_audit_once`, `write_tick_completed_once`, REQUIRE the caller to wrap them in `with repo.transaction():`. Repository methods themselves perform `session.add(...) + session.flush()` but NEVER `session.commit()`. Only `transaction()` commits. (`ensure_initial_deposit` is the one exception that wraps internally because it's a startup hook.)
+
+Update every place in the plan that calls these helpers — if there's no surrounding `with repository.transaction():`, that's a bug. The plan's daily_cycle.run code already does this; the standalone repository tests in 6a-2.1 should be updated to use `with repo.transaction()` wrappers (current plan shows direct calls — fix during implementation).
+
+### R6-3 (Blocker 9): KillSwitchState does NOT touch `repo._session`
+
+Add the following helper to `Repository` (insert after `latest_tick_status`):
+
+```python
+def latest_kill_switch_state(self) -> bool:
+    """Latest persisted kill-switch state. False if never flipped."""
+    row = self._session.execute(
+        select(PaperAuditEvent).where(
+            PaperAuditEvent.event_type == AuditEventType.KILL_SWITCH_FLIPPED.value
+        ).order_by(desc(PaperAuditEvent.id))
+    ).scalars().first()
+    if row is None:
+        return False
+    return bool(row.context.get("to_state"))
+```
+
+Then in `KillSwitchState._db_state`, replace the inline session query with `return self._repo.latest_kill_switch_state()`. The boundary stays clean — KillSwitchState never imports SQLAlchemy or touches `_session`.
+
+### R6-4 (Blocker 10): Lock 6a-L5 wording
+
+The spec (commit `dc20658`) already locks `last_processed_tick_date()` to read TICK_COMPLETED OR KILL_SWITCH_CYCLE_SKIPPED. The plan matches this. No additional change needed — but the implementer should grep the spec to confirm vocabulary alignment when in doubt:
+
+```bash
+grep -nE 'last_processed_tick_date|6a-L5' docs/superpowers/specs/2026-05-21-phase-6a-paper-trading-foundation-design.md
+```
+
+### R6-5 (Blocker 11): SQLite JSON access stability
+
+The repository's dedup helpers use `PaperAuditEvent.context["tick_date"].as_string() == ...`. This relies on SQLAlchemy's JSON path expression. If pytest fails on these comparisons during 6a-2.1, fall back to fetching candidate rows and filtering in Python:
+
+```python
+candidates = self._session.execute(
+    select(PaperAuditEvent).where(
+        PaperAuditEvent.event_type == AuditEventType.ORDER_PLACED_DUPLICATE.value
+    )
+).scalars().all()
+existing = next(
+    (r for r in candidates
+     if r.context.get("idempotency_key") == idempotency_key
+     and r.context.get("tick_date") == tick_date.isoformat()),
+    None,
+)
+```
+
+This is slower but bulletproof on SQLite JSON1. For 6a-1 scale (~30 audit rows/day), performance is irrelevant.
+
+### R6-6 (Blocker 12): Alembic migration uses `sa.DateTime(timezone=True)`, models use `TZDateTime`
+
+This is intentional and matches the existing convention (see `alembic/versions/0df4e23abe4e_evaluation_event_and_outcome_tables.py` — `event_time = sa.DateTime(timezone=True)` while the model is `Mapped[datetime] = mapped_column(TZDateTime, ...)`). `TZDateTime` is a TypeDecorator over `DateTime(timezone=True)`; Alembic sees the underlying type. The model layer adds the encode/decode behavior.
+
+Smoke this in Task 6a-1.9 step 4: after `alembic upgrade head`, verify the column round-trips a tz-aware datetime correctly via a quick session query.
+
+### R6-7 (Blocker 13): `paper_fill.position_id` IS a foreign key
+
+Update the model (Task 6a-1.8) and migration (Task 6a-1.9):
+
+```python
+# In marketpulse/db/models.py PaperFill:
+position_id: Mapped[int] = mapped_column(
+    ForeignKey("paper_position.id"), nullable=False
+)
+
+# In alembic/versions/0010_phase6_paper_trading.py paper_fill:
+sa.Column("position_id", sa.Integer(),
+          sa.ForeignKey("paper_position.id"), nullable=False),
+```
+
+The circular-FK problem only exists for `paper_position.entry_fill_id` / `exit_fill_id` (which point AT paper_fill from paper_position). `paper_fill.position_id` points the other way — position is created first, fill is inserted second referencing it. This direction is safe and should have referential integrity.
+
+### R6-8 (Blocker 14): Restore paper_order CHECK constraints
+
+Update Task 6a-1.8 model + Task 6a-1.9 migration to include these CHECKs on `paper_order` (additions to what's currently in the plan):
+
+```python
+# Add to PaperOrder.__table_args__ (and migration):
+CheckConstraint(
+    "status != 'PLACED' OR (filled_at IS NULL AND cancelled_at IS NULL)",
+    name="ck_paper_order_placed_no_terminal_ts",
+),
+CheckConstraint(
+    "status != 'ENTRY_FILLED' OR filled_at IS NOT NULL",
+    name="ck_paper_order_entry_filled_has_ts",
+),
+CheckConstraint(
+    "status != 'CANCELLED' OR cancelled_at IS NOT NULL",
+    name="ck_paper_order_cancelled_has_ts",
+),
+```
+
+These match the spec's § 4.1 CHECK list. Adds 3 lines to both the model and the migration.
+
+### R6-9 (Blocker 15): `ensure_initial_deposit` race + test
+
+`ensure_initial_deposit` checks `count == 0` then inserts. On SQLite single-writer this is safe (the write-lock serializes). On Postgres later this would race; for Phase 6a SQLite the current shape is fine, but add a test that calls it 3 times in a row to lock the idempotent contract:
+
+```python
+# Append to tests/trading/test_repository.py
+
+def test_ensure_initial_deposit_strictly_idempotent(session):
+    """3 consecutive calls produce exactly 1 INITIAL_DEPOSIT row."""
+    from datetime import UTC, datetime
+    from decimal import Decimal
+    from sqlalchemy import select
+    from marketpulse.db.models import PaperCashLedger
+    from marketpulse.trading.repository import Repository
+
+    repo = Repository(session=session)
+    ts = datetime(2026, 5, 21, tzinfo=UTC)
+    for _ in range(3):
+        repo.ensure_initial_deposit(amount=Decimal("10000"), timestamp=ts)
+    rows = session.execute(
+        select(PaperCashLedger).where(PaperCashLedger.reason == "INITIAL_DEPOSIT")
+    ).scalars().all()
+    assert len(rows) == 1
+```
+
+### R6-10 (Blocker 16): Grep tests scoped to production code only
+
+Replace the `test_only_repository_writes_paper_tables` body in Task 6a-2.8 with this stricter version:
+
+```python
+def test_only_repository_writes_paper_tables():
+    """Lock iii: repository.py is the only writer of paper_* tables in
+    PRODUCTION code (not tests, not docs)."""
+    out = subprocess.run(
+        ["git", "grep", "-nE",
+         r"session\.add\(|session\.execute\((insert|update)",
+         "--", "marketpulse/"],
+        capture_output=True, text=True,
+    ).stdout
+    bad = []
+    for line in out.splitlines():
+        # Production marketpulse paths only.
+        if not line.startswith("marketpulse/"):
+            continue
+        # Allowed locations:
+        if "marketpulse/trading/repository.py" in line:
+            continue
+        if "marketpulse/db/" in line:  # base infra
+            continue
+        # Existing Phase 1-5 modules — they manage their own tables, not paper_*.
+        # Add explicit exemptions only if they're writing paper_* tables.
+        bad.append(line)
+    assert not bad, (
+        "Lock iii violation: session.add/insert/update outside "
+        "repository.py:\n" + "\n".join(bad)
+    )
+```
+
+Same for `test_no_legacy_filled_status_string` — keep the word-boundary regex `\bORDER_FILLED\b`.
+
+For long-term safety, consider adding an import-linter rule to `pyproject.toml` that forbids `marketpulse.trading.*` (except `repository`) from importing `sqlalchemy.orm.Session.add` or similar — out of scope for 6a-2 but worth noting for 6b.
+
+### R6-11 (Blocker 17): Protocol method-set test uses `__dict__`
+
+Replace the body of `test_protocol_has_exactly_three_methods` in Task 6a-1.3:
+
+```python
+def test_protocol_has_exactly_three_methods():
+    from marketpulse.trading.execution_engine import ExecutionEngine
+
+    # Method-name set from the Protocol's own dict (excludes inherited
+    # Protocol internals like __subclasshook__, __init_subclass__, etc.)
+    own_methods = {
+        name for name, value in ExecutionEngine.__dict__.items()
+        if not name.startswith("_") and callable(value)
+    }
+    assert own_methods == {"place_order", "cancel_order", "tick"}, (
+        f"ExecutionEngine Protocol drift; got {own_methods}"
+    )
+```
+
+### R6-12 (Blocker 18): E2E uses only NY trading-session days
+
+The E2E in Task 6a-4.1 currently uses `[date(2026, 5, 22), date(2026, 5, 25), date(2026, 5, 26), date(2026, 5, 27)]`. **2026-05-25 is Memorial Day (US market closed).** With the calendar's rollback semantics in `today_ny_trading_date`, firing on Mon 25 would resolve to Fri 22 — re-processing yesterday's tick. Replace the idle-day list with confirmed sessions only:
+
+```python
+# In test_full_5day_lifecycle_place_to_close, replace:
+#     for day in [date(2026, 5, 22), date(2026, 5, 25),
+#                 date(2026, 5, 26), date(2026, 5, 27)]:
+# with:
+    # Skip non-session days. D0=Thu 21 (placed entry), D5=Thu 28 (horizon).
+    # Intermediate sessions: Fri 22, Tue 26 (Memorial Day Mon 25 closed), Wed 27.
+    for day in [date(2026, 5, 22), date(2026, 5, 26), date(2026, 5, 27)]:
+```
+
+Also adjust the test to confirm Memorial Day is NOT firing a tick (or that it correctly rolls back), via a separate test:
+
+```python
+def test_tick_on_memorial_day_resolves_to_previous_friday(session):
+    """If the scheduler accidentally fires on Memorial Day Mon 25, the
+    cycle's tick_date resolves to the previous Friday 22 and the run is
+    a no-op replay of that day (TICK_COMPLETED already present)."""
+    # ... seed Fri 22 with TICK_COMPLETED, then run with clock=Memorial Day
+    # 17:30 NY → assert no new orders, no new TICK_COMPLETED, no SCHEDULER_GAP_DETECTED
+    # (because last_processed_tick_date == today's resolved date).
+    pass  # implementer fills the body per the pattern above
+```
+
+### R6-13 (Side fix): `next_business_day` is used in BidAggregator horizon calc
+
+Note that the BidAggregator's horizon-date loop (`for _ in range(5): horizon_date = self._calendar.next_business_day(horizon_date)`) calls `next_business_day` 5× sequentially. After the round-6 fixes to `next_business_day`, this works correctly for any starting date (session or non-session).
+
+### R6-14: New Task 6a-1.7b — PriceProvider abstraction
+
+Insert this task BETWEEN existing Tasks 6a-1.7 (risk_gate) and 6a-1.8 (DB models):
+
+**Files:**
+- Create: `marketpulse/trading/price_provider.py`
+- Create: `tests/trading/test_price_provider.py`
+
+- [ ] **Step 1: Write the test**
+
+```python
+# tests/trading/test_price_provider.py
+# Layer: invariant
+
+from __future__ import annotations
+
+from datetime import date
+from decimal import Decimal
+
+
+def test_stub_price_provider_returns_configured_value():
+    from marketpulse.trading.price_provider import StubPriceProvider
+
+    p = StubPriceProvider(map={("AAPL", date(2026, 5, 28)): Decimal("155.00")})
+    assert p.horizon_price(ticker="AAPL", horizon_date=date(2026, 5, 28)) == Decimal("155.00")
+
+
+def test_stub_price_provider_default_on_missing():
+    from marketpulse.trading.price_provider import StubPriceProvider
+
+    p = StubPriceProvider(default=Decimal("100.00"))
+    assert p.horizon_price(ticker="UNKNOWN", horizon_date=date(2026, 5, 28)) == Decimal("100.00")
+```
+
+- [ ] **Step 2: Implement**
+
+```python
+# marketpulse/trading/price_provider.py
+"""PriceProvider Protocol (round-6 fix Blocker 5).
+
+The daily_cycle uses an injected PriceProvider to fill OrderRequest's
+horizon_price BEFORE construction. ForwardExecutionEngine then has a
+guaranteed-non-None horizon_price at exit time, so tick(horizon) does
+NOT fire ENGINE_INVARIANT_ERROR in the normal forward flow.
+
+6a ships StubPriceProvider for tests. Production wires a real provider
+(YFinance, broker quote API, etc.) — out of scope for 6a foundation."""
+
+from __future__ import annotations
+
+from datetime import date
+from decimal import Decimal
+from typing import Protocol
+
+
+class PriceProvider(Protocol):
+    def horizon_price(self, *, ticker: str, horizon_date: date) -> Decimal | None: ...
+
+
+class StubPriceProvider:
+    """Deterministic test provider. Configured via an exact lookup map
+    or a default fallback."""
+
+    def __init__(
+        self,
+        *,
+        map: dict[tuple[str, date], Decimal] | None = None,
+        default: Decimal | None = None,
+    ) -> None:
+        self._map = map or {}
+        self._default = default
+
+    def horizon_price(self, *, ticker: str, horizon_date: date) -> Decimal | None:
+        return self._map.get((ticker, horizon_date), self._default)
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add marketpulse/trading/price_provider.py tests/trading/test_price_provider.py
+git commit -m "feat(6a-1): PriceProvider Protocol + StubPriceProvider (round-6 Blocker 5)"
+```
+
+### R6-15: daily_cycle.run threads PriceProvider into OrderRequest
+
+When implementing Task 6a-3.2 / 6a-3.4, the `daily_cycle.run` signature gains a `price_provider: PriceProvider` parameter. `_make_order_request` calls `price_provider.horizon_price(...)` if the winner's `horizon_price` is None:
+
+```python
+# Updated _make_order_request:
+
+def _make_order_request(*, winner, allocation_run_id, allocation_date,
+                       price_provider) -> OrderRequest:
+    # Use Phase 5 outcome data if present; else look up via provider.
+    horizon_price = winner.horizon_price
+    if horizon_price is None:
+        horizon_price_dec = price_provider.horizon_price(
+            ticker=winner.ticker,
+            horizon_date=winner.horizon_date,
+        )
+    else:
+        horizon_price_dec = Decimal(str(horizon_price))
+
+    return OrderRequest(
+        ...,
+        horizon_price=horizon_price_dec,  # may be None — engine will reject at exit
+        ...,
+    )
+```
+
+Scheduler entrypoint wires a stub for now (TODO comment marks where 6b wires the real provider):
+
+```python
+# In marketpulse/scheduler/paper_trading_tick.py paper_trading_tick_job:
+from marketpulse.trading.price_provider import StubPriceProvider
+from decimal import Decimal as _D
+
+# 6a foundation: stub. 6b/6c wires a real YFinance-backed provider.
+price_provider = StubPriceProvider(default=_D("0"))  # marks the seam
+
+result = daily_cycle.run(
+    ...,
+    price_provider=price_provider,
+)
+```
+
+The E2E test in 6a-4.1 uses `StubPriceProvider(map={("AAPL", D5): Decimal("155")})` so the lifecycle test still closes positions cleanly.
+
+### R6-16: Execution order — apply these revisions in this sequence
+
+1. **6a-0**: Apply R6-1 inline as you implement (frozen baseline already updated).
+2. **6a-1**: Apply R6-6 (Alembic+TZDateTime convention), R6-7 (paper_fill FK), R6-8 (CHECK constraints), R6-11 (Protocol __dict__ test). Insert Task 6a-1.7b (PriceProvider, R6-14).
+3. **6a-2**: Apply R6-1 (class structure), R6-2 (transaction convention), R6-3 (KillSwitchState boundary), R6-5 (JSON fallback if needed), R6-9 (idempotent deposit test), R6-10 (scoped grep).
+4. **6a-3**: Apply R6-15 (PriceProvider threaded through daily_cycle).
+5. **6a-4**: Apply R6-12 (E2E session-only days, Memorial Day test).
+
+After all revisions, the plan is ready for agent-driven execution.
+
+---
+
+## Final Self-Review (Round 6)
+
+- ✅ 6a-0 has a real frozen baseline (R6-1)
+- ✅ No "byte-for-byte" wording remains
+- ✅ Calendar primitives are unambiguous (sessions_in_range vs sessions_after)
+- ✅ next_business_day handles non-session inputs
+- ✅ horizon_price has a clean abstraction (PriceProvider) — Phase 6a forward flow can close positions in tests
+- ✅ BidAggregator UTC code clean
+- ✅ Repository methods explicitly inside `class Repository:`
+- ✅ Audit transaction convention single (caller wraps in `with repo.transaction():`)
+- ✅ KillSwitchState honors repository boundary
+- ✅ paper_fill.position_id is FK
+- ✅ paper_order CHECK constraints restored
+- ✅ ensure_initial_deposit has an explicit idempotent test
+- ✅ Grep tests scoped to production code paths
+- ✅ Protocol method-set test uses `__dict__`
+- ✅ E2E uses only NY session days; Memorial Day edge-case has its own test
+
+**Plan status: Approved with required revisions applied — ready for implementation.**
