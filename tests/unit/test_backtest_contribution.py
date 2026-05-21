@@ -203,3 +203,99 @@ def test_pool_corr_excluding_self_excludes_dates_at_or_after_as_of() -> None:
     # Should NOT include days >= as_of in the correlation
     assert corr is not None
     assert eff <= 60  # capped at lookback_days
+
+
+def test_compute_adjusted_bid_weight_negative_corr_rewarded() -> None:
+    """raw=1.0, ρ=−0.8, λ=0.5 → multiplier=1.2 (clipped), rewarded=True."""
+    from marketpulse.backtest.contribution import compute_adjusted_bid_weight
+    adjusted, multiplier, rewarded = compute_adjusted_bid_weight(
+        raw_sharpe=1.0, pool_corr=-0.8,
+        lam=0.5, clip_min=0.5, clip_max=1.2,
+    )
+    # 1 - 0.5 * (-0.8) = 1.4 → clipped to 1.2
+    assert abs(multiplier - 1.2) < 1e-9
+    assert abs(adjusted - 1.2) < 1e-9
+    assert rewarded is True
+
+
+def test_compute_adjusted_bid_weight_positive_corr_penalized() -> None:
+    """raw=1.0, ρ=0.8, λ=0.5 → multiplier=0.6, rewarded=False."""
+    from marketpulse.backtest.contribution import compute_adjusted_bid_weight
+    adjusted, multiplier, rewarded = compute_adjusted_bid_weight(
+        raw_sharpe=1.0, pool_corr=0.8,
+        lam=0.5, clip_min=0.5, clip_max=1.2,
+    )
+    # 1 - 0.5 * 0.8 = 0.6
+    assert abs(multiplier - 0.6) < 1e-9
+    assert abs(adjusted - 0.6) < 1e-9
+    assert rewarded is False
+
+
+def test_compute_adjusted_bid_weight_extreme_negative_clipped_at_max() -> None:
+    """raw=1.0, ρ=−1.0, λ=1.0 → would be 2.0 but clipped to 1.2."""
+    from marketpulse.backtest.contribution import compute_adjusted_bid_weight
+    adjusted, multiplier, rewarded = compute_adjusted_bid_weight(
+        raw_sharpe=1.0, pool_corr=-1.0,
+        lam=1.0, clip_min=0.5, clip_max=1.2,
+    )
+    # 1 - 1.0 * (-1.0) = 2.0 → clipped to 1.2
+    assert abs(multiplier - 1.2) < 1e-9
+    assert abs(adjusted - 1.2) < 1e-9
+    assert rewarded is True
+
+
+def test_compute_adjusted_bid_weight_extreme_positive_clipped_at_min() -> None:
+    """raw=1.0, ρ=1.0, λ=1.0 → would be 0.0 but clipped to 0.5."""
+    from marketpulse.backtest.contribution import compute_adjusted_bid_weight
+    adjusted, multiplier, rewarded = compute_adjusted_bid_weight(
+        raw_sharpe=1.0, pool_corr=1.0,
+        lam=1.0, clip_min=0.5, clip_max=1.2,
+    )
+    # 1 - 1.0 * 1.0 = 0.0 → clipped to 0.5
+    assert abs(multiplier - 0.5) < 1e-9
+    assert abs(adjusted - 0.5) < 1e-9
+    assert rewarded is False
+
+
+def test_compute_adjusted_bid_weight_none_sharpe_short_circuits() -> None:
+    """raw=None (Phase 5a n<5 floor) → (None, 1.0, False)."""
+    from marketpulse.backtest.contribution import compute_adjusted_bid_weight
+    adjusted, multiplier, rewarded = compute_adjusted_bid_weight(
+        raw_sharpe=None, pool_corr=0.5, lam=0.5,
+    )
+    assert adjusted is None
+    assert multiplier == 1.0
+    assert rewarded is False
+
+
+def test_compute_adjusted_bid_weight_negative_sharpe_unchanged() -> None:
+    """raw=-0.5, ρ=0.5 → (-0.5, 1.0, False). Don't adjust negative-Sharpe."""
+    from marketpulse.backtest.contribution import compute_adjusted_bid_weight
+    adjusted, multiplier, rewarded = compute_adjusted_bid_weight(
+        raw_sharpe=-0.5, pool_corr=0.5, lam=0.5,
+    )
+    assert adjusted == -0.5
+    assert multiplier == 1.0
+    assert rewarded is False
+
+
+def test_compute_adjusted_bid_weight_zero_sharpe_unchanged() -> None:
+    """raw=0.0, ρ=−0.5 → (0.0, 1.0, False). Zero is not 'positive'."""
+    from marketpulse.backtest.contribution import compute_adjusted_bid_weight
+    adjusted, multiplier, rewarded = compute_adjusted_bid_weight(
+        raw_sharpe=0.0, pool_corr=-0.5, lam=0.5,
+    )
+    assert adjusted == 0.0
+    assert multiplier == 1.0
+    assert rewarded is False
+
+
+def test_compute_adjusted_bid_weight_none_corr_short_circuits() -> None:
+    """raw=1.5, ρ=None (cold-start) → (1.5, 1.0, False)."""
+    from marketpulse.backtest.contribution import compute_adjusted_bid_weight
+    adjusted, multiplier, rewarded = compute_adjusted_bid_weight(
+        raw_sharpe=1.5, pool_corr=None, lam=0.5,
+    )
+    assert adjusted == 1.5
+    assert multiplier == 1.0
+    assert rewarded is False

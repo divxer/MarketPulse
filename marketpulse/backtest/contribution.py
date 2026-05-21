@@ -106,3 +106,48 @@ def pool_corr_excluding_self(
     if not math.isfinite(corr):
         return None, effective_window
     return corr, effective_window
+
+
+def compute_adjusted_bid_weight(
+    raw_sharpe: float | None,
+    pool_corr: float | None,
+    *,
+    lam: float = 0.5,
+    clip_min: float = 0.5,
+    clip_max: float = 1.2,
+) -> tuple[float | None, float, bool]:
+    """Apply contribution-adjusted multiplier to a raw bid weight.
+
+    Returns (adjusted_weight, multiplier, rewarded_for_negative_corr):
+      - adjusted = raw_sharpe × multiplier
+      - multiplier = clip(1 − lam × pool_corr, clip_min, clip_max) when
+        pool_corr is not None AND raw_sharpe > 0; else 1.0
+      - rewarded = (pool_corr is not None) AND (pool_corr < 0) AND
+        (multiplier > 1.0)
+
+    Short-circuits to (None, 1.0, False) when raw_sharpe is None (Phase 5a
+    n<5 floor — there is nothing to adjust).
+
+    Short-circuits to (raw_sharpe, 1.0, False) when raw_sharpe <= 0
+    (negative or zero — Phase 5a floor decides whether to bid; we don't
+    amplify or attenuate).
+
+    Short-circuits to (raw_sharpe, 1.0, False) when pool_corr is None
+    (cold-start; failsafe-open per spec § 2 lock #4).
+
+    Clip is asymmetric: [0.5, 1.2] is deliberate risk-aversion bias.
+    Max penalty -50%, max reward +20%. v0 ships conservative form;
+    a neutral clip would version-bump contribution_policy to _v1.
+    """
+    if raw_sharpe is None:
+        return None, 1.0, False
+    if raw_sharpe <= 0.0:
+        return raw_sharpe, 1.0, False
+    if pool_corr is None:
+        return raw_sharpe, 1.0, False
+
+    raw_multiplier = 1.0 - lam * pool_corr
+    multiplier = max(clip_min, min(clip_max, raw_multiplier))
+    adjusted = raw_sharpe * multiplier
+    rewarded = (pool_corr < 0) and (multiplier > 1.0)
+    return adjusted, multiplier, rewarded
