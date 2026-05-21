@@ -126,6 +126,16 @@ def run(
     calendar: NYTradingCalendar,
     kill_switch: KillSwitchState,
     price_provider: PriceProvider,
+    # Allocator-kernel context. Phase 6 forward mode passes empty
+    # curves + real get_sector (paper-trading history isn't accumulated
+    # for allocator weight inputs yet — that's 6b/6c work). The kernel
+    # falls back to base_position_size when curves are empty.
+    daily_curves: dict[str, list[tuple[date, float]]] | None = None,
+    daily_strategy_contribution_returns: dict[
+        str, list[tuple[date, float]]
+    ] | None = None,
+    daily_pool_returns: list[tuple[date, float]] | None = None,
+    sector_provider: Callable[[str], str] | None = None,
 ) -> DailyCycleResult:
     tick_date = calendar.today_ny_trading_date(clock.now())
     allocation_run_id = AllocationRunId(f"paper-{tick_date.isoformat()}")
@@ -213,40 +223,91 @@ def run(
         sizing_enabled=True,
         per_strategy_overrides={},
     )
-    allocation = allocator(
-        bids=bids,
-        existing_positions=_position_snapshots(repository),
-        cash_available=float(repository.cash_balance()),
-        allocation_context=allocation_ctx,
-        sizing_context=sizing_ctx,
+    # Forward-mode defaults (Phase 6 has no allocator-input history yet —
+    # 6b/6c will wire real curves/returns). Empty containers cause the
+    # kernel's compute_position_sizes to fall back to base_position_size.
+    curves = daily_curves if daily_curves is not None else {}
+    contrib_returns = (
+        daily_strategy_contribution_returns
+        if daily_strategy_contribution_returns is not None else {}
     )
+    pool_returns = daily_pool_returns if daily_pool_returns is not None else []
+    sector_fn = sector_provider
+    if sector_fn is None:
+        # Default to the YAML/yfinance-backed get_sector — `Callable[[str], str]`.
+        from marketpulse.backtest.sector import get_sector as _get_sector
+        sector_fn = _get_sector
 
-    # === Phase 4: place_order per winner ===
+    # Allocator call wrapped defensively: any kernel exception is captured
+    # as an ENGINE_INVARIANT_ERROR(phase="allocation") audit row; the cycle
+    # then skips place_order and proceeds to tick() so existing OPEN
+    # positions can still close at horizon.
+    allocation: AllocationResult | None
+    allocator_error: Exception | None = None
+    try:
+        allocation = allocator(
+            bids=bids,
+            existing_positions=_position_snapshots(repository),
+            cash_available=float(repository.cash_balance()),
+            allocation_context=allocation_ctx,
+            sizing_context=sizing_ctx,
+            daily_curves=curves,
+            daily_strategy_contribution_returns=contrib_returns,
+            daily_pool_returns=pool_returns,
+            sector_provider=sector_fn,
+            price_provider=price_provider,
+        )
+    except Exception as e:
+        allocator_error = e
+        allocation = None
+        with repository.transaction():
+            repository.write_audit_event(
+                event_type=AuditEventType.ENGINE_INVARIANT_ERROR,
+                order_id=None,
+                strategy=None,
+                reason="allocator_failed",
+                context={
+                    "phase": "allocation",
+                    "tick_date": tick_date.isoformat(),
+                    "bid_count": len(bids),
+                    "error_type": type(e).__name__,
+                    "error": str(e),
+                },
+                timestamp=clock.now(),
+            )
+
+    # === Phase 4: place_order per winner (skipped if allocator failed) ===
     placed = 0
     rejected = 0
     duplicates = 0
-    for winner in allocation.winners:
-        request = _make_order_request(
-            winner=winner,
-            allocation_run_id=allocation_run_id,
-            allocation_date=tick_date,
-            price_provider=price_provider,
-        )
-        try:
-            result = engine.place_order(order_request=request)
-            if result.created:
-                placed += 1
-            elif result.duplicate:
-                duplicates += 1
-        except OrderRejected:
-            rejected += 1
+    if allocation is not None:
+        for winner in allocation.winners:
+            request = _make_order_request(
+                winner=winner,
+                allocation_run_id=allocation_run_id,
+                allocation_date=tick_date,
+                price_provider=price_provider,
+            )
+            try:
+                result = engine.place_order(order_request=request)
+                if result.created:
+                    placed += 1
+                elif result.duplicate:
+                    duplicates += 1
+            except OrderRejected:
+                rejected += 1
 
-    # === Phase 5: tick ===
+    # === Phase 5: tick (always runs — close due positions even if
+    # allocation failed, so existing OPEN positions still exit at horizon)
     tick_result = engine.tick(as_of=tick_date)
 
     # === Phase 6: TICK_COMPLETED ===
+    # cycle_status is "completed_with_errors" if EITHER the allocator
+    # threw OR the tick had per-row InvariantErrors.
     cycle_status: Literal["completed", "completed_with_errors"] = (
-        "completed_with_errors" if tick_result.errors else "completed"
+        "completed_with_errors"
+        if (tick_result.errors or allocator_error is not None)
+        else "completed"
     )
     result = DailyCycleResult(
         tick_date=tick_date,

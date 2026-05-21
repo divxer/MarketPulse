@@ -28,7 +28,13 @@ def _stub_allocator(*, expected_winners: list[Any]):
     from marketpulse.backtest.allocation import AllocationResult
 
     def _alloc(*, bids, existing_positions, cash_available,
-               allocation_context, sizing_context):
+               allocation_context, sizing_context,
+               # Phase 6a fix1: forward-mode kernel context kwargs
+               daily_curves=None,
+               daily_strategy_contribution_returns=None,
+               daily_pool_returns=None,
+               sector_provider=None,
+               price_provider=None):
         return AllocationResult(
             winners=tuple(expected_winners),
             blocked=(),
@@ -206,3 +212,52 @@ def test_daily_cycle_kill_switch_cycle_level_skip(session):
         ),
     ).scalars().all()
     assert len(skips) == 1
+
+
+def test_daily_cycle_allocator_exception_writes_audit_and_still_ticks(session):
+    """fix1: when the allocator raises, daily_cycle MUST write an
+    ENGINE_INVARIANT_ERROR(phase=allocation) audit, skip place_order,
+    but STILL call engine.tick(as_of) so OPEN positions can close at
+    horizon. cycle_status = 'completed_with_errors'."""
+    from marketpulse.db.models import PaperAuditEvent, PaperOrder
+    from marketpulse.trading import daily_cycle
+
+    def _exploding_allocator(**kwargs):
+        raise TypeError(
+            "allocate_for_day() missing required keyword-only argument: foo",
+        )
+
+    deps = _make_deps(
+        session,
+        fake_now=datetime(2026, 5, 21, 21, 30, tzinfo=UTC),
+        allocator=_exploding_allocator,
+    )
+    result = daily_cycle.run(**deps)
+
+    # 0 orders placed, but cycle still completes (didn't propagate)
+    assert result.orders_placed == 0
+    assert result.cycle_status == "completed_with_errors"
+
+    # No paper_order rows
+    orders = session.execute(select(PaperOrder)).scalars().all()
+    assert len(orders) == 0
+
+    # ENGINE_INVARIANT_ERROR audit with phase=allocation present
+    errs = session.execute(
+        select(PaperAuditEvent).where(
+            PaperAuditEvent.event_type == "ENGINE_INVARIANT_ERROR",
+        ),
+    ).scalars().all()
+    assert len(errs) == 1
+    assert errs[0].reason == "allocator_failed"
+    assert errs[0].context["phase"] == "allocation"
+    assert errs[0].context["error_type"] == "TypeError"
+
+    # TICK_COMPLETED still written — tick ran for due positions
+    tick_completed = session.execute(
+        select(PaperAuditEvent).where(
+            PaperAuditEvent.event_type == "TICK_COMPLETED",
+        ),
+    ).scalars().all()
+    assert len(tick_completed) == 1
+    assert tick_completed[0].context["status"] == "completed_with_errors"

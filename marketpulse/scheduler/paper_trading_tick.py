@@ -9,6 +9,7 @@ import logging
 from decimal import Decimal
 
 from marketpulse.backtest.allocation import allocate_for_day
+from marketpulse.backtest.sector import get_sector
 from marketpulse.db.base import session_scope
 from marketpulse.trading import daily_cycle
 from marketpulse.trading.bid_aggregator import BidAggregator
@@ -48,6 +49,14 @@ def paper_trading_tick_job() -> None:
             bid_aggregator=bid_aggregator, allocator=allocate_for_day,
             calendar=calendar, kill_switch=kill_switch,
             price_provider=price_provider,
+            # Forward-mode allocator context. 6a foundation: empty
+            # curves + real get_sector. 6b/6c will wire real curves from
+            # production data sources (paper_position history,
+            # price_cache rolling windows, etc.).
+            daily_curves={},
+            daily_strategy_contribution_returns={},
+            daily_pool_returns=[],
+            sector_provider=get_sector,
         )
         log.info(
             "paper_trading_tick done: tick_date=%s placed=%d exits=%d entries=%d errors=%d",
