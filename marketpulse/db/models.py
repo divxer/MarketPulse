@@ -1,4 +1,5 @@
 from datetime import UTC, date, datetime
+from decimal import Decimal as _Decimal
 from typing import Any
 
 from sqlalchemy import (
@@ -12,6 +13,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     TypeDecorator,
@@ -293,4 +295,191 @@ class EvaluationOutcome(Base):
     __table_args__ = (
         UniqueConstraint("event_id", "horizon_trading_days",
                          name="uq_event_horizon"),
+    )
+
+
+# === Phase 6a paper-trading models ===
+# Lock xv: NO modifications to existing Phase 1-5 tables.
+# Lock xxii: Decimal(18, 6) for all price/cash/P&L columns.
+# Lock xxix: All timestamps UTC via TZDateTime TypeDecorator.
+# Lock xiii: paper_fill, paper_audit_event, paper_cash_ledger are append-only.
+
+
+class PaperOrder(Base):
+    __tablename__ = "paper_order"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
+    allocation_run_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    strategy: Mapped[str] = mapped_column(String(64), nullable=False)
+    ticker: Mapped[str] = mapped_column(String(16), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    event_time: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
+    allocation_date: Mapped[date] = mapped_column(Date, nullable=False)
+    horizon_date: Mapped[date] = mapped_column(Date, nullable=False)
+    placed_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
+    filled_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
+    cancelled_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
+    cancel_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    event_price: Mapped[_Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    horizon_price: Mapped[_Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+
+    strategy_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    allocator_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    execution_engine_version: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    # Phase 5 allocation provenance
+    weight: Mapped[float] = mapped_column(Float, nullable=False)
+    raw_bid_weight: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pool_corr: Mapped[float | None] = mapped_column(Float, nullable=True)
+    contribution_multiplier: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    adjusted_bid_weight: Mapped[float | None] = mapped_column(Float, nullable=True)
+    effective_corr_window: Mapped[int] = mapped_column(Integer, nullable=False, default=60)
+    rewarded_for_negative_corr: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    would_change_rank: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    size_clamped_by_override: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    __table_args__ = (
+        Index("ix_paper_order_status_horizon", "status", "horizon_date"),
+        Index("ix_paper_order_status_alloc_date", "status", "allocation_date"),
+        Index("ix_paper_order_alloc_date_strategy", "allocation_date", "strategy"),
+        Index("ix_paper_order_strategy_placed", "strategy", "placed_at"),
+        Index("ix_paper_order_run_id", "allocation_run_id"),
+        CheckConstraint(
+            "status IN ('PLACED', 'ENTRY_FILLED', 'CANCELLED')",
+            name="ck_paper_order_status",
+        ),
+        CheckConstraint("quantity > 0", name="ck_paper_order_qty_positive"),
+        # Time-consistency CHECKs (spec § 4.1 — round-7 merge):
+        CheckConstraint(
+            "status != 'PLACED' OR (filled_at IS NULL AND cancelled_at IS NULL)",
+            name="ck_paper_order_placed_no_terminal_ts",
+        ),
+        CheckConstraint(
+            "status != 'ENTRY_FILLED' OR filled_at IS NOT NULL",
+            name="ck_paper_order_entry_filled_has_ts",
+        ),
+        CheckConstraint(
+            "status != 'CANCELLED' OR cancelled_at IS NOT NULL",
+            name="ck_paper_order_cancelled_has_ts",
+        ),
+    )
+
+
+class PaperFill(Base):
+    __tablename__ = "paper_fill"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("paper_order.id"), nullable=False)
+    # FK is safe in this direction: paper_position is created first (with
+    # entry_fill_id NULL), THEN paper_fill INSERT references the known
+    # position_id. The circular-FK problem only affects the reverse
+    # direction (paper_position.entry_fill_id / exit_fill_id → paper_fill),
+    # which is why THOSE two columns stay as plain nullable Integer.
+    position_id: Mapped[int] = mapped_column(ForeignKey("paper_position.id"), nullable=False)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)
+    price: Mapped[_Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    filled_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
+    cash_delta: Mapped[_Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    realized_pnl: Mapped[_Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+
+    __table_args__ = (
+        Index("ix_paper_fill_order_id", "order_id"),
+        Index("ix_paper_fill_position_side", "position_id", "side"),
+        UniqueConstraint("order_id", "side", name="uq_paper_fill_order_side"),
+        CheckConstraint("side IN ('ENTRY', 'EXIT')", name="ck_paper_fill_side"),
+        CheckConstraint("quantity > 0", name="ck_paper_fill_qty_positive"),
+    )
+
+
+class PaperPosition(Base):
+    __tablename__ = "paper_position"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("paper_order.id"), nullable=False, unique=True)
+    # entry_fill_id / exit_fill_id: per spec § 4.7, plain nullable INTEGER on SQLite v0
+    # (no FK to paper_fill to avoid the circular-FK problem during ENTRY-flow
+    # transaction). Phase 7 / Postgres migration tightens to deferred FKs.
+    entry_fill_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    exit_fill_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    strategy: Mapped[str] = mapped_column(String(64), nullable=False)
+    ticker: Mapped[str] = mapped_column(String(16), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    entry_price: Mapped[_Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    entry_date: Mapped[date] = mapped_column(Date, nullable=False)
+    horizon_date: Mapped[date] = mapped_column(Date, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    opened_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
+    closed_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
+    exit_price: Mapped[_Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    realized_pnl: Mapped[_Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+
+    __table_args__ = (
+        Index("ix_paper_position_status_horizon", "status", "horizon_date"),
+        Index("ix_paper_position_strategy_ticker", "strategy", "ticker"),
+        Index("ix_paper_position_entry_fill", "entry_fill_id"),
+        Index("ix_paper_position_exit_fill", "exit_fill_id"),
+        CheckConstraint("status IN ('OPEN', 'CLOSED')", name="ck_paper_position_status"),
+        CheckConstraint(
+            "status != 'OPEN' OR exit_fill_id IS NULL",
+            name="ck_paper_position_open_no_exit",
+        ),
+        CheckConstraint(
+            "status != 'CLOSED' OR (entry_fill_id IS NOT NULL AND exit_fill_id IS NOT NULL)",
+            name="ck_paper_position_closed_both_set",
+        ),
+    )
+
+
+class PaperCashLedger(Base):
+    __tablename__ = "paper_cash_ledger"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    timestamp: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
+    delta: Mapped[_Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    reason: Mapped[str] = mapped_column(String(32), nullable=False)
+    fill_id: Mapped[int | None] = mapped_column(ForeignKey("paper_fill.id"), nullable=True)
+    balance_after: Mapped[_Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+
+    __table_args__ = (
+        Index("ix_paper_cash_ts", "timestamp"),
+        Index("ix_paper_cash_fill", "fill_id"),
+        CheckConstraint(
+            "reason IN ('ENTRY_FILL', 'EXIT_FILL', 'INITIAL_DEPOSIT', 'MANUAL_ADJUSTMENT')",
+            name="ck_paper_cash_reason",
+        ),
+    )
+
+
+class PaperAuditEvent(Base):
+    __tablename__ = "paper_audit_event"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    timestamp: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(48), nullable=False)
+    order_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    strategy: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    context: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+    __table_args__ = (
+        Index("ix_paper_audit_ts", "timestamp"),
+        Index("ix_paper_audit_type_ts", "event_type", "timestamp"),
+        Index("ix_paper_audit_order", "order_id"),
+        Index("ix_paper_audit_strategy_ts", "strategy", "timestamp"),
+        CheckConstraint(
+            "event_type IN ("
+            "'ORDER_PLACED', 'ORDER_PLACED_DUPLICATE', 'ORDER_REJECTED', "
+            "'ORDER_CANCELLED', 'ORDER_ENTRY_FILLED', 'POSITION_CLOSED', "
+            "'KILL_SWITCH_FLIPPED', 'KILL_SWITCH_CYCLE_SKIPPED', "
+            "'TICK_COMPLETED', 'TICK_REPROCESSED_COMPLETED', "
+            "'SCHEDULER_GAP_DETECTED', 'ENGINE_INVARIANT_ERROR'"
+            ")",
+            name="ck_paper_audit_event_type",
+        ),
     )

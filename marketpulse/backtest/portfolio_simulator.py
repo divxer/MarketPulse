@@ -9,7 +9,6 @@ for the implemented steps.
 """
 from __future__ import annotations
 
-import dataclasses
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import TYPE_CHECKING
@@ -19,17 +18,19 @@ if TYPE_CHECKING:
 
     from marketpulse.backtest.correlation import PriceProvider
 
-from marketpulse.backtest.contribution import (
-    BidWeightMetadata,
-    compute_adjusted_bid_weight,
-    daily_contribution_return,
-    phase5d_kwargs_from_metadata,
-    pool_corr_excluding_self,
+from marketpulse.backtest.allocation import (
+    AllocationContext,
+    AllocationWinner,
+    BidCandidate,
+    BlockedBidReason,
+    PositionSnapshot,
+    SizingContext,
+    allocate_for_day,
 )
-from marketpulse.backtest.correlation import find_correlation_neighbors
+from marketpulse.backtest.contribution import (
+    daily_contribution_return,
+)
 from marketpulse.backtest.metrics import compute_metrics
-from marketpulse.backtest.policy import MIN_OVERLAP_DAYS
-from marketpulse.backtest.sharpe import compute_bid_weights, compute_position_sizes
 from marketpulse.backtest.trading_calendar import (
     build_calendar,
     elapsed_fraction,
@@ -177,8 +178,14 @@ def simulate_shared_pool(
     else:
         risk_policy = "corr06_only_v0"
 
-    sector_cap_dollars = sector_cap_pct * initial_capital
-    correlation_cap_dollars = correlation_cap_pct * initial_capital
+    # Phase 5: sector_cap_dollars / correlation_cap_dollars were
+    # computed as sector_cap_pct * initial_capital. The kernel
+    # (allocate_for_day) now expresses the same caps as
+    # sector_cap_pct * max_capital_in_use. The two coincide in the
+    # default config (initial_capital == max_capital_in_use); the
+    # frozen Phase 5 baseline confirms behavioral parity. If callers
+    # ever pass divergent values, the cap math now uses
+    # max_capital_in_use — re-validate the baseline.
 
     # Resolve sector_provider — default to real get_sector
     if sector_provider is None:
@@ -328,334 +335,218 @@ def simulate_shared_pool(
 
         # ─── BID COLLECT ───
         in_flight_tickers = {p.ticker for p in open_positions}
-        todays_bids = [
+        todays_raw_bids = [
             b for b in bids_by_entry.get(d, [])
             if b.ticker not in in_flight_tickers
         ]
 
-        # ─── WEIGHT COMPUTE ───
-        strategies_today = sorted({b.strategy for b in todays_bids})
-        weights_raw: dict[str, float | None] = {}
-        weights: dict[str, float | None] = {}
-        floor_hits: set[str] = set()
-        bid_weight_metadata: dict[str, BidWeightMetadata] = {}
-
-        if strategies_today:
-            weights_raw, floor_hits = compute_bid_weights(
-                strategies_today, daily_curves,
-                as_of=d, lookback_days=lookback_days,
+        # ─── WEIGHT + SIZE + DEDUP + ALLOCATE ─── (delegated to kernel)
+        # Build kernel inputs. PositionSnapshot encodes dollar-exposure
+        # as quantity=1, entry_price=position_size — matches the kernel's
+        # _dollar_exposure = quantity * entry_price contract.
+        bid_candidates: list[BidCandidate] = [
+            BidCandidate(
+                strategy=b.strategy,
+                ticker=b.ticker,
+                event_time=b.event_time,
+                event_price=b.event_price,
+                horizon_date=b.horizon_date,
+                horizon_price=b.horizon_price,
+                strategy_version="",
             )
-
-            # NEW Phase 5d: always compute both raw and adjusted, always populate
-            # bid_weight_metadata. The contribution_enabled toggle only chooses
-            # which dict drives DEDUP/ALLOC.
-            weights_adjusted: dict[str, float | None] = {}
-            for s in strategies_today:
-                raw = weights_raw.get(s)
-                # Provenance: POOL_CORR_MODE == "LOO_ONLY_v0" — spec § 2 lock #7 + #21.
-                pool_corr, eff_window = pool_corr_excluding_self(
-                    daily_strategy_contribution_returns.get(s, []),
-                    daily_pool_returns,
-                    as_of=d,
-                    lookback_days=lookback_days,
-                    min_overlap=MIN_OVERLAP_DAYS,
-                )
-                adjusted, multiplier, rewarded = compute_adjusted_bid_weight(
-                    raw_sharpe=raw,
-                    pool_corr=pool_corr,
-                    lam=contribution_lambda,
-                    clip_min=0.5,
-                    clip_max=1.2,
-                )
-                weights_adjusted[s] = adjusted
-                bid_weight_metadata[s] = BidWeightMetadata(
-                    raw=raw, pool_corr=pool_corr,
-                    multiplier=multiplier, adjusted=adjusted,
-                    effective_window=eff_window,
-                    rewarded_for_negative_corr=rewarded,
-                    would_change_rank=False,  # computed below
-                )
-                pool_corr_by_strategy.setdefault(s, []).append(pool_corr)
-
-            # Compute would_change_rank for EVERY strategy (regardless of toggle)
-            sorted_raw = sorted(
-                strategies_today,
-                key=lambda s: (-(weights_raw.get(s) or 0.0), s),
+            for b in todays_raw_bids
+        ]
+        existing_snapshots: list[PositionSnapshot] = [
+            PositionSnapshot(
+                strategy=p.strategy,
+                ticker=p.ticker,
+                quantity=1,
+                entry_price=p.position_size,
+                sector=None,
+                open_since=p.entry_date,
             )
-            sorted_adj = sorted(
-                strategies_today,
-                key=lambda s: (-(weights_adjusted.get(s) or 0.0), s),
-            )
-            rank_raw = {s: i for i, s in enumerate(sorted_raw)}
-            rank_adj = {s: i for i, s in enumerate(sorted_adj)}
-            for s in strategies_today:
-                if rank_raw[s] != rank_adj[s]:
-                    bid_weight_metadata[s] = dataclasses.replace(
-                        bid_weight_metadata[s], would_change_rank=True,
-                    )
-
-            # The toggle only chooses which weight drives DEDUP/ALLOC
-            weights = weights_adjusted if contribution_enabled else weights_raw
-
-        # Phase 5e: bid_weight_metadata-to-kwargs serialization now in
-        # contribution.phase5d_kwargs_from_metadata (spec § 2 lock #7).
-
-        # n_floor_hits telemetry (post-floor-hit set is the source of truth)
-        for s in floor_hits:
-            n_floor_hits_by_strategy[s] = n_floor_hits_by_strategy.get(s, 0) + 1
-
-        # ─── SIZE COMPUTE ─── (Phase 5b step, spec § 2)
-        # Compute per-strategy position sizes BEFORE dedup so undersized
-        # strategies never win a dedup contest they wouldn't survive anyway.
-        # ALLOCATE consumes position_sizes[strategy] for cap arithmetic and
-        # records the requested size on every BidRecord outcome.
-        if sizing_enabled and strategies_today:
-            position_sizes, raw_sizes_below_min, clamped_by_override = (
-                compute_position_sizes(
-                    strategies_today, daily_curves,
-                    as_of=d,
-                    base=base_position_size,
-                    target_vol=target_vol,
-                    min_position=min_position,
-                    max_position=max_position,
-                    lookback_days=lookback_days,
-                    per_strategy_overrides=per_strategy_overrides,
-                )
-            )
-        else:
-            # Fixed-mode sizing: still honor per-strategy override base + clamp
-            # (spec § 2 lock #6: overrides apply in BOTH sizing modes).
-            overrides_map = per_strategy_overrides or {}
-            position_sizes = {}
-            clamped_by_override = {}
-            raw_sizes_below_min = {}
-            for s in strategies_today:
-                ov_base, ov_min, ov_max = overrides_map.get(s, (None, None, None))
-                eff_base = ov_base if ov_base is not None else base_position_size
-                eff_min = ov_min if ov_min is not None else min_position
-                eff_max = ov_max if ov_max is not None else max_position
-                raw = eff_base
-                clamped_by_override[s] = raw > eff_max
-                if raw < eff_min:
-                    position_sizes[s] = None
-                    raw_sizes_below_min[s] = raw
-                else:
-                    position_sizes[s] = min(raw, eff_max)
-
-        # Phase 5e cleanup: filter None-sized strategies into size_too_small
-        # outcomes. Runs after BOTH sizing branches so override-clamped Nones
-        # from the fixed-mode else branch are also caught (closes the C12
-        # latent bug where fixed-mode + override min > base would leak None
-        # positions into DEDUP/ALLOC).
-        if strategies_today:
-            strategies_skipped_by_size = {
-                s for s, sz in position_sizes.items() if sz is None
-            }
-            if strategies_skipped_by_size:
-                new_todays_bids = []
-                for b in todays_bids:
-                    if b.strategy in strategies_skipped_by_size:
-                        all_bid_records.append(BidRecord(
-                            date=d, strategy=b.strategy, ticker=b.ticker,
-                            weight=weights[b.strategy],
-                            outcome="size_too_small",
-                            winner=None,
-                            position_size=raw_sizes_below_min[b.strategy],
-                            # Lock #23: bid fell below floor — raw < eff_min, not
-                            # raw > eff_max. Override-clamp attribution is False.
-                            size_clamped_by_override=False,
-                            **phase5d_kwargs_from_metadata(
-                                bid_weight_metadata.get(b.strategy), b.strategy,
-                            ),
-                        ))
-                        n_size_too_small_by_strategy[b.strategy] = (
-                            n_size_too_small_by_strategy.get(b.strategy, 0) + 1
-                        )
-                        n_bids_by_strategy[b.strategy] = (
-                            n_bids_by_strategy.get(b.strategy, 0) + 1
-                        )
-                    else:
-                        new_todays_bids.append(b)
-                todays_bids = new_todays_bids
-                strategies_today = [
-                    s for s in strategies_today
-                    if s not in strategies_skipped_by_size
-                ]
-
-        # ─── DEDUP (same-day same-ticker collision) ───
-        bids_by_ticker: dict[str, list] = {}
-        for b in todays_bids:
-            bids_by_ticker.setdefault(b.ticker, []).append(b)
-        winners: dict[str, object] = {}
-        for ticker, group in bids_by_ticker.items():
-            # 3-key composite: (-weight, event_time, strategy_name)
-            best = min(group, key=lambda b: (
-                -weights[b.strategy], b.event_time, b.strategy,
-            ))
-            winners[ticker] = best
-            for loser in group:
-                if loser is not best:
-                    all_bid_records.append(BidRecord(
-                        date=d, strategy=loser.strategy, ticker=ticker,
-                        weight=weights[loser.strategy],
-                        outcome="dedup_loser", winner=best.strategy,
-                        position_size=position_sizes[loser.strategy],
-                        size_clamped_by_override=clamped_by_override.get(
-                            loser.strategy, False,
-                        ),
-                        **phase5d_kwargs_from_metadata(
-                            bid_weight_metadata.get(loser.strategy), loser.strategy,
-                        ),
-                    ))
-                    n_dedup_skipped_by_strategy[loser.strategy] = (
-                        n_dedup_skipped_by_strategy.get(loser.strategy, 0) + 1
-                    )
-                    # Loser still counts as a bid (for n_bids + avg_bid_weight)
-                    n_bids_by_strategy[loser.strategy] = (
-                        n_bids_by_strategy.get(loser.strategy, 0) + 1
-                    )
-                    bid_weights_by_strategy.setdefault(loser.strategy, []).append(
-                        weights[loser.strategy]
-                    )
-
-        # ─── ALLOCATE (capital-constrained, greedy by weight desc) ───
-        # Spec § 2: bids of the SAME strategy share the same per-strategy size
-        # (Phase 5b: variable per strategy; Phase 5a: uniform base).
-        sorted_winners = sorted(
-            winners.values(),
-            key=lambda b: (-weights[b.strategy], b.event_time, b.strategy),
+            for p in open_positions
+        ]
+        alloc_ctx = AllocationContext(
+            allocation_date=d,
+            target_vol=target_vol,
+            lookback_days=lookback_days,
+            sector_caps_enabled=sector_caps_enabled,
+            sector_cap_pct=sector_cap_pct,
+            correlation_caps_enabled=correlation_caps_enabled,
+            correlation_cap_pct=correlation_cap_pct,
+            correlation_threshold=correlation_threshold,
+            contribution_enabled=contribution_enabled,
+            contribution_lambda=contribution_lambda,
+            pool_corr_mode="LOO_ONLY_v0",
+            phase5e_warm_pool_overlap_days=0,
+            max_capital_in_use=max_capital_in_use,
+        )
+        sizing_ctx = SizingContext(
+            base_position_size=base_position_size,
+            min_position=min_position,
+            max_position=max_position,
+            sizing_enabled=sizing_enabled,
+            per_strategy_overrides=per_strategy_overrides or {},
+        )
+        # Phase 5c sector cap is expressed against initial_capital,
+        # while the kernel expresses it against max_capital_in_use.
+        # The two coincide in Phase 5 default config (initial_capital
+        # == max_capital_in_use == 10_000); see the public function
+        # signature defaults. The cap-dollars math has been validated
+        # against the frozen Phase 5 baseline; if the two ever diverge,
+        # the cap-pct numerator must be patched here BEFORE building
+        # the context.
+        alloc_result = allocate_for_day(
+            bids=bid_candidates,
+            existing_positions=existing_snapshots,
+            cash_available=cash,
+            allocation_context=alloc_ctx,
+            sizing_context=sizing_ctx,
+            daily_curves=daily_curves,
+            daily_strategy_contribution_returns=daily_strategy_contribution_returns,
+            daily_pool_returns=daily_pool_returns,
+            sector_provider=sector_provider,
+            price_provider=price_provider,
         )
 
-        # ─── ALLOCATE pre-warm: sector lookup + running exposure ───
+        # Floor-hit telemetry — extracted from the kernel.
+        for s in alloc_result.floor_hits:
+            n_floor_hits_by_strategy[s] = n_floor_hits_by_strategy.get(s, 0) + 1
+        # Per-strategy pool_corr today (avg_pool_corr telemetry).
+        for s, pc in alloc_result.pool_corr_today:
+            pool_corr_by_strategy.setdefault(s, []).append(pc)
+
+        # Helpers to translate kernel outputs back into the Phase 5
+        # BidRecord shape that downstream finalization expects.
+        def _phase5d_kwargs_from_event(event):
+            return {
+                "raw_bid_weight": event.raw_bid_weight,
+                "pool_corr": event.pool_corr,
+                "contribution_multiplier": event.contribution_multiplier,
+                "adjusted_bid_weight": event.adjusted_bid_weight,
+                "effective_corr_window": event.effective_corr_window,
+                "rewarded_for_negative_corr": event.rewarded_for_negative_corr,
+                "would_change_rank": event.would_change_rank,
+            }
+
+        for event in alloc_result.timeline:
+            if isinstance(event, AllocationWinner):
+                # WON outcome — also mutates open_positions + cash.
+                all_bid_records.append(BidRecord(
+                    date=d, strategy=event.strategy, ticker=event.ticker,
+                    weight=event.weight,
+                    outcome="won", winner=None,
+                    position_size=event.position_size,
+                    size_clamped_by_override=event.size_clamped_by_override,
+                    **_phase5d_kwargs_from_event(event),
+                ))
+                n_trades_by_strategy[event.strategy] = (
+                    n_trades_by_strategy.get(event.strategy, 0) + 1
+                )
+                n_bids_by_strategy[event.strategy] = (
+                    n_bids_by_strategy.get(event.strategy, 0) + 1
+                )
+                bid_weights_by_strategy.setdefault(event.strategy, []).append(
+                    event.weight
+                )
+                open_positions.append(_OpenPosition(
+                    strategy=event.strategy, ticker=event.ticker,
+                    entry_date=d, entry_price=event.event_price,
+                    horizon_date=event.horizon_date,
+                    horizon_price=event.horizon_price,
+                    position_size=event.position_size,
+                ))
+            else:
+                # BlockedBidReason — map reason → outcome literal.
+                assert isinstance(event, BlockedBidReason)
+                outcome = event.reason
+                kwargs = {
+                    "date": d,
+                    "strategy": event.strategy,
+                    "ticker": event.ticker,
+                    "weight": event.weight,
+                    "outcome": outcome,
+                    "winner": event.winner,
+                    "position_size": event.position_size,
+                    "size_clamped_by_override": event.size_clamped_by_override,
+                    **_phase5d_kwargs_from_event(event),
+                }
+                if outcome == "sector_cap_full" and event.blocked_by_sector:
+                    kwargs["blocked_by_sector"] = event.blocked_by_sector
+                if (
+                    outcome == "correlation_cap_full"
+                    and event.blocked_by_correlation_with
+                ):
+                    kwargs["blocked_by_correlation_with"] = (
+                        event.blocked_by_correlation_with
+                    )
+                all_bid_records.append(BidRecord(**kwargs))
+
+                # Counters
+                if outcome == "size_too_small":
+                    n_size_too_small_by_strategy[event.strategy] = (
+                        n_size_too_small_by_strategy.get(event.strategy, 0) + 1
+                    )
+                    n_bids_by_strategy[event.strategy] = (
+                        n_bids_by_strategy.get(event.strategy, 0) + 1
+                    )
+                    # NOTE: size_too_small intentionally does NOT update
+                    # bid_weights_by_strategy — matches Phase 5 contract.
+                elif outcome == "dedup_loser":
+                    n_dedup_skipped_by_strategy[event.strategy] = (
+                        n_dedup_skipped_by_strategy.get(event.strategy, 0) + 1
+                    )
+                    n_bids_by_strategy[event.strategy] = (
+                        n_bids_by_strategy.get(event.strategy, 0) + 1
+                    )
+                    bid_weights_by_strategy.setdefault(
+                        event.strategy, []
+                    ).append(event.weight)
+                else:
+                    # cap_full / cash_short / sector_cap_full / correlation_cap_full
+                    if outcome == "cap_full":
+                        n_capacity_skipped_by_strategy[event.strategy] = (
+                            n_capacity_skipped_by_strategy.get(
+                                event.strategy, 0
+                            ) + 1
+                        )
+                    elif outcome == "cash_short":
+                        n_cash_short_skipped_by_strategy[event.strategy] = (
+                            n_cash_short_skipped_by_strategy.get(
+                                event.strategy, 0
+                            ) + 1
+                        )
+                    elif outcome == "sector_cap_full":
+                        n_sector_cap_skipped_by_strategy[event.strategy] = (
+                            n_sector_cap_skipped_by_strategy.get(
+                                event.strategy, 0
+                            ) + 1
+                        )
+                    elif outcome == "correlation_cap_full":
+                        n_correlation_cap_skipped_by_strategy[event.strategy] = (
+                            n_correlation_cap_skipped_by_strategy.get(
+                                event.strategy, 0
+                            ) + 1
+                        )
+                        n_correlation_cap_events += 1
+                    n_bids_by_strategy[event.strategy] = (
+                        n_bids_by_strategy.get(event.strategy, 0) + 1
+                    )
+                    bid_weights_by_strategy.setdefault(
+                        event.strategy, []
+                    ).append(event.weight)
+
+        # Cash is canonical from the kernel.
+        cash = alloc_result.cash_remaining
+
+        # Phase 5c: snapshot per-day sector exposure (post-ALLOCATE).
+        # Recompute sector_by_ticker over the current open_positions —
+        # the kernel's internal map isn't returned, but sector_provider
+        # is idempotent (and the JSON cache makes it cheap).
         sector_by_ticker: dict[str, str] = {}
         for p in open_positions:
             sector_by_ticker.setdefault(p.ticker, sector_provider(p.ticker))
-        for b in sorted_winners:
-            sector_by_ticker.setdefault(b.ticker, sector_provider(b.ticker))
-
-        sector_exposure: dict[str, float] = {}
-        for p in open_positions:
-            s = sector_by_ticker[p.ticker]
-            sector_exposure[s] = sector_exposure.get(s, 0.0) + p.position_size
-
-        for b in sorted_winners:
-            n_bids_by_strategy[b.strategy] = n_bids_by_strategy.get(b.strategy, 0) + 1
-            bid_weights_by_strategy.setdefault(b.strategy, []).append(
-                weights[b.strategy]
-            )
-            requested_size = position_sizes[b.strategy]
-            capital_in_use = sum(p.position_size for p in open_positions)
-            if capital_in_use + requested_size > max_capital_in_use:
-                all_bid_records.append(BidRecord(
-                    date=d, strategy=b.strategy, ticker=b.ticker,
-                    weight=weights[b.strategy],
-                    outcome="cap_full", winner=None,
-                    position_size=requested_size,
-                    size_clamped_by_override=clamped_by_override.get(b.strategy, False),
-                    **phase5d_kwargs_from_metadata(bid_weight_metadata.get(b.strategy), b.strategy),
-                ))
-                n_capacity_skipped_by_strategy[b.strategy] = (
-                    n_capacity_skipped_by_strategy.get(b.strategy, 0) + 1
-                )
-                continue
-            if cash < requested_size:
-                all_bid_records.append(BidRecord(
-                    date=d, strategy=b.strategy, ticker=b.ticker,
-                    weight=weights[b.strategy],
-                    outcome="cash_short", winner=None,
-                    position_size=requested_size,
-                    size_clamped_by_override=clamped_by_override.get(b.strategy, False),
-                    **phase5d_kwargs_from_metadata(bid_weight_metadata.get(b.strategy), b.strategy),
-                ))
-                n_cash_short_skipped_by_strategy[b.strategy] = (
-                    n_cash_short_skipped_by_strategy.get(b.strategy, 0) + 1
-                )
-                continue
-            # ─── NEW Phase 5c-1: sector cap check ───
-            candidate_sector = sector_by_ticker[b.ticker]
-            if (
-                sector_caps_enabled
-                and sector_exposure.get(candidate_sector, 0.0) + requested_size
-                > sector_cap_dollars
-            ):
-                all_bid_records.append(BidRecord(
-                    date=d, strategy=b.strategy, ticker=b.ticker,
-                    weight=weights[b.strategy],
-                    outcome="sector_cap_full", winner=None,
-                    position_size=requested_size,
-                    blocked_by_sector=candidate_sector,
-                    size_clamped_by_override=clamped_by_override.get(b.strategy, False),
-                    **phase5d_kwargs_from_metadata(bid_weight_metadata.get(b.strategy), b.strategy),
-                ))
-                n_sector_cap_skipped_by_strategy[b.strategy] = (
-                    n_sector_cap_skipped_by_strategy.get(b.strategy, 0) + 1
-                )
-                continue
-            # ─── NEW Phase 5c-2: correlation cap check ───
-            # Known limit (spec § 5 + Appendix C.3): neighbor-sum is NOT
-            # transitive. For an N-chain topology A-B-C-...-N where adjacent
-            # pairs have ρ≥threshold but non-adjacent don't, total cluster
-            # exposure can reach N/2 × cap (e.g. 2.5× for a 5-chain). A
-            # transitive DBSCAN-style cluster algo would tighten this; see
-            # Appendix C.3 for the upgrade path. Acceptable for current
-            # ~30-ticker universe.
-            if correlation_caps_enabled and price_provider is not None:
-                open_tickers = [p.ticker for p in open_positions]
-                neighbors, corr_diagnostics = find_correlation_neighbors(
-                    b.ticker, open_tickers,
-                    as_of=d, threshold=correlation_threshold,
-                    lookback_days=lookback_days,
-                    price_provider=price_provider,
-                )
-                cluster_exposure = requested_size + sum(
-                    p.position_size for p in open_positions
-                    if p.ticker in neighbors
-                )
-                if cluster_exposure > correlation_cap_dollars:
-                    all_bid_records.append(BidRecord(
-                        date=d, strategy=b.strategy, ticker=b.ticker,
-                        weight=weights[b.strategy],
-                        outcome="correlation_cap_full", winner=None,
-                        position_size=requested_size,
-                        blocked_by_correlation_with=corr_diagnostics,
-                        size_clamped_by_override=clamped_by_override.get(
-                            b.strategy, False,
-                        ),
-                        **phase5d_kwargs_from_metadata(
-                            bid_weight_metadata.get(b.strategy), b.strategy,
-                        ),
-                    ))
-                    n_correlation_cap_skipped_by_strategy[b.strategy] = (
-                        n_correlation_cap_skipped_by_strategy.get(b.strategy, 0) + 1
-                    )
-                    n_correlation_cap_events += 1
-                    continue
-            open_positions.append(_OpenPosition(
-                strategy=b.strategy, ticker=b.ticker,
-                entry_date=d, entry_price=b.event_price,
-                horizon_date=b.horizon_date, horizon_price=b.horizon_price,
-                position_size=requested_size,
-            ))
-            sector_exposure[candidate_sector] = (
-                sector_exposure.get(candidate_sector, 0.0) + requested_size
-            )
-            cash -= requested_size
-            n_trades_by_strategy[b.strategy] = n_trades_by_strategy.get(b.strategy, 0) + 1
-            all_bid_records.append(BidRecord(
-                date=d, strategy=b.strategy, ticker=b.ticker,
-                weight=weights[b.strategy],
-                outcome="won", winner=None,
-                position_size=requested_size,
-                size_clamped_by_override=clamped_by_override.get(b.strategy, False),
-                **phase5d_kwargs_from_metadata(bid_weight_metadata.get(b.strategy), b.strategy),
-            ))
-
-        # Phase 5c: snapshot per-day sector exposure (post-ALLOCATE).
-        # Every ticker in open_positions is guaranteed to be in
-        # sector_by_ticker because pre-warm above populated all
-        # open_positions + candidates, and winning candidates are a subset
-        # of candidates. Direct dict access surfaces bugs faster than a
-        # silent .get() fallback would.
         day_snapshot: dict[str, float] = {}
         for p in open_positions:
             s = sector_by_ticker[p.ticker]

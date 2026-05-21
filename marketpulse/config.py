@@ -44,6 +44,12 @@ class Settings(BaseSettings):
     # Alert debounce: don't re-fire the same rule within this many minutes
     alert_debounce_minutes: int = Field(60, alias="ALERT_DEBOUNCE_MINUTES", ge=0)
 
+    # Phase 6a paper-trading settings
+    paper_tick_hour: int = Field(17, alias="MP_PAPER_TICK_HOUR")
+    paper_tick_minute: int = Field(30, alias="MP_PAPER_TICK_MINUTE")
+    paper_initial_deposit: str = Field("10000", alias="MP_PAPER_INITIAL_DEPOSIT")
+    paper_kill_switch: bool = Field(False, alias="MP_PAPER_KILL_SWITCH")
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
