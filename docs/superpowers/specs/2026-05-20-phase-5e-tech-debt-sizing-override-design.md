@@ -15,7 +15,7 @@ Tech-debt sprint that strengthens Phase 5d's foundation (refactor + tests), ship
 3. **5b-3 sizing override** — optional `sizing:` block per strategy YAML, with strict validation.
 4. **Allocation observability** — `effective_allocation` + `rank_drift_from_signal` on `StrategyContribution`, always-on, default-on, deterministic-invariant-grade. Instruments the three named system-evolution debts (§ 10): ordering instability, signal-execution mismatch, no unified objective.
 
-No new features beyond the sizing override + observability metrics. No new modules. No DB migration. No new dependencies.
+No new features beyond the sizing override + observability metrics. **One new module** (`marketpulse/backtest/policy.py`, ~30 LOC, declarative-only — see § 2 lock #7 for rationale). No DB migration. No new dependencies.
 
 ---
 
@@ -27,7 +27,19 @@ No new features beyond the sizing override + observability metrics. No new modul
 4. **YAML schema**: optional `sizing:` block, partial overrides allowed. Strategies without the block inherit global defaults. Existing 6 YAMLs continue working unmodified (zero migration required).
 5. **Validation**: strict at load time. Loader merges overrides with globals, then validates `min ≤ base ≤ max`, all values `> 0`. ConfigError on violation, message includes strategy name + offending values.
 6. **Apply scope**: overrides apply to BOTH `sizing_enabled=True` (vol-target × conviction × clip) AND `sizing_enabled=False` (fixed mode uses overridden base).
-7. **`pool_corr_excludes_self` → `POOL_CORR_MODE` constant**: the per-BidRecord field is dropped (always-True noise), BUT the variant-discriminator semantic is preserved as a module-level constant in `contribution.py`: `POOL_CORR_MODE: Literal["LOO_ONLY_v0"] = "LOO_ONLY_v0"`. This keeps the future-extensibility hook (a v1 non-LOO variant would version-bump the constant) without polluting every BidRecord with a frozen-True field. The constant is exported from `contribution.py` and referenced once in `portfolio_simulator.py`'s WEIGHT block as a provenance assertion comment.
+7. **`pool_corr_excludes_self` → `POOL_CORR_MODE` constant in policy layer**: the per-BidRecord field is dropped (always-True noise), AND the variant-discriminator semantic is preserved as a module-level constant. Critically, the constant lives in a NEW dedicated policy-layer module `marketpulse/backtest/policy.py` (NOT in `contribution.py`). Rationale: `contribution.py` is signal-math (data plane); `POOL_CORR_MODE` is system policy (control plane). Putting policy constants in a signal module would be architectural drift — the kind of seed that grows into "signal modules silently dictating system behavior" over multiple phases.
+
+    Three constants colocate in `policy.py` because they share the same control-plane category:
+    ```python
+    # marketpulse/backtest/policy.py
+    from typing import Literal
+
+    MIN_OVERLAP_DAYS: int = 30
+    POOL_CORR_MODE: Literal["LOO_ONLY_v0"] = "LOO_ONLY_v0"
+    OBSERVABILITY_MODE: Literal["v1"] = "v1"
+    ```
+
+    Consumers import from `policy`, not from `contribution` or `portfolio_simulator`. This is the ONE new module Phase 5e allows itself — the "no new modules" guard from § 1 is relaxed for this single ~30-line policy file because the alternative is architectural drift accumulating across phases.
 8. **UI surfacing**: bid history `size` column tooltip shows "$<size> (custom limits: $<min>/$<max>)" when the bid's strategy has overrides. No new BidRecord field; pass `strategies_with_sizing_overrides: set[str]` as separate template context.
 9. **Test fixture**: one shared `phase5d_warm_pool` pytest fixture (90-day calendar, 2 anti-correlated strategies, bids every other day for 60 days). Lives in `tests/conftest.py` or dedicated fixture module. Smoke-tested itself.
 10. **Strategy dataclass extension**: 3 optional fields (`base_position_size`, `min_position`, `max_position` — each `float | None = None`). Existing fields unchanged.
@@ -38,6 +50,8 @@ No new features beyond the sizing override + observability metrics. No new modul
     - The override is a **post-hoc clamp** applied after the vol-target × conviction math (or after the fixed-mode constant). Single clip operation, no second sizing engine, no double-clipping.
     - This is a hard architectural invariant. Any future change that lets overrides feed back into signal-layer computations would constitute a Phase boundary violation and requires a fresh spec.
 13. **Test taxonomy — invariant tests vs behavioral tests are explicitly tagged.** Every new test in Phase 5e carries a `# Layer: invariant` or `# Layer: behavioral` comment at its docstring header (see § 6). Invariant tests assert structural properties that must hold regardless of synthetic-market dynamics (Σ contribution_returns == pool_return, no NaN, monotonic position-size clipping, override never relaxes global ceiling). Behavioral tests assert dynamics-dependent properties (rank flips occur, correlation has expected sign, avg_pool_corr is non-None given sufficient warm-up). This taxonomy prevents test drift in 5f+ where fixture dynamics evolve.
+
+    **Taxonomy is DESCRIPTIVE, not prescriptive.** The tag is added AFTER the author has decided what failure the test is detecting; the tag describes what was already true about the test's logic. Authors must NOT shape a test to "fit" a category — e.g., weakening a behavioral assertion to fit the invariant slot, or adding a fixture-dependent precondition to fit the behavioral slot. If a test resists clean categorization, that is a SIGNAL that the test is doing two things and should be split, not a license to relax the tag rules. Code reviewers verify: "given this test's actual logic, is the tag accurate?" — not "is the tag present?"
 14. **Allocation observability — default-ON, no gating flag.** The two new metrics (`effective_allocation`, `rank_drift_from_signal`) are computed at finalization on EVERY backtest run. No `observability_enabled` flag. Rationale: gating would reintroduce the same "silent missing telemetry" failure mode that the warm-pool fixture in Thread B was created to prevent. If display-level filtering is ever needed, add a UI-only / API-only switch — never a computation gate. **Stats are either present and complete, or the run did not happen.**
 15. **Allocation metrics are INVARIANT-grade telemetry, not stochastic.** `effective_allocation` and `rank_drift_from_signal` are deterministic functions of (final per-strategy capital, bid sequence). Given fixed inputs, the metrics return identical outputs every run. Their tests therefore live in the invariant taxonomy (lock #13). The ONLY behavioral aspect is whether a given fixture *triggers* a non-zero drift — that fixture-shape question is isolated as a separate behavioral guard test, never conflated with the metric's correctness. This separation prevents the metric from drifting into the same ambiguity class that bit `n_would_change_rank` in Phase 5d.
 16. **Allocation metrics are part of the CORE BACKTEST CONTRACT, not diagnostics.** Because lock #14 guarantees `effective_allocation` and `rank_drift_from_signal` are always populated, downstream consumers MAY assume their presence unconditionally:
@@ -45,11 +59,33 @@ No new features beyond the sizing override + observability metrics. No new modul
     - The `StrategyContribution` dataclass schema treats these fields as load-bearing, on the same tier as `contribution_pnl` and `avg_exposure`.
     - Any future spec that proposes gating, removing, or conditionally populating these fields constitutes a backward-incompatible contract change requiring a fresh design doc.
     - Equivalent restatement: there is no "diagnostics mode" for Phase 5e. The metrics are not opt-in observability for engineers; they are state the system carries because the system needs them to evolve.
-17. **`OBSERVABILITY_MODE` version anchor (no runtime branching).** Mirroring the `POOL_CORR_MODE` pattern from lock #7, `contribution.py` (or a new `marketpulse/backtest/observability.py` if cleaner — implementer choice) exports a module-level `Literal` constant:
-    ```python
-    OBSERVABILITY_MODE: Literal["v1"] = "v1"
+17. **`OBSERVABILITY_MODE` version anchor in policy layer.** Colocates with `POOL_CORR_MODE` and `MIN_OVERLAP_DAYS` in `marketpulse/backtest/policy.py` (see lock #7). Referenced once near the metric computation site as a provenance comment (e.g., `# Provenance: OBSERVABILITY_MODE == "v1" — spec § 2 lock #17`). The constant exists ONLY as a version anchor for future metric-schema evolution; NOTHING branches on it at runtime. A future v2 would bump the constant and add new fields to `StrategyContribution` without removing v1 fields (additive evolution). v0 / null state is not legal — there is no "before observability."
+18. **Explicit clamp pipeline order — locked, no implicit ordering.** Phase 5e introduces a third independent clip system (`sizing override`) alongside the two from 5c (`sector_cap`, `correlation_cap`). The ORDER in which these clips compose is now an explicit architectural commitment, NOT an emergent property of code layout. Per-day-loop sequence:
+
     ```
-    Referenced once near the metric computation site as a provenance comment (e.g., `# Provenance: OBSERVABILITY_MODE == "v1" — spec § 2 lock #17`). The constant exists ONLY as a version anchor for future metric-schema evolution; NOTHING branches on it at runtime. A future v2 would bump the constant and add new fields to `StrategyContribution` without removing v1 fields (additive evolution). v0 / null state is not legal — there is no "before observability."
+    1. SIGNAL    — compute raw_sharpe, contribution multiplier, adjusted_weight, rank
+                   (signal layer; NO read of sizing overrides, NO read of caps)
+    2. SIZE      — compute_position_sizes:
+                   a. raw_size = vol_target × alpha_conviction × eff_base
+                   b. clamp to (eff_min, eff_max)   ← sizing override applied here
+                   (execution-layer clamp #1: per-strategy envelope)
+    3. DEDUP     — when multiple strategies bid same ticker, highest weight wins
+                   (no clipping — pure selection)
+    4. ALLOC     — sequential per-bid:
+                   a. sector_cap check                  ← execution-layer clamp #2
+                   b. correlation_cap check             ← execution-layer clamp #3
+                   c. capacity (cash + max_capital)     ← execution-layer clamp #4
+                   d. record outcome (won / *_full / cash_short / size_too_small)
+    5. RECORD    — equity_curve, daily exposures, BidRecord with outcome
+    ```
+
+    **Invariants:**
+    - Each clip operates on the output of the previous step. No clip reads forward.
+    - Per-strategy override clamp (step 2b) MUST execute BEFORE pool-level caps (4a, 4b). Rationale: per-strategy envelope is a property of the strategy itself; pool-level caps are properties of the aggregate state. Swapping the order would mean a strategy's "preferred max" could be reduced by a pool cap to a value the strategy itself never intended.
+    - Cap order within ALLOC (sector → correlation → capacity) is the Phase 5c lock; 5e does NOT change it.
+    - Any future clip (e.g., Phase 6's pool-level VaR cap) must declare its position in this pipeline as part of its spec.
+
+    **Failure mode this lock prevents:** "size was clamped — why?" debugging where the answer depends on undocumented evaluation order. With the explicit pipeline, the answer is always "look at which clamp fired first" with a single source of truth.
 
 ---
 
@@ -869,6 +905,21 @@ Full suite green; ~935 tests total (915 + 20 new).
 - Heavy refactor (extract `caps.py`, `sizing.py`, `_compute_weights_with_metadata` helper, BidRecordAssembler layer). Medium refactor only in 5e.
 - Live trading. (Phase 6.)
 - Strategy evolution. (Phase 7.)
+- **`effective_weight_trace` per-BidRecord debug field — deliberately deferred.** Future debugging will benefit from a per-bid trace recording the value at each stage of the pipeline (lock #18). Sketch of the future structure:
+    ```python
+    @dataclass(frozen=True)
+    class EffectiveWeightTrace:
+        raw_sharpe: float | None           # signal stage 1
+        contribution_multiplier: float     # signal stage 2 (Phase 5d)
+        adjusted_weight: float | None      # signal output
+        raw_size_dollars: float            # execution stage 2a
+        size_after_override_clamp: float   # execution stage 2b
+        size_after_sector_cap: float       # execution stage 4a
+        size_after_correlation_cap: float  # execution stage 4b
+        final_position_size: float         # post-capacity, recorded
+        clamps_that_fired: tuple[Literal["override", "sector", "correlation", "capacity"], ...]
+    ```
+    Why deferred: this is a 12-13 field expansion of `BidRecord` (already 22 fields post-5d). Phase 5e is constraint-defining, not trace-instrumenting. Add to a future spec when Phase 6's optimizer needs to attribute clamps to specific constraints — likely Phase 6 itself or a dedicated debug-instrumentation phase.
 
 ---
 
@@ -913,9 +964,22 @@ The system optimizes a stack of partial objectives:
 There is no scalar objective $J$ that the entire stack maximizes. The system is **rule-following, not objective-driven**. Phase 6's optimization layer will require defining $J$ — likely a constrained optimization over $\sum_s x_s w_s$ subject to all current heuristics expressed as linear constraints. Until that exists, the current stack's behavior cannot be proved optimal relative to any criterion.
 **5e instrumentation:** `effective_allocation` is the canonical observable for "what the system actually optimized," distinct from the bid-weight signal. The gap between them is the heuristic-to-optimal residual that Phase 6 will need to close (or accept).
 
+### Three additional named risks (interpretability watch-list)
+
+These are NOT debts (no compounding component obligation) but interpretability hazards that grow as the heuristic stack deepens. Naming them so future readers can recognize the smell before it becomes a bug:
+
+**Risk A — Semantic layer stacking.**
+After 5e the system has four weight semantics in sequence: `raw_sharpe → adjusted_sharpe (contribution multiplier) → weights (DEDUP input) → position_size (after clamp)`. Plus three policy constants: `POOL_CORR_MODE`, `MIN_OVERLAP_DAYS`, `OBSERVABILITY_MODE`. Plus the override envelope. Each layer is independently correct, but debugging an unexpected outcome requires reasoning across all of them: "Did the signal change? Did the contribution multiplier change? Did the clamp fire? Did a cap block it?" The `effective_weight_trace` field deferred in § 9 is the eventual remediation; until then, `rank_drift_from_signal` is the proxy that flags when the layers are doing meaningfully different work.
+
+**Risk B — LOO correlation misinterpretation.**
+`pool_corr_excluding_self` is mathematically `corr(A, pool − A)`, not `corr(A, counterfactual pool without A)`. The first is a self-influenced residual correlation — the strategy contributes to the pool aggregate, then is subtracted out, producing a statistically stable but semantically subtle quantity. The spec's Appendix A (Phase 5d) names this boundary; lock #7's `POOL_CORR_MODE` constant documents it. The remaining hazard is human: future engineers may write user-facing copy ("this strategy is uncorrelated with the rest") that overpromises causal independence. Recommended mitigation: when adding any UI surface that displays pool_corr, route the copy through a glossary that links to Appendix A.
+
+**Risk C — Multi-clamp interaction with implicit dependencies.**
+Phase 5e adds the sizing-override clamp on top of Phase 5c's sector + correlation caps. The pipeline order is now locked (lock #18), but the SEMANTIC interaction is non-trivial: a strategy might set `max_position=$500` to express "I am a small-bet strategy," and then a sector cap might further reduce that to $300. The user-facing question "why did strategy X get $300 instead of its $500 maximum?" has TWO valid answers (override said max=$500 AND sector cap reduced it further). Without per-bid trace (Risk A's deferred feature), the answer requires reconstructing the pipeline manually. Recommended near-term mitigation: extend the `BidRecord.outcome` Literal to include a `"override_clamp_below_signal"` value when the override was the binding constraint (separate from `sector_cap_full` which already exists). DEFERRED to 5f or later — adds a Literal value to a frozen dataclass.
+
 **Architectural drift acknowledged but deferred:**
 
-- `phase5d_kwargs_from_metadata` lives in `contribution.py` (signal module) but is technically presentation-layer (BidRecord serialization). This is mild drift accepted in 5e to avoid spawning a new module. Phase 6 should formalize a `BidRecordAssembler` layer if telemetry threading grows further.
+- `phase5d_kwargs_from_metadata` lives in `contribution.py` (signal module) but is technically presentation-layer (BidRecord serialization). This is mild drift accepted in 5e to avoid spawning a second new module (the policy.py module from lock #7 is the one new module 5e allows). Phase 6 should formalize a `BidRecordAssembler` layer if telemetry threading grows further.
 - `_decompose_day_contributions` stays in `portfolio_simulator.py` because it mutates simulator-local accumulators. Pure-function extraction would require returning ~3 large structures per day, complicating the hot path. Acceptable for 5e.
 
 **Bottom line:** Phase 5e is **system stabilization and constraint layering**, NOT feature expansion. It is the last natural step before Phase 6's combinatorial optimization complexity. Architectural decisions in 5e (especially the lock #12 signal-vs-execution boundary) are designed to survive that transition.
