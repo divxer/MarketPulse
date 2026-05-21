@@ -151,8 +151,28 @@ class ForwardExecutionEngine:
         )
 
     def cancel_order(self, *, order_id: OrderId) -> None:
-        """Filled in Task 6a-2.6."""
-        raise NotImplementedError
+        """Idempotent cancel. PLACED → CANCELLED + audit. Terminal states
+        (ENTRY_FILLED, CANCELLED) are no-op."""
+        order = self._repo.find_paper_order_by_id(int(order_id))
+        if order is None:
+            raise ValueError(f"unknown order_id={order_id}")
+        if order.status in ("ENTRY_FILLED", "CANCELLED"):
+            return  # idempotent no-op
+        with self._repo.transaction():
+            self._repo.update_paper_order_status(
+                order_id=order.id,
+                new_status="CANCELLED",
+                cancelled_at=self._clock.now(),
+                cancel_reason="manual_cancel",
+            )
+            self._repo.write_audit_event(
+                event_type=AuditEventType.ORDER_CANCELLED,
+                order_id=order.id,
+                strategy=order.strategy,
+                reason="manual_cancel",
+                context={"prior_status": "PLACED"},
+                timestamp=self._clock.now(),
+            )
 
     def tick(self, *, as_of: date) -> TickResult:
         """Filled in Task 6a-2.7."""

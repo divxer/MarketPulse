@@ -219,3 +219,31 @@ def test_rejection_audit_committed_before_exception(session, monkeypatch):
             "raised (lock ix). A rejection without a committed audit is "
             "not a valid completed rejection."
         )
+
+
+def test_cancel_order_flips_placed_to_cancelled(session):
+    from marketpulse.db.models import PaperAuditEvent
+
+    engine, repo, _, _ = _engine(session)
+    result = engine.place_order(order_request=_request())
+    engine.cancel_order(order_id=result.order_id)
+
+    order = repo.find_paper_order_by_id(int(result.order_id))
+    assert order.status == "CANCELLED"
+
+    audits = session.execute(
+        select(PaperAuditEvent).where(
+            PaperAuditEvent.event_type == "ORDER_CANCELLED",
+        ),
+    ).scalars().all()
+    assert len(audits) == 1
+
+
+def test_cancel_order_idempotent_on_already_cancelled(session):
+    engine, repo, _, _ = _engine(session)
+    result = engine.place_order(order_request=_request())
+    engine.cancel_order(order_id=result.order_id)
+    # Second call: no-op
+    engine.cancel_order(order_id=result.order_id)
+    order = repo.find_paper_order_by_id(int(result.order_id))
+    assert order.status == "CANCELLED"
