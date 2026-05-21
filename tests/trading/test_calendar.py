@@ -2,18 +2,13 @@
 """6a-1: NYTradingCalendar invariants and smoke."""
 from __future__ import annotations
 
-from datetime import date
-
-import pytest
+from datetime import UTC, date, datetime
 
 
 def test_exchange_calendars_importable():
     """exchange_calendars is the locked dependency for lock xxxii."""
     import exchange_calendars
     assert exchange_calendars is not None
-
-
-from datetime import UTC, datetime
 
 
 def test_sessions_in_range_inclusive_count():

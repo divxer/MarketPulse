@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import dataclasses
-from datetime import date, datetime, UTC
+from datetime import UTC, date, datetime
 from decimal import Decimal
+
+import pytest
 
 
 def test_order_request_is_frozen():
@@ -96,9 +98,6 @@ def test_audit_event_type_enum_has_12_values():
     }
     actual = {e.value for e in AuditEventType}
     assert actual == expected, f"Missing: {expected - actual}; Extra: {actual - expected}"
-
-
-import pytest  # at end so the test_audit_event imports above are clean
 
 
 # Layer: stateful

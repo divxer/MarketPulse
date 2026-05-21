@@ -4,7 +4,11 @@
 
 def test_paper_models_have_expected_tablenames():
     from marketpulse.db.models import (
-        PaperAuditEvent, PaperCashLedger, PaperFill, PaperOrder, PaperPosition,
+        PaperAuditEvent,
+        PaperCashLedger,
+        PaperFill,
+        PaperOrder,
+        PaperPosition,
     )
     assert PaperOrder.__tablename__ == "paper_order"
     assert PaperFill.__tablename__ == "paper_fill"

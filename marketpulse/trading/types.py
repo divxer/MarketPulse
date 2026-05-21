@@ -9,9 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
-from enum import Enum
+from enum import StrEnum
 from typing import Literal, NewType
-
 
 # === ID newtypes ===
 
@@ -29,7 +28,7 @@ FillSide = Literal["ENTRY", "EXIT"]
 
 # === Audit event types — 12 in 6a (6b/6g extend) ===
 
-class AuditEventType(str, Enum):
+class AuditEventType(StrEnum):
     ORDER_PLACED = "ORDER_PLACED"
     ORDER_PLACED_DUPLICATE = "ORDER_PLACED_DUPLICATE"
     ORDER_REJECTED = "ORDER_REJECTED"

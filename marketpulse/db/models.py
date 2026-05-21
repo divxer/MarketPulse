@@ -1,4 +1,5 @@
 from datetime import UTC, date, datetime
+from decimal import Decimal as _Decimal
 from typing import Any
 
 from sqlalchemy import (
@@ -302,8 +303,6 @@ class EvaluationOutcome(Base):
 # Lock xxii: Decimal(18, 6) for all price/cash/P&L columns.
 # Lock xxix: All timestamps UTC via TZDateTime TypeDecorator.
 # Lock xiii: paper_fill, paper_audit_event, paper_cash_ledger are append-only.
-
-from decimal import Decimal as _Decimal
 
 
 class PaperOrder(Base):
