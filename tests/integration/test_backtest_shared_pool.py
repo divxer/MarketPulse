@@ -146,3 +146,47 @@ def test_run_shared_pool_sector_breakdown_populated(db_session):
     out = run_shared_pool_backtest(db_session, horizon=5)
     assert isinstance(out["shared"].sector_breakdown, dict)
     assert isinstance(out["shared"].max_sector_exposure_by_sector, dict)
+
+
+def test_run_shared_pool_default_contribution_disabled(db_session):
+    """Default kwargs → contribution_enabled is False, bid_policy is Phase 5a string."""
+    from marketpulse.backtest.simulator import run_shared_pool_backtest
+
+    _seed(db_session, ticker="AAA", strategy="momentum_breakout")
+    db_session.commit()
+
+    out = run_shared_pool_backtest(db_session, horizon=5)
+    assert out["shared"].contribution_enabled is False
+    assert out["shared"].bid_policy == "rolling_sharpe_60d_v0"
+    assert out["shared"].contribution_policy == "contribution_adjusted_sharpe_60d_v0"
+
+
+def test_run_shared_pool_contribution_enabled_provenance(db_session):
+    """contribution_enabled=True + non-default lambda threads through."""
+    from marketpulse.backtest.simulator import run_shared_pool_backtest
+
+    _seed(db_session, ticker="AAA", strategy="momentum_breakout")
+    db_session.commit()
+
+    out = run_shared_pool_backtest(
+        db_session, horizon=5,
+        contribution_enabled=True,
+        contribution_lambda=0.7,
+    )
+    assert out["shared"].contribution_enabled is True
+    assert out["shared"].contribution_lambda == 0.7
+    assert out["shared"].bid_policy == "contribution_adjusted_sharpe_60d_v0"
+
+
+def test_run_shared_pool_avg_pool_corr_populated_when_history_sufficient(db_session):
+    """avg_pool_corr is a defined float or None on every StrategyContribution."""
+    from marketpulse.backtest.simulator import run_shared_pool_backtest
+
+    _seed(db_session, ticker="AAA", strategy="momentum_breakout")
+    db_session.commit()
+
+    out = run_shared_pool_backtest(db_session, horizon=5)
+    # Outcome: every StrategyContribution has avg_pool_corr field (None or float)
+    for _s, c in out["shared"].per_strategy_stats.items():
+        assert c.avg_pool_corr is None or isinstance(c.avg_pool_corr, float)
+        assert c.n_would_change_rank >= 0

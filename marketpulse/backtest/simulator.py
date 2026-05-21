@@ -513,6 +513,9 @@ def run_shared_pool_backtest(
     correlation_caps_enabled: bool = True,
     correlation_cap_pct: float = 0.40,
     correlation_threshold: float = 0.60,
+    # Phase 5d: contribution-adjusted Sharpe
+    contribution_enabled: bool = False,
+    contribution_lambda: float = 0.5,
 ) -> dict:
     """Phase 5a/5b orchestrator. Spec § 4 (Phase 5a), § 8 (Phase 5b).
 
@@ -602,6 +605,8 @@ def run_shared_pool_backtest(
         correlation_cap_pct=correlation_cap_pct,
         correlation_threshold=correlation_threshold,
         price_provider=price_provider,
+        contribution_enabled=contribution_enabled,
+        contribution_lambda=contribution_lambda,
     )
     shared = replace(
         shared,
