@@ -1659,3 +1659,52 @@ def test_phase5e_warm_pool_fixture_produces_non_none_pool_corr(phase5d_warm_pool
     assert len(bids_with_corr) > 0, (
         "Warm-pool fixture did not warm up pool_corr — fix the fixture"
     )
+
+
+def test_phase5e_avg_pool_corr_matches_bid_history_mean(phase5d_warm_pool):
+    """# Layer: invariant
+    The aggregate `c.avg_pool_corr` is, by construction, the mean of all
+    non-None `b.pool_corr` for bids of that strategy. This holds for ANY
+    fixture — vacuous-fixture-safe because the equality is verified per
+    strategy by reconstructing the expected mean from the same data.
+    """
+    r = phase5d_warm_pool["shared"]
+    for s, c in r.per_strategy_stats.items():
+        bid_corrs = [
+            b.pool_corr for b in r.bid_history
+            if b.strategy == s and b.pool_corr is not None
+        ]
+        if not bid_corrs:
+            assert c.avg_pool_corr is None
+            continue
+        expected = sum(bid_corrs) / len(bid_corrs)
+        assert c.avg_pool_corr is not None
+        assert abs(c.avg_pool_corr - expected) < 1e-9
+
+
+def test_phase5e_n_would_change_rank_aggregate_consistency(phase5d_warm_pool):
+    """# Layer: invariant
+    Per-strategy `n_would_change_rank` summed across strategies MUST equal
+    the total count of `would_change_rank=True` BidRecords. This holds for
+    ANY fixture (including empty) — pure aggregation consistency.
+    """
+    r = phase5d_warm_pool["shared"]
+    total_flips = sum(1 for b in r.bid_history if b.would_change_rank)
+    aggregate = sum(c.n_would_change_rank for c in r.per_strategy_stats.values())
+    assert total_flips == aggregate
+
+
+def test_phase5e_warm_pool_produces_at_least_one_rank_flip(phase5d_warm_pool):
+    """# Layer: behavioral
+    The warm-pool fixture is engineered to produce ≥1 rank flip via
+    anti-correlated curves + contribution_lambda=1.0. If this test fails,
+    the fixture has drifted and the rank-flip code path is no longer
+    exercised — fix the fixture.
+
+    Pairs with the invariant tests above: those verify the metric IS
+    correct; this verifies the fixture actually USES the metric's
+    non-trivial range.
+    """
+    r = phase5d_warm_pool["shared"]
+    total_flips = sum(1 for b in r.bid_history if b.would_change_rank)
+    assert total_flips > 0, "Fixture too tame — no rank flips produced"
