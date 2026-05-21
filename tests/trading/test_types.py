@@ -99,3 +99,13 @@ def test_audit_event_type_enum_has_12_values():
 
 
 import pytest  # at end so the test_audit_event imports above are clean
+
+
+# Layer: stateful
+
+def test_layer_stateful_tag_accepted_by_hook():
+    """If pytest collected this test, the hook accepts 'stateful'.
+
+    # Layer: stateful
+    """
+    assert True

@@ -204,7 +204,7 @@ def phase5d_warm_pool():
 
 import re  # noqa: E402
 
-_LAYER_TAG_RE = re.compile(r"#\s*Layer:\s*(invariant|behavioral)\b")
+_LAYER_TAG_RE = re.compile(r"#\s*Layer:\s*(invariant|behavioral|stateful)\b")
 
 
 def _is_phase5e_or_later_test(item) -> bool:
