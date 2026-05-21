@@ -9,6 +9,7 @@ for the implemented steps.
 """
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import TYPE_CHECKING
@@ -18,7 +19,12 @@ if TYPE_CHECKING:
 
     from marketpulse.backtest.correlation import PriceProvider
 
-from marketpulse.backtest.contribution import daily_contribution_return
+from marketpulse.backtest.contribution import (
+    BidWeightMetadata,
+    compute_adjusted_bid_weight,
+    daily_contribution_return,
+    pool_corr_excluding_self,
+)
 from marketpulse.backtest.correlation import find_correlation_neighbors
 from marketpulse.backtest.metrics import compute_metrics
 from marketpulse.backtest.sharpe import compute_bid_weights, compute_position_sizes
@@ -92,8 +98,15 @@ def simulate_shared_pool(
     per-strategy contribution; max_strategy_exposure + hhi_concentration on
     the pool-level result).
     """
+    # Phase 5a provenance — use f-string to thread lookback_days
     bid_policy = f"rolling_sharpe_{lookback_days}d_v0"
+    # Phase 5b
     sizing_policy = "vol_target_conviction_v0" if sizing_enabled else "fixed_v0"
+
+    # Phase 5d: bid_policy upgrade + composite provenance
+    if contribution_enabled:
+        bid_policy = f"contribution_adjusted_sharpe_{lookback_days}d_v0"
+    contribution_policy = f"contribution_adjusted_sharpe_{lookback_days}d_v0"
 
     # Phase 5c risk_policy composition (spec § 10b)
     if sector_caps_enabled and correlation_caps_enabled:
@@ -146,6 +159,8 @@ def simulate_shared_pool(
             sector_caps_enabled=sector_caps_enabled,
             correlation_caps_enabled=correlation_caps_enabled,
             risk_policy=risk_policy,
+            contribution_enabled=contribution_enabled,
+            contribution_policy=contribution_policy,
         )
 
     db_dates: set[date] = set()
@@ -198,7 +213,7 @@ def simulate_shared_pool(
     realized_pnl_today_by_strategy: dict[str, float] = {}
     daily_strategy_contribution_returns: dict[str, list[tuple[date, float]]] = {}
     daily_pool_returns: list[tuple[date, float]] = []
-    pool_corr_by_strategy: dict[str, list[float | None]] = {}  # noqa: F841 — reserved for T6
+    pool_corr_by_strategy: dict[str, list[float | None]] = {}
 
     prev_d: date | None = None
     for d in calendar:
@@ -260,13 +275,66 @@ def simulate_shared_pool(
 
         # ─── WEIGHT COMPUTE ───
         strategies_today = sorted({b.strategy for b in todays_bids})
-        weights: dict[str, float] = {}
+        weights_raw: dict[str, float | None] = {}
+        weights: dict[str, float | None] = {}
         floor_hits: set[str] = set()
+        bid_weight_metadata: dict[str, BidWeightMetadata] = {}
+
         if strategies_today:
-            weights, floor_hits = compute_bid_weights(
+            weights_raw, floor_hits = compute_bid_weights(
                 strategies_today, daily_curves,
                 as_of=d, lookback_days=lookback_days,
             )
+
+            # NEW Phase 5d: always compute both raw and adjusted, always populate
+            # bid_weight_metadata. The contribution_enabled toggle only chooses
+            # which dict drives DEDUP/ALLOC.
+            weights_adjusted: dict[str, float | None] = {}
+            for s in strategies_today:
+                raw = weights_raw.get(s)
+                pool_corr, eff_window = pool_corr_excluding_self(
+                    daily_strategy_contribution_returns.get(s, []),
+                    daily_pool_returns,
+                    as_of=d,
+                    lookback_days=lookback_days,
+                    min_overlap=30,
+                )
+                adjusted, multiplier, rewarded = compute_adjusted_bid_weight(
+                    raw_sharpe=raw,
+                    pool_corr=pool_corr,
+                    lam=contribution_lambda,
+                    clip_min=0.5,
+                    clip_max=1.2,
+                )
+                weights_adjusted[s] = adjusted
+                bid_weight_metadata[s] = BidWeightMetadata(
+                    raw=raw, pool_corr=pool_corr,
+                    multiplier=multiplier, adjusted=adjusted,
+                    effective_window=eff_window,
+                    rewarded_for_negative_corr=rewarded,
+                    would_change_rank=False,  # computed below
+                )
+                pool_corr_by_strategy.setdefault(s, []).append(pool_corr)
+
+            # Compute would_change_rank for EVERY strategy (regardless of toggle)
+            sorted_raw = sorted(
+                strategies_today,
+                key=lambda s: (-(weights_raw.get(s) or 0.0), s),
+            )
+            sorted_adj = sorted(
+                strategies_today,
+                key=lambda s: (-(weights_adjusted.get(s) or 0.0), s),
+            )
+            rank_raw = {s: i for i, s in enumerate(sorted_raw)}
+            rank_adj = {s: i for i, s in enumerate(sorted_adj)}
+            for s in strategies_today:
+                if rank_raw[s] != rank_adj[s]:
+                    bid_weight_metadata[s] = dataclasses.replace(
+                        bid_weight_metadata[s], would_change_rank=True,
+                    )
+
+            # The toggle only chooses which weight drives DEDUP/ALLOC
+            weights = weights_adjusted if contribution_enabled else weights_raw
 
         # n_floor_hits telemetry (post-floor-hit set is the source of truth)
         for s in floor_hits:
@@ -718,4 +786,6 @@ def simulate_shared_pool(
         sector_caps_enabled=sector_caps_enabled,
         correlation_caps_enabled=correlation_caps_enabled,
         risk_policy=risk_policy,
+        contribution_enabled=contribution_enabled,
+        contribution_policy=contribution_policy,
     )
