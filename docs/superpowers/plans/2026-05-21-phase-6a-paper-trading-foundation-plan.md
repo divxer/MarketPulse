@@ -124,9 +124,18 @@ BASELINE_PATH = Path(__file__).parent / "fixtures" / "phase5_warm_pool_baseline.
 EXCLUDED_FIELDS = {"bid_policy", "contribution_policy", "risk_policy", "sizing_policy"}
 
 
+FLOAT_PRECISION = 10  # decimal places for stable cross-platform float repr
+
+
 def _normalize(value):
-    """Convert dataclasses / dates / Decimal to JSON-friendly primitives
-    so the comparison is structural, not object-identity."""
+    """Convert dataclasses / dates / Decimal / floats to JSON-friendly
+    primitives so the comparison is structural, not object-identity.
+
+    Floats are rounded to FLOAT_PRECISION decimal places to neutralize
+    repr drift across Python versions and platforms (e.g.
+    0.30000000000000004 vs 0.3). This matches the spec's "behavioral +
+    public-field equality" contract — drift below 1e-10 is not a real
+    regression."""
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return _normalize(dataclasses.asdict(value))
     if isinstance(value, dict):
@@ -137,6 +146,8 @@ def _normalize(value):
         return value.isoformat()
     if value.__class__.__name__ == "Decimal":
         return str(value)
+    if isinstance(value, float):
+        return round(value, FLOAT_PRECISION)
     return value
 
 
@@ -302,9 +313,12 @@ no DB read.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 
-__version__ = "v0"  # surfaced to paper_order.allocator_version
+# Version stamped onto paper_order.allocator_version for replay
+# determinism (lock xxviii). Bump when the kernel's behavior changes.
+ALLOCATOR_VERSION = "phase6a-v1"
+__version__ = ALLOCATOR_VERSION  # back-compat alias for any introspection
 
 
 @dataclass(frozen=True)
@@ -314,10 +328,11 @@ class BidCandidate:
     builds them from today's evaluation_event rows."""
     strategy: str
     ticker: str
-    event_time: object  # datetime — opaque to the kernel
+    event_time: datetime          # UTC-aware (lock xxix)
     event_price: float
     horizon_date: date
-    horizon_price: float | None
+    horizon_price: float | None   # filled by daily_cycle via PriceProvider
+                                  # if BidAggregator left it None
     strategy_version: str
 
 
@@ -370,7 +385,7 @@ class AllocationWinner:
     OrderRequest construction."""
     strategy: str
     ticker: str
-    event_time: object
+    event_time: datetime          # UTC-aware (lock xxix)
     event_price: float
     horizon_date: date
     horizon_price: float | None
@@ -388,14 +403,36 @@ class AllocationWinner:
 
 
 @dataclass(frozen=True)
+class BlockedBidReason:
+    """Reason a bid did not become a winner. Typed to prevent the
+    'blocked: tuple[object, ...]' architecture-erosion risk identified in
+    the round-7 review. Subclasses or extension fields belong here; the
+    allocator's blocked output is fully typed for downstream consumers."""
+    strategy: str
+    ticker: str
+    reason: str          # one of: dedup_loser | cap_full | sector_cap_full
+                         # | correlation_cap_full | cash_short
+                         # | size_too_small (extend as needed)
+    weight: float | None
+    raw_bid_weight: float | None
+    pool_corr: float | None
+    contribution_multiplier: float
+    adjusted_bid_weight: float | None
+
+
+@dataclass(frozen=True)
 class AllocationResult:
-    """Outcome of one per-day allocation call. winners are the bids that
-    became paper orders; blocked carries the BidRecord-compatible
-    telemetry rows for everything else (dedup losers, cap fulls, etc.)."""
+    """Outcome of one per-day allocation call.
+
+    Authority contract (round-7 review Risk 10): the allocator is the
+    CANONICAL source for cash_used / cash_remaining for this batch.
+    Callers (daily_cycle, simulate_shared_pool) MUST NOT recompute these
+    values from the winners list — that introduces derived-state
+    duplication and silent drift. Read them as-is."""
     winners: tuple[AllocationWinner, ...]
-    blocked: tuple[object, ...]  # BidRecord-compatible; opaque to kernel callers
-    cash_used: float
-    cash_remaining: float
+    blocked: tuple[BlockedBidReason, ...]
+    cash_used: float        # canonical — do not recompute
+    cash_remaining: float   # canonical — do not recompute
 
 
 def allocate_for_day(
@@ -1092,13 +1129,16 @@ from __future__ import annotations
 def test_protocol_has_exactly_three_methods():
     from marketpulse.trading.execution_engine import ExecutionEngine
 
-    # Method-name set excluding dunders.
-    methods = {
-        m for m in dir(ExecutionEngine)
-        if not m.startswith("_")
+    # Use __dict__ instead of dir() — typing.Protocol's dir() includes
+    # inherited internals (e.g. __subclasshook__, __init_subclass__,
+    # _is_protocol, _is_runtime_protocol) that can shift between Python
+    # versions. __dict__ contains only methods declared on this class.
+    own_methods = {
+        k for k, v in ExecutionEngine.__dict__.items()
+        if callable(v) and not k.startswith("_")
     }
-    assert methods == {"place_order", "cancel_order", "tick"}, (
-        f"ExecutionEngine Protocol drift; got {methods}"
+    assert own_methods == {"place_order", "cancel_order", "tick"}, (
+        f"ExecutionEngine Protocol drift; got {own_methods}"
     )
 ```
 
@@ -1861,7 +1901,12 @@ class PaperFill(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     order_id: Mapped[int] = mapped_column(ForeignKey("paper_order.id"), nullable=False)
-    position_id: Mapped[int] = mapped_column(Integer, nullable=False)  # see § 4.7 of spec
+    # FK is safe in this direction: paper_position is created first (with
+    # entry_fill_id NULL), THEN paper_fill INSERT references the known
+    # position_id. The circular-FK problem only affects the reverse
+    # direction (paper_position.entry_fill_id / exit_fill_id → paper_fill),
+    # which is why THOSE two columns stay as plain nullable Integer.
+    position_id: Mapped[int] = mapped_column(ForeignKey("paper_position.id"), nullable=False)
     side: Mapped[str] = mapped_column(String(8), nullable=False)
     price: Mapped[_Decimal] = mapped_column(Numeric(18, 6), nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -2158,7 +2203,10 @@ def upgrade() -> None:
         "paper_fill",
         sa.Column("id", sa.Integer(), primary_key=True),
         sa.Column("order_id", sa.Integer(), sa.ForeignKey("paper_order.id"), nullable=False),
-        sa.Column("position_id", sa.Integer(), nullable=False),
+        sa.Column(
+            "position_id", sa.Integer(),
+            sa.ForeignKey("paper_position.id"), nullable=False,
+        ),
         sa.Column("side", sa.String(8), nullable=False),
         sa.Column("price", sa.Numeric(18, 6), nullable=False),
         sa.Column("quantity", sa.Integer(), nullable=False),
@@ -3575,6 +3623,67 @@ def test_place_order_risk_gate_exception_fail_closed(session):
     assert len(rejects) == 1
     assert rejects[0].reason == "risk_gate_error"
     assert rejects[0].context["error_type"] == "RuntimeError"
+
+
+def test_rejection_audit_committed_before_exception(session, monkeypatch):
+    """Lock ix / 6a-L3: ORDER_REJECTED audit row MUST be committed (visible
+    in a fresh session) before OrderRejected is raised. If audit fails
+    to commit, the engine surfaces the DB error rather than pretending
+    the order was rejected."""
+    from marketpulse.db.models import PaperAuditEvent
+    from marketpulse.trading.clock import FakeClock
+    from marketpulse.trading.forward_engine import ForwardExecutionEngine
+    from marketpulse.trading.kill_switch import KillSwitchState
+    from marketpulse.trading.repository import Repository
+    from marketpulse.trading.risk_gate import RiskResult
+    from marketpulse.trading.types import OrderRejected
+
+    captured_audit_ids: list[int] = []
+
+    class _RejectGate:
+        def check_pre_trade(self, *, order_request):
+            return RiskResult(approved=False, reason="test_block", gate_name="g")
+
+    repo = Repository(session=session)
+    # Spy on repo.write_audit_event — capture id immediately after flush.
+    real_write = repo.write_audit_event
+
+    def spy(*args, **kwargs):
+        row = real_write(*args, **kwargs)
+        # At this point the row has an id (post-flush). The OUTER
+        # transaction has not yet committed; the assertion below uses a
+        # fresh session to confirm the commit happened before the raise.
+        captured_audit_ids.append(row.id)
+        return row
+
+    monkeypatch.setattr(repo, "write_audit_event", spy)
+
+    engine = ForwardExecutionEngine(
+        repository=repo,
+        clock=FakeClock(now=datetime(2026, 5, 21, 17, 30, tzinfo=UTC)),
+        kill_switch=KillSwitchState(env_var="MP_NEVER", repository=repo),
+        risk_gate=_RejectGate(),
+    )
+
+    with pytest.raises(OrderRejected, match="test_block"):
+        engine.place_order(order_request=_request())
+
+    # Same-session check: the audit row must be visible after the raise.
+    assert len(captured_audit_ids) == 1
+
+    # Fresh-session check: the audit row must have been committed
+    # (would be invisible to a new session if still in-flight).
+    from sqlalchemy import create_engine as _ce
+    fresh_eng = session.bind
+    with Session(fresh_eng) as fresh:
+        rows = fresh.execute(
+            select(PaperAuditEvent).where(PaperAuditEvent.id == captured_audit_ids[0])
+        ).scalars().all()
+        assert len(rows) == 1, (
+            "ORDER_REJECTED audit must commit BEFORE OrderRejected is raised "
+            "(lock ix). A rejection without a committed audit is not a valid "
+            "completed rejection."
+        )
 ```
 
 - [ ] **Step 2: Run failing tests**
@@ -5752,3 +5861,257 @@ After all revisions, the plan is ready for agent-driven execution.
 - ✅ E2E uses only NY session days; Memorial Day edge-case has its own test
 
 **Plan status: Approved with required revisions applied — ready for implementation.**
+
+---
+
+## Round-7 Final Tightening (applied inline above + new architectural test)
+
+The round-7 review surfaced 10 issues. Items 1, 2, 3, 4, 5, 6, 9 are
+already applied inline (PaperFill FK restored, Protocol `__dict__`, float
+rounding, typed `BlockedBidReason`, `event_time: datetime`,
+`ALLOCATOR_VERSION = "phase6a-v1"`, `test_rejection_audit_committed_
+before_exception`). Three items remain:
+
+### R7-A (Risk 7): Strip comments before grep boundary tests
+
+When implementing Task 6a-0.5 (extraction-boundary grep) and Task 6a-2.8
+(single-writer grep), strip Python comments BEFORE searching:
+
+```python
+import io
+import tokenize
+
+def _strip_comments(src: str) -> str:
+    """Remove # comments and docstrings so grep tests don't false-fire
+    on documentation that mentions forbidden tokens."""
+    out: list[str] = []
+    prev_type: int | None = None
+    tokens = tokenize.tokenize(io.BytesIO(src.encode("utf-8")).readline)
+    for tok in tokens:
+        if tok.type == tokenize.COMMENT:
+            continue
+        if tok.type == tokenize.STRING and prev_type in (
+            tokenize.INDENT, tokenize.NEWLINE, None,
+        ):
+            # Likely a docstring at module/class/function start — skip.
+            continue
+        out.append(tok.string)
+        prev_type = tok.type
+    return " ".join(out)
+```
+
+Apply to the boundary grep:
+
+```python
+src = _strip_comments(Path("marketpulse/backtest/allocation.py").read_text())
+for token in forbidden:
+    assert token not in src, f"6a-L1 boundary violation: '{token}'..."
+```
+
+This prevents the `# daily_equity_curve stays outside allocator` comment
+from tripping the test.
+
+### R7-B (Risk 8): Holiday-replay-skip invariant test
+
+When the scheduler fires on a non-session NY day (e.g., Memorial Day),
+`today_ny_trading_date` rolls back to the previous session. Without a
+deduplication guard, that previous day's tick could be re-processed
+incorrectly. The deduplication is already provided by:
+
+- `repository.last_processed_tick_date()` returns the resolved date
+- `daily_cycle.run` only writes `TICK_COMPLETED` via `write_tick_completed_once`
+  (no-op if a row for that tick_date already exists)
+- `place_order` idempotency keys are deterministic per `(strategy, ticker,
+  event_time, allocation_run_id)` where `allocation_run_id = paper-{tick_date}`
+
+But this invariant is implicit. Add an explicit test (Task 6a-4.1):
+
+```python
+def test_tick_on_memorial_day_resolves_to_previous_friday_and_is_replay(session):
+    """Scheduler accidentally firing on Memorial Day Mon 25 → cycle's
+    tick_date resolves to previous Friday 22. If Friday already had a
+    successful TICK_COMPLETED, the rerun must be a no-op replay:
+        - 0 new paper_order rows
+        - 0 new ORDER_PLACED_DUPLICATE rows (the dedup-window guarantees this)
+        - 0 new TICK_COMPLETED rows (dedup)
+        - 0 new SCHEDULER_GAP_DETECTED rows
+    """
+    from datetime import UTC, date, datetime
+    from sqlalchemy import select
+    from marketpulse.db.models import PaperAuditEvent, PaperOrder
+    from marketpulse.trading import daily_cycle
+
+    # 1. Set up a successful Friday tick (D0 = Fri 2026-05-22)
+    # ... (use the same _make_deps pattern as test_daily_cycle.py, with
+    # FakeClock set to Fri 21:30 UTC = 17:30 NY)
+    # Run daily_cycle.run once → 1 TICK_COMPLETED for D0.
+
+    # 2. Simulate Memorial Day firing: clock at Mon 2026-05-25 22:00 UTC
+    #    (18:00 NY).  today_ny_trading_date should resolve to Fri 2026-05-22.
+    # ... run daily_cycle.run
+
+    # 3. Assertions:
+    paper_order_count = session.scalar(select(func.count(PaperOrder.id))) or 0
+    tick_completed_count = session.scalar(
+        select(func.count(PaperAuditEvent.id))
+        .where(PaperAuditEvent.event_type == "TICK_COMPLETED")
+    ) or 0
+    gap_audit_count = session.scalar(
+        select(func.count(PaperAuditEvent.id))
+        .where(PaperAuditEvent.event_type == "SCHEDULER_GAP_DETECTED")
+    ) or 0
+    # Whatever the Friday run produced is unchanged; Memorial Day run was no-op.
+    # (Concrete numbers depend on the fixture; the test asserts no NEW writes
+    # vs. the post-Friday-run snapshot — capture counts after step 1 and
+    # compare here.)
+    # ...
+```
+
+The implementer captures snapshot counts after step 1 and asserts equality
+after step 2.
+
+### R7-C (Architectural): Repository-boundary architecture test
+
+Add a new test file early in 6a-2 (right after `test_invariant_greps.py`)
+that enforces the single-writer architecture as a permanent guard:
+
+**Files:**
+- Create: `tests/architecture/__init__.py`
+- Create: `tests/architecture/test_repository_boundary.py`
+
+- [ ] **Step 1: Write the architectural boundary test**
+
+```python
+# tests/architecture/test_repository_boundary.py
+# Layer: invariant
+"""Permanent guard: ONLY repository.py is allowed to write paper_*
+tables. Production code outside marketpulse/trading/repository.py
+must not call session.add(), session.execute(insert/update), or
+session.commit() on paper_* models.
+
+This is the load-bearing single-writer architecture lock (umbrella
+lock iii). Any new module that needs to mutate paper_* state MUST
+go through repository.py."""
+
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+
+import pytest
+
+PROD_ROOT = Path("marketpulse")
+REPOSITORY_PATH = PROD_ROOT / "trading" / "repository.py"
+
+# Paths excluded from the boundary check — they own their own tables,
+# NOT paper_*. (db/ holds Base + TZDateTime + engine setup; not a writer
+# of paper_*.) Add only when a new module genuinely doesn't write paper_*.
+EXEMPT = {
+    REPOSITORY_PATH,
+    PROD_ROOT / "db" / "base.py",
+    PROD_ROOT / "db" / "models.py",  # declarative-base definitions, not writes
+}
+
+# Sentinel call names that indicate state mutation against any table.
+FORBIDDEN_CALLS = {
+    "add",      # session.add(...)
+    "commit",   # session.commit()
+    "merge",    # session.merge(...)
+    "delete",   # session.delete(...)
+}
+
+
+def _find_session_mutation_calls(tree: ast.AST) -> list[tuple[int, str]]:
+    """Return (lineno, call_name) for each session.<forbidden>(...) call."""
+    hits: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        # Match attribute calls like session.add(...) / self._session.add(...)
+        if isinstance(func, ast.Attribute) and func.attr in FORBIDDEN_CALLS:
+            hits.append((node.lineno, f".{func.attr}(...)"))
+    return hits
+
+
+def _find_insert_update_execute(tree: ast.AST) -> list[tuple[int, str]]:
+    """Return hits for session.execute(insert(...)) / .execute(update(...))."""
+    hits: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Attribute) and func.attr == "execute"):
+            continue
+        for arg in node.args:
+            if isinstance(arg, ast.Call) and isinstance(arg.func, ast.Name):
+                if arg.func.id in ("insert", "update", "delete"):
+                    hits.append((node.lineno, f"execute({arg.func.id}(...))"))
+    return hits
+
+
+def test_repository_is_single_writer():
+    violations: list[str] = []
+    for path in PROD_ROOT.rglob("*.py"):
+        if path in EXEMPT:
+            continue
+        # Skip test directories (we're under tests/architecture which
+        # itself is below tests/, not marketpulse/, so the rglob excludes
+        # them — defensive guard only).
+        if "tests" in path.parts:
+            continue
+        try:
+            tree = ast.parse(path.read_text())
+        except SyntaxError:
+            continue
+
+        for lineno, call in _find_session_mutation_calls(tree):
+            violations.append(f"{path}:{lineno}  {call}")
+        for lineno, call in _find_insert_update_execute(tree):
+            violations.append(f"{path}:{lineno}  {call}")
+
+    assert not violations, (
+        "Single-writer architecture violated (lock iii). Mutations of "
+        "paper_* state must go through marketpulse/trading/repository.py. "
+        "Violations:\n  " + "\n  ".join(sorted(violations))
+    )
+```
+
+- [ ] **Step 2: Smoke**
+
+```bash
+uv run pytest tests/architecture/test_repository_boundary.py -v
+```
+
+Expected: PASS (if you've already added Phase 1-5 modules that call
+session.add for non-paper tables, add them to `EXEMPT`).
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add tests/architecture/
+git commit -m "test(arch): single-writer boundary guard for paper_* tables (lock iii)"
+```
+
+This test runs in CI permanently. Any future module that tries to
+INSERT/UPDATE/DELETE paper_* state outside repository.py fails the
+build. The check is AST-based, not grep-based — comments, strings,
+and similar tokens in docstrings cannot trip it.
+
+---
+
+## Round-7 Final Self-Review
+
+- ✅ `PaperFill.position_id` is FK (Blocker 1 — fixed inline in model + migration)
+- ✅ Protocol method-set test uses `__dict__` (Blocker 2 — fixed inline in test code)
+- ✅ Baseline `_normalize` rounds floats to 10 decimal places (Blocker 3)
+- ✅ `BlockedBidReason` typed dataclass replaces `tuple[object, ...]` (Risk 4)
+- ✅ `event_time: datetime` (Risk 5 — BidCandidate + AllocationWinner both fixed)
+- ✅ `ALLOCATOR_VERSION = "phase6a-v1"` (Risk 6)
+- ✅ Grep tests strip comments via tokenize (Risk 7 — R7-A)
+- ✅ Holiday replay invariant test added (Risk 8 — R7-B)
+- ✅ `test_rejection_audit_committed_before_exception` added (Risk 9 — fixed inline)
+- ✅ `cash_used` / `cash_remaining` authority contract documented (Risk 10)
+- ✅ `tests/architecture/test_repository_boundary.py` AST-based guard (R7-C)
+
+**Plan status: Approved with minor revisions applied — ready for agent-driven implementation.**
