@@ -26,7 +26,11 @@ No new features beyond the sizing override + observability metrics. **One new mo
 3. **Override knobs**: all three sizing knobs (`base_position_size`, `min_position`, `max_position`) overridable per strategy YAML. `target_vol` stays global.
 4. **YAML schema**: optional `sizing:` block, partial overrides allowed. Strategies without the block inherit global defaults. Existing 6 YAMLs continue working unmodified (zero migration required).
 5. **Validation**: strict at load time. Loader merges overrides with globals, then validates `min ≤ base ≤ max`, all values `> 0`. ConfigError on violation, message includes strategy name + offending values.
-6. **Apply scope**: overrides apply to BOTH `sizing_enabled=True` (vol-target × conviction × clip) AND `sizing_enabled=False` (fixed mode uses overridden base).
+6. **Apply scope — TWO sub-layers within execution**: the override has two distinct mechanical roles, both inside the execution layer, neither touching signal:
+    - `base_position_size` is a **strategy-specific conviction prior** at the size-magnitude stage. It enters the formula `raw_size = vol_target × alpha_conviction × eff_base`. This is NOT a clamp — it scales the magnitude. The earlier description "post-processing clamp" was imprecise; `base_position_size` is a per-strategy parameterization of the sizing function itself.
+    - `(min_position, max_position)` are the **clamp envelope** applied AFTER raw_size is computed: `final_size = clip(raw_size, eff_min, eff_max)`. This is the true post-processing clamp.
+    - Both apply in `sizing_enabled=True` AND `sizing_enabled=False` modes. In fixed mode (`sizing_enabled=False`), `raw_size = eff_base` (no vol-target / alpha multiplication), then the same clamp applies.
+    - Signal-layer purity (lock #12) is preserved BECAUSE none of `rolling_sharpe`, `pool_corr`, `contribution_multiplier`, `weights`, or `rank` depend on any of the three override values. The override is "signal-independent execution parameterization," not "signal-affecting magnitude knob."
 7. **`pool_corr_excludes_self` → `POOL_CORR_MODE` constant in policy layer**: the per-BidRecord field is dropped (always-True noise), AND the variant-discriminator semantic is preserved as a module-level constant. Critically, the constant lives in a NEW dedicated policy-layer module `marketpulse/backtest/policy.py` (NOT in `contribution.py`). Rationale: `contribution.py` is signal-math (data plane); `POOL_CORR_MODE` is system policy (control plane). Putting policy constants in a signal module would be architectural drift — the kind of seed that grows into "signal modules silently dictating system behavior" over multiple phases.
 
     Three constants colocate in `policy.py` because they share the same control-plane category:
@@ -44,11 +48,14 @@ No new features beyond the sizing override + observability metrics. **One new mo
 9. **Test fixture**: one shared `phase5d_warm_pool` pytest fixture (90-day calendar, 2 anti-correlated strategies, bids every other day for 60 days). Lives in `tests/conftest.py` or dedicated fixture module. Smoke-tested itself.
 10. **Strategy dataclass extension**: 3 optional fields (`base_position_size`, `min_position`, `max_position` — each `float | None = None`). Existing fields unchanged.
 11. **Override map shape**: `dict[str, tuple[float | None, float | None, float | None]]` — strategy → (base, min, max). None at any position means "inherit global".
-12. **Execution contract — sizing override is a post-processing clamp, NOT an alternative sizing engine.** Phrased explicitly so future readers cannot misread the override as a parallel signal pathway:
-    - Global sizing (Phase 5b `compute_position_sizes`: vol-target × alpha-conviction) is the **authoritative** size producer. The per-strategy `(base, min, max)` overrides act ONLY as the **final clamp envelope** on that authoritative output.
-    - Override values do NOT enter the signal layer. They do NOT affect rolling Sharpe, bid weights, pool correlation, contribution adjustment, or any pre-allocation computation.
-    - The override is a **post-hoc clamp** applied after the vol-target × conviction math (or after the fixed-mode constant). Single clip operation, no second sizing engine, no double-clipping.
-    - This is a hard architectural invariant. Any future change that lets overrides feed back into signal-layer computations would constitute a Phase boundary violation and requires a fresh spec.
+12. **Execution contract — overrides are SIGNAL-INDEPENDENT execution parameterization.** Phrased precisely (corrected from earlier imprecise "post-processing clamp" framing — see lock #6):
+    - **Signal layer** computes `rolling_sharpe`, `pool_corr`, `contribution_multiplier`, `weights_raw`, `weights_adjusted`, `rank`. These computations MUST NOT read `Strategy.base_position_size`, `Strategy.min_position`, or `Strategy.max_position`. The signal layer's outputs are identical whether or not any strategy has a `sizing:` block in its YAML.
+    - **Execution layer** computes `position_size` per bid. This is where the override enters, in two sub-stages (lock #6):
+       a. `base_position_size` parameterizes the magnitude formula (`raw_size = vol_target × alpha × eff_base`).
+       b. `(min_position, max_position)` clamp the magnitude (`final_size = clip(raw_size, eff_min, eff_max)`).
+    - The hard invariant: **changing a strategy's override values can change its position_size but CANNOT change its bid weight, its rank, or any other strategy's outputs.** Bid weights and ranks are functions of (Sharpe, correlation, contribution) only.
+    - This is enforced by C13 test #1, which fixes (sigma, alpha) inputs identically across two runs that differ only in override values, and asserts: (a) signal-layer outputs (rolling Sharpe, pool_corr, rank ordering) are bit-identical between the two runs, while (b) execution-layer outputs (position_size) differ exactly by the override's effect.
+    - Any future change that lets overrides feed back into signal-layer computations would constitute a Phase boundary violation and requires a fresh spec.
 13. **Test taxonomy — invariant tests vs behavioral tests are explicitly tagged.** Every new test in Phase 5e carries a `# Layer: invariant` or `# Layer: behavioral` comment at its docstring header (see § 6). Invariant tests assert structural properties that must hold regardless of synthetic-market dynamics (Σ contribution_returns == pool_return, no NaN, monotonic position-size clipping, override never relaxes global ceiling). Behavioral tests assert dynamics-dependent properties (rank flips occur, correlation has expected sign, avg_pool_corr is non-None given sufficient warm-up). This taxonomy prevents test drift in 5f+ where fixture dynamics evolve.
 
     **Taxonomy is DESCRIPTIVE, not prescriptive.** The tag is added AFTER the author has decided what failure the test is detecting; the tag describes what was already true about the test's logic. Authors must NOT shape a test to "fit" a category — e.g., weakening a behavioral assertion to fit the invariant slot, or adding a fixture-dependent precondition to fit the behavioral slot. If a test resists clean categorization, that is a SIGNAL that the test is doing two things and should be split, not a license to relax the tag rules. Code reviewers verify: "given this test's actual logic, is the tag accurate?" — not "is the tag present?"
@@ -86,6 +93,56 @@ No new features beyond the sizing override + observability metrics. **One new mo
     - Any future clip (e.g., Phase 6's pool-level VaR cap) must declare its position in this pipeline as part of its spec.
 
     **Failure mode this lock prevents:** "size was clamped — why?" debugging where the answer depends on undocumented evaluation order. With the explicit pipeline, the answer is always "look at which clamp fired first" with a single source of truth.
+
+19. **Rank-drift permutation identity requires locked tie-break rule.** The lock #15 claim that `Σ rank_drift_from_signal == 0` holds as a pure permutation identity is mathematically true ONLY when both ranking domains contain the same set of strategies, ranks are dense, and tie-breaks are deterministic. To make this rigorous in code:
+    - Both rankings (by `avg_bid_weight` desc, by `effective_allocation` desc) MUST use Python's stable sort with the SAME secondary key: `key=lambda s: (-primary_value, s)` — lexicographic ascending by strategy key as the tie-breaker.
+    - Both rankings MUST iterate over the SAME set of strategies: `per_strategy_stats.keys()`. No filtering of zero-allocation or zero-bid strategies.
+    - With these two disciplines, the two rankings are guaranteed permutations of the same N-element set, so `Σ (rank_a − rank_b) == Σ rank_a − Σ rank_b == N(N-1)/2 − N(N-1)/2 == 0` exactly.
+    - The invariant test (D20.2) is therefore a TRUE invariant, not a behavioral approximation. Without this lock, ties in `avg_bid_weight` (very likely when multiple strategies have no warm-up bids) or in `effective_allocation` (likely when caps reduce multiple strategies to identical sub-amounts) would produce nondeterministic ranks and flaky tests.
+
+20. **Effective allocation is a CONDITIONAL simplex, not an unconditional one.** When `total_won_capital > 0`, the vector `[effective_allocation_s for s in strategies]` lies on the N-simplex (sums to 1.0). When `total_won_capital == 0` (no bids won; e.g., caps blocked all, or empty bid set), all values are 0.0 — the vector is the zero-vector, NOT a degenerate simplex point. Semantically: "no allocation occurred this run," not "everyone got zero share of zero."
+    - Test D20.1 already asserts this two-state semantic correctly.
+    - User-facing copy that mentions "allocation share" or "% allocated" must explicitly handle the zero-vector state ("no allocation occurred" rather than "0.0% to each strategy").
+    - Phase 6's optimizer, when reading `effective_allocation`, must check `sum(values) > 0` before treating the vector as a probability distribution.
+
+21. **`POOL_CORR_MODE` is documentary-only in v0 — no runtime branching, ever.** Clarifying lock #7's intent against a real risk that the constant becomes "future API embedded in present code":
+    - In v0 (this phase), the constant is referenced ONLY as a provenance comment. No function reads it, no test branches on it (beyond anchoring its value), no logging includes it.
+    - The constant exists as a documentation anchor for future schema bumps. If a v2 variant ever needs to dispatch on the mode, that dispatch logic will be added at that time AS PART OF THE v2 SPEC — not retrofitted into v0 with `if mode == ...` branches.
+    - This separation prevents the smell where a constant accumulates implicit semantic meaning across phases without ever being exercised. v0 stays pure; v2 adds dispatch as new code, not as branches in existing code.
+    - Same discipline applies to `OBSERVABILITY_MODE` (lock #17).
+
+22. **Test taxonomy enforcement via pytest collection hook.** Without machine enforcement, the lock #13 invariant/behavioral tagging discipline will decay across 5f+ (exactly the failure mode the lock exists to prevent). Phase 5e ships an enforcement hook in `tests/conftest.py`:
+
+    ```python
+    # tests/conftest.py
+    import re
+    PHASE5E_LAYER_RE = re.compile(r"# Layer:\s*(invariant|behavioral)\b")
+
+    def pytest_collection_modifyitems(config, items):
+        """Enforce that Phase 5e+ tests carry a # Layer: tag."""
+        for item in items:
+            # Apply to tests added in Phase 5e+ (heuristic: test function name
+            # contains 'phase5e' or test file path matches a 5e-touched file)
+            if "phase5e" not in item.name and not _is_phase5e_file(item.path):
+                continue
+            doc = (item.function.__doc__ or "")
+            if not PHASE5E_LAYER_RE.search(doc):
+                raise pytest.UsageError(
+                    f"{item.nodeid}: Phase 5e+ test must include "
+                    f"'# Layer: invariant' or '# Layer: behavioral' in docstring"
+                )
+    ```
+    The hook is opt-in by test name / path (not blanket-applied to all tests) to avoid disrupting pre-5e tests. Implementation detail (heuristic vs explicit marker) is left to the plan; the lock is that machine enforcement EXISTS, not its exact form.
+
+23. **SIZE-step override clamp attribution — `size_clamped_by_override: bool` on BidRecord.** Risk C in § 10 noted that when multiple clamps compose (override → sector → correlation → capacity), the user-facing question "why was strategy X's size reduced?" has no clean answer. The 5c caps already attribute via `BidRecord.outcome` for blocked bids (`sector_cap_full`, `correlation_cap_full`, `cash_short`, `size_too_small`). The missing attribution is: for WON bids, was the OVERRIDE clamp binding?
+
+    - New field: `size_clamped_by_override: bool = False` on BidRecord.
+    - Populated by the SIZE step: `True` iff `raw_size != clip(raw_size, eff_min, eff_max)` for this bid's strategy on this day (the override clamp actively reduced or floored the raw size).
+    - Set BEFORE cap-clamp logic runs, so it captures the override's effect specifically.
+    - Surfaced in bid history tooltip when True (alongside the existing "custom limits" text from lock #8).
+    - This is the minimum viable clamp-attribution signal until the deferred `effective_weight_trace` (§ 9) ships in Phase 6+. A single boolean adds one field; the full trace would add ~12 fields.
+
+    **Why NOT extend `outcome` Literal**: `outcome` describes the final disposition (won/dedup_loser/cap_full/etc.). Clamp attribution is orthogonal — a bid can simultaneously be `won` AND `size_clamped_by_override`. Keeping these as separate fields preserves the existing `outcome` semantics.
 
 ---
 
@@ -469,16 +526,20 @@ $$D_s = \mathrm{rank}_\text{desc}(\overline{w}_s) - \mathrm{rank}_\text{desc}(E_
 
 Where `rank_desc` is the descending-order rank (highest value → rank 0). `avg_bid_weight` is the existing Phase 5a field on `StrategyContribution` (mean of `b.weight` over all bids for the strategy).
 
-Implementation:
+Implementation (with lock #19 tie-break discipline):
 ```python
-# Strategies with no bids get sentinel rank == len(strategies) (lowest)
+# Both rankings use the SAME tie-break rule: lexicographic ascending by
+# strategy key. Combined with Python's stable sort, this guarantees:
+# - both rankings are permutations of the same N-element set
+# - identical ties produce identical rank assignments across runs
+# - Σ rank_drift_from_signal == 0 holds as a true permutation identity
 strategies_sorted_by_weight = sorted(
     per_strategy_stats.keys(),
-    key=lambda s: -per_strategy_stats[s].avg_bid_weight,
+    key=lambda s: (-per_strategy_stats[s].avg_bid_weight, s),
 )
 strategies_sorted_by_capital = sorted(
     per_strategy_stats.keys(),
-    key=lambda s: -effective_allocation_by_strategy[s],
+    key=lambda s: (-effective_allocation_by_strategy[s], s),
 )
 rank_by_weight = {s: i for i, s in enumerate(strategies_sorted_by_weight)}
 rank_by_capital = {s: i for i, s in enumerate(strategies_sorted_by_capital)}
@@ -890,8 +951,14 @@ Full suite green; ~935 tests total (915 + 20 new).
 | 25 | Warm-pool fixture produces ≥1 strategy with non-zero `rank_drift_from_signal`     | D20  | behavioral  |
 | 26 | `OBSERVABILITY_MODE == "v1"` constant anchored                                     | D17  | invariant   |
 | 27 | Lock #16 contract — `effective_allocation` field present on EVERY `StrategyContribution` returned from simulator (no `getattr` / None fallback ever needed) | D20  | invariant |
+| 28 | Lock #12 signal-purity: identical (sigma, alpha) inputs, different override values → bit-identical signal-layer outputs (rolling Sharpe, pool_corr, rank); different `position_size` only | C13  | invariant |
+| 29 | Lock #19 tie-break: synthetic 2-strategy run with tied `avg_bid_weight` and tied `effective_allocation` produces deterministic rank assignment (rerun same fixture → identical ranks) | D20  | invariant |
+| 30 | Lock #20 conditional simplex: all-blocked-bids fixture → `Σ effective_allocation == 0.0` AND every value is 0.0 (no degenerate fractional state) | D20  | invariant |
+| 31 | Lock #22 pytest hook: a deliberately-untagged Phase 5e test triggers `pytest.UsageError` on collection (meta-test of the enforcement) | D17b | invariant |
+| 32 | Lock #23: bid with `raw_size > eff_max` has `size_clamped_by_override=True`; bid with `eff_min <= raw_size <= eff_max` has `size_clamped_by_override=False` | C13b | invariant |
+| 33 | Lock #23: a `won` bid can simultaneously carry `size_clamped_by_override=True` AND `outcome="won"` (attribution is orthogonal to disposition) | C13b | invariant |
 
-**Counts:** 25 invariant tests + 3 behavioral tests (fixture-shape guards) = 28 new tests. Invariant tests dominate (~89%) because Phase 5e's core deliverables are structural contracts and deterministic telemetry, not new dynamics.
+**Counts:** 31 invariant tests + 3 behavioral tests (fixture-shape guards) = 34 new tests. Invariant tests dominate (~91%) because Phase 5e's core deliverables are structural contracts and deterministic telemetry, not new dynamics.
 
 ---
 
