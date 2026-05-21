@@ -47,7 +47,7 @@ Five sub-tasks. Each ships with its own tests at the sub-task boundary. All sub-
 | **6a-0** | Extract `allocate_for_day(...)` pure-function kernel from Phase 5 `simulate_shared_pool`. Refactor `portfolio_simulator.py` to call it once per historical day. **Extraction boundary (6a-L1):** ONLY the BID → SIZE → DEDUP → ALLOC kernel is lifted out. CLOSE, MTM, RECORD, equity-curve update, contribution decomposition, rolling-stats finalization all STAY in `portfolio_simulator.py`. The 5d/5e contribution machinery is not touched. | Phase 5 full regression: behavioral + public-field equality on existing fixtures (warm-pool included). Pre-extraction vs post-extraction `PortfolioBacktestResult.bid_history`, KPIs, sector breakdown all equal field-by-field, excluding any intentionally versioned/provenance fields. |
 | **6a-1** | DB schema (5 tables) + Alembic migration `0010_phase6_paper_trading.py`. Scaffolding: `types.py`, `execution_engine.py` (Protocol), `clock.py`, `calendar.py`, `risk_gate.py`, `idempotency.py`. Empty `__init__.py` for `repository.py`, `forward_engine.py`, `kill_switch.py`, `bid_aggregator.py`, `daily_cycle.py` so import order works. | Schema applies cleanly (`alembic upgrade head` + `downgrade -1`). All imports resolve. Enum / event-type values match expected. `compute_idempotency_key(...)` is deterministic. `NYTradingCalendar` returns expected business-day arithmetic for known fixtures. |
 | **6a-2** | `ForwardExecutionEngine` (full `place_order` / `cancel_order` / `tick`). `repository.py` (single-writer surface: all `paper_*` mutations + execution-path reads). `kill_switch.py` env+DB read/write. | Unit + stateful lifecycle tests. Per-order entry materialization is a single transaction; per-position exit materialization is a single transaction. `place_order` idempotency hits, kill-switch rejects, risk-gate rejects, accepted path. Atomic INSERT (order + audit). `tick` returns `TickResult` with correct counts. |
-| **6a-3** | `BidAggregator` (read-only NY-day window). `daily_cycle.py` orchestration (gap detect → collect → allocate → place_order × N → tick → TICK_COMPLETED). `marketpulse/scheduler/paper_trading_tick.py` thin entrypoint. APScheduler wiring in `marketpulse/scheduler/jobs.py`. `ensure_initial_deposit()` startup hook in `marketpulse/main.py`. Config in `marketpulse/config.py`. | Scheduler / gap-detection / idempotency-restart tests. Deterministic `allocation_run_id` per tick_date confirmed. `TICK_COMPLETED` written once per tick_date. `SCHEDULER_GAP_DETECTED` deduped per (last_tick, resume_date). Kill-switch short-circuits the entire cycle. |
+| **6a-3** | `BidAggregator` (read-only NY-day window). `daily_cycle.py` orchestration (gap detect → collect → allocate → place_order × N → tick → TICK_COMPLETED). `marketpulse/scheduler/paper_trading_tick.py` thin entrypoint. APScheduler wiring in `marketpulse/scheduler/jobs.py`. `ensure_initial_deposit()` startup hook in `marketpulse/main.py`. Config in `marketpulse/config.py`. | Scheduler / gap-detection / idempotency-restart tests. Deterministic `allocation_run_id` per tick_date confirmed. `TICK_COMPLETED` written at most once per tick_date; recovery after `completed_with_errors` appends `TICK_REPROCESSED_COMPLETED`. `SCHEDULER_GAP_DETECTED` deduped per (last_tick, resume_date). Kill switch short-circuits at the cycle level (`KILL_SWITCH_CYCLE_SKIPPED`); `engine.tick(as_of)` still runs so OPEN positions can close at horizon. |
 | **6a-4** | Full E2E stateful suite using `FakeClock`. `# Layer: stateful` enforcement via the Phase 5e pytest hook (extended to accept the third value). Smoke run of full test suite + ruff + route smoke. | Multi-day forward flow: D0 place → D0 tick entry → D1-D4 no-op ticks → D5 horizon → exit + cash correct. Same-day rerun produces zero new state. Multi-day downtime + restart produces `SCHEDULER_GAP_DETECTED`. Property: `Σ paper_cash_ledger.delta == latest balance_after`. |
 
 ### Test discipline
@@ -343,7 +343,7 @@ class PaperAuditEvent(Base):
     context: Mapped[dict]                          # JSON
 ```
 
-**6a audit event types (10):**
+**6a audit event types (12):**
 
 | event_type | order_id | Writer | Context required keys |
 |---|---|---|---|
@@ -1151,6 +1151,10 @@ A second `daily_cycle.run()` call on the same NY trading day produces:
 - 0 new `SCHEDULER_GAP_DETECTED` rows (dedup)
 - `DailyCycleResult.duplicates_skipped == N` reflects winners that hit existing keys
 
+**Duplicate semantics distinction:**
+
+`DailyCycleResult.duplicates_skipped` is the **in-run hit count** — how many times this invocation of `daily_cycle.run()` encountered an existing idempotency_key. `ORDER_PLACED_DUPLICATE` audit rows are **deduped markers per `(idempotency_key, tick_date)`** — not attempt counters. 6g metrics that want "how many duplicate attempts has the system ever seen for tick_date D?" must sum `DailyCycleResult.duplicates_skipped` across run logs, NOT `count(ORDER_PLACED_DUPLICATE WHERE context.tick_date = D)`. The latter is bounded by the number of distinct keys that day, not by attempt count.
+
 ### 7.3 Forward-only downtime recovery (lock xxxiii)
 
 - BidAggregator considers **only events with `event_date == tick_date`** (today).
@@ -1487,6 +1491,23 @@ External code MUST NOT issue raw SQL like `json_extract(context, '$.tick_date')`
 
 ```python
 repository.last_processed_tick_date() -> date | None
+    # Reads max tick_date from TICK_COMPLETED audit rows OR
+    # KILL_SWITCH_CYCLE_SKIPPED audit rows. Does NOT read
+    # TICK_REPROCESSED_COMPLETED (that's a recovery marker layered on
+    # top of an existing processed day, not a first-processing event).
+    # Including KILL_SWITCH_CYCLE_SKIPPED prevents the "kill switch all
+    # day → next day SCHEDULER_GAP_DETECTED false-positive" pitfall.
+
+repository.latest_tick_status(tick_date: date) -> Literal[
+    "completed",
+    "completed_with_errors",
+    "reprocessed_completed",
+    "kill_switch_skipped",
+] | None
+    # Latest audit-recorded status for tick_date. 6g/UI uses this to
+    # render the per-day status badge; it considers TICK_REPROCESSED_
+    # COMPLETED as a state distinct from the underlying TICK_COMPLETED
+    # row.
 repository.find_tick_completed_for(tick_date) -> PaperAuditEvent | None
 repository.find_gap_audit_for(last_tick, resume_date) -> PaperAuditEvent | None
 repository.find_duplicate_audit_for(idempotency_key, tick_date) -> PaperAuditEvent | None
@@ -1508,10 +1529,10 @@ These are NOT umbrella-level architectural locks (umbrella stays at 32); they ar
 | **6a-L2** | `ExecutionEngine.place_order` returns `PlaceOrderResult(order_id, created, duplicate)`. Callers (including `daily_cycle.run`) MUST NOT pre-check idempotency via a separate `find_by_key` call — that introduces a TOCTOU race. The result flags are the single source of truth for "what happened." |
 | **6a-L3** | `RiskGate` exceptions are fail-closed. Any exception raised by `risk_gate.check_pre_trade` is converted by `ForwardExecutionEngine.place_order` into an `ORDER_REJECTED` audit row (reason=`"risk_gate_error"`, context includes `error_type` + `error`) followed by `OrderRejected("risk_gate_error")`. No exception is swallowed; no `paper_order` row is created. |
 | **6a-L4** | Tick errors are structured `TickError(phase, order_id, position_id, error)` objects. Every `TickError` corresponds to exactly one `ENGINE_INVARIANT_ERROR` audit row written by `ForwardExecutionEngine.tick`. `TickResult.errors` is `tuple[TickError, ...]`, not `list[str]`. |
-| **6a-L5** | `TICK_COMPLETED.context.status` is `"completed"` or `"completed_with_errors"`. `repository.last_processed_tick_date()` returns the latest `tick_date` regardless of `status` — a tick with errors is still "processed" and gap detection respects it. UI / observability (6g) is responsible for surfacing `tick_errors_total > 0`. `ORDER_PLACED_DUPLICATE` is written at most once per `(idempotency_key, tick_date)` via `repository.write_duplicate_audit_once`. |
+| **6a-L5** | `TICK_COMPLETED.context.status` is `"completed"` or `"completed_with_errors"`. `repository.last_processed_tick_date()` returns the latest `tick_date` from `TICK_COMPLETED` rows OR `KILL_SWITCH_CYCLE_SKIPPED` rows (does NOT include `TICK_REPROCESSED_COMPLETED`, which is a recovery marker on an already-processed day). A tick with errors is still "processed" — gap detection respects it; UI / observability (6g) surfaces `tick_errors_total > 0`. `repository.latest_tick_status(tick_date)` returns the most recent status `{completed | completed_with_errors | reprocessed_completed | kill_switch_skipped}` for that tick_date, used by UI badges. `ORDER_PLACED_DUPLICATE` is written at most once per `(idempotency_key, tick_date)` via `repository.write_duplicate_audit_once`. |
 | **6a-L6** | `paper_order.status` and `paper_position.status` transitions are validated by `repository.update_*_status(...)` against the allowed-transition table (§ 10.2). Illegal transitions raise `InvariantError`; the new row is NOT written. |
 | **6a-L7** | Phase 6a permits exactly ONE authoritative allocation run per NY trading day. `allocation_run_id = f"paper-{tick_date.isoformat()}"`. A same-day rerun reuses the same id and is treated as **replay**, not a new run. **Same-day rerun AFTER a code deploy (new `allocator_version` / `execution_engine_version`) is still replay**, not recomputation — `idempotency_key` does not include version fields. The version columns on `paper_order` explain the *original* allocation; they do not authorize an in-place replacement. This is intentional: re-allocating mid-day with a freshly-deployed allocator would silently shift portfolio state in ways the original placement audit cannot explain. Future multi-run-per-day support (open + close cycles) would extend `allocation_run_id` with a run-mode discriminator; 6a does not anticipate it. |
-| **6a-L8** | Kill switch is enforced at TWO layers (defense in depth): (a) `daily_cycle.run` checks `kill_switch.is_active()` at cycle start; if active, the cycle SKIPS bid collection / allocation / new order placement, but STILL calls `engine.tick(as_of=tick_date)` so existing OPEN positions can close at their horizon. A single `KILL_SWITCH_CYCLE_SKIPPED` audit row records the skip. (b) `ForwardExecutionEngine.place_order` also checks the kill switch and writes per-order `ORDER_REJECTED("kill_switch_active")` for any call that bypasses the cycle gate. Recovery semantics: `TICK_COMPLETED` is append-only per `(tick_date)`; if a tick first writes `completed_with_errors` and a later same-day rerun completes cleanly, `repository.write_tick_completed_once(...)` appends `TICK_REPROCESSED_COMPLETED` (does NOT modify the original row — table is append-only per lock xiii). |
+| **6a-L8** | Kill switch is enforced at TWO layers (defense in depth): (a) `daily_cycle.run` checks `kill_switch.is_active()` at cycle start; if active, the cycle SKIPS bid collection / allocation / new order placement, but STILL calls `engine.tick(as_of=tick_date)` so existing OPEN positions can close at their horizon. A single `KILL_SWITCH_CYCLE_SKIPPED` audit row records the skip; this row counts as "processed" for `last_processed_tick_date()` (prevents the next-day false-positive `SCHEDULER_GAP_DETECTED` when the kill switch was up all day). (b) `ForwardExecutionEngine.place_order` also checks the kill switch and writes per-order `ORDER_REJECTED("kill_switch_active")` for any call that bypasses the cycle gate. Recovery semantics: `TICK_COMPLETED` is append-only per `(tick_date)`; if a tick first writes `completed_with_errors` and a later same-day rerun completes cleanly, `repository.write_tick_completed_once(...)` appends `TICK_REPROCESSED_COMPLETED` (does NOT modify the original row — table is append-only per lock xiii). |
 | **6a-L9** | `AllocationContext` (the dataclass passed into `allocate_for_day`) carries every input the allocator needs as an explicit named field — `allocation_date`, `target_vol`, `sector_caps`, `correlation_caps`, `contribution_enabled`, `pool_corr_mode`, `phase5e_warm_pool_overlap_days`, etc. The allocator MUST NOT read any state outside `AllocationContext`, `SizingContext`, `bids`, `existing_positions`, or `cash_available`. No hidden `today` dependency, no environment lookup, no DB read. This is what makes `allocate_for_day` truly pure (6a-L1 companion). |
 
 ### 11.2 Umbrella lock manifestations
@@ -1609,7 +1630,7 @@ Single PR `feat(phase-6a): paper trading foundation`. Branches from main → `pl
 - `marketpulse/scheduler/paper_trading_tick.py`
 - `marketpulse/backtest/allocation.py`
 
-**Modified files (6):**
+**Modified files (7):**
 - `marketpulse/db/models.py` — append 5 model classes
 - `marketpulse/backtest/portfolio_simulator.py` — calls `allocate_for_day(...)` per day
 - `marketpulse/scheduler/jobs.py` — register `paper_trading_tick_job`
