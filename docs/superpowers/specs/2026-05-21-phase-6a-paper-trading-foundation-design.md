@@ -85,7 +85,11 @@ marketpulse/scheduler/paper_trading_tick.py       (NEW) thin scheduler entrypoin
 
 marketpulse/backtest/allocation.py                (NEW, owned by 6a-0)
                                                   allocate_for_day() pure kernel
-                                                  BidCandidate, AllocationContext,
+                                                  BidCandidate, AllocationContext (6a-L9 —
+                                                  explicit allocation_date, target_vol,
+                                                  sector_caps, correlation_caps,
+                                                  contribution_enabled, pool_corr_mode,
+                                                  phase5e_warm_pool_overlap_days),
                                                   SizingContext, AllocationResult,
                                                   PositionSnapshot dataclasses
 
@@ -350,11 +354,15 @@ class PaperAuditEvent(Base):
 | `ORDER_ENTRY_FILLED` | set | `tick` entry materialization | `position_id`, `fill_price`, `cash_balance_after` |
 | `POSITION_CLOSED` | set | `tick` exit materialization | `position_id`, `exit_price`, `realized_pnl`, `cash_balance_after` |
 | `KILL_SWITCH_FLIPPED` | NULL | `KillSwitchState.flip` | `from_state`, `to_state`, `actor`, `reason` |
-| `TICK_COMPLETED` | NULL | `daily_cycle.run` end | **`tick_date` (required)**, `allocation_run_id`, `bids_collected`, `orders_placed`, `orders_rejected`, `duplicates_skipped`, `entries_materialized`, `exits_materialized`, `cash_balance_end` |
+| `TICK_COMPLETED` | NULL | `daily_cycle.run` end (first complete-or-with-errors run for a `tick_date`) | **`tick_date` (required)**, **`status`** (`completed` \| `completed_with_errors`), `allocation_run_id`, `bids_collected`, `orders_placed`, `orders_rejected`, `duplicates_skipped`, `entries_materialized`, `exits_materialized`, `cash_balance_end` |
+| `TICK_REPROCESSED_COMPLETED` | NULL | `daily_cycle.run` when prior `TICK_COMPLETED` for the same `tick_date` had `status=completed_with_errors` and the new run has `status=completed` (recovery after data fix) | `tick_date`, `prior_status`, `new_status`, `prior_tick_completed_id`, plus all the regular `TICK_COMPLETED` context keys |
+| `KILL_SWITCH_CYCLE_SKIPPED` | NULL | `daily_cycle.run` cycle-level short-circuit when kill switch is active | `tick_date`, `mode: "kill_switch_active"`, `tick_result` (still records any exits processed) |
 | `SCHEDULER_GAP_DETECTED` | NULL | `daily_cycle.run` gap branch | `last_processed_tick_date`, `resume_date`, `missed_business_days`, `mode` |
 | `ENGINE_INVARIANT_ERROR` | NULL | `tick` invariant violation | `phase`, `position_id` or `order_id`, `error`, `as_of` |
 
 `AuditEventType` is a string enum in `marketpulse/trading/types.py`. 6b / 6f / 6g extend the migration's CHECK constraint as they add types.
+
+**Note on SQLite CHECK extension:** SQLite cannot `ALTER` a column-level `CHECK` constraint; extending the audit event-type enumeration in 6b / 6g requires a table-rebuild migration pattern (`CREATE TABLE paper_audit_event_new`, `INSERT … SELECT *`, drop+rename). Acceptable at 6b/6g scale (table is append-only and bounded). This is a forward-warning, not a 6a-1 issue.
 
 **Indexes:**
 
@@ -370,7 +378,8 @@ INDEX (strategy, timestamp)
 ```sql
 CHECK (event_type IN ('ORDER_PLACED', 'ORDER_PLACED_DUPLICATE', 'ORDER_REJECTED',
                       'ORDER_CANCELLED', 'ORDER_ENTRY_FILLED', 'POSITION_CLOSED',
-                      'KILL_SWITCH_FLIPPED', 'TICK_COMPLETED',
+                      'KILL_SWITCH_FLIPPED', 'KILL_SWITCH_CYCLE_SKIPPED',
+                      'TICK_COMPLETED', 'TICK_REPROCESSED_COMPLETED',
                       'SCHEDULER_GAP_DETECTED', 'ENGINE_INVARIANT_ERROR'))
 ```
 
@@ -939,7 +948,7 @@ class DailyCycleResult:
     entries_materialized: int      # from TickResult
     exits_materialized: int        # from TickResult
     tick_errors: tuple[TickError, ...]   # structured (6a-L4)
-    cycle_status: Literal["completed", "completed_with_errors"]
+    cycle_status: Literal["completed", "completed_with_errors", "kill_switch_skipped"]
     cash_balance_end: Decimal
 
 
@@ -951,6 +960,7 @@ def run(
     bid_aggregator: BidAggregator,
     allocator: AllocateForDay,     # alias for the allocate_for_day function
     calendar: TradingCalendar,
+    kill_switch: KillSwitchState,
 ) -> DailyCycleResult:
     """One business-day forward step. Idempotent across reruns of the same
     tick_date (deterministic allocation_run_id, idempotent TICK_COMPLETED).
@@ -974,6 +984,46 @@ def run(
                 resume_date=tick_date,
                 missed_business_days=missed,
             )
+
+    # ---- Phase 1.5: kill-switch cycle-level short-circuit (6a-L8) ----
+    # When the kill switch is active, the cycle does NOT collect bids,
+    # does NOT allocate, does NOT place new orders. It STILL calls
+    # engine.tick(as_of=tick_date) so existing OPEN positions can close
+    # at horizon (otherwise positions would be trapped open forever).
+    # The engine internally short-circuits place_order on its own
+    # kill-switch check too — defense in depth.
+    if kill_switch.is_active():
+        tick_result = engine.tick(as_of=tick_date)
+        repository.write_audit_event(
+            event_type=AuditEventType.KILL_SWITCH_CYCLE_SKIPPED,
+            order_id=None,
+            strategy=None,
+            reason="kill_switch_active",
+            context={
+                "tick_date": tick_date.isoformat(),
+                "mode": "kill_switch_active",
+                "tick_entries_materialized": tick_result.entries_materialized,
+                "tick_exits_materialized": tick_result.exits_materialized,
+                "tick_errors": [
+                    {"phase": e.phase, "order_id": e.order_id,
+                     "position_id": e.position_id, "error": e.error}
+                    for e in tick_result.errors
+                ],
+            },
+        )
+        return DailyCycleResult(
+            tick_date=tick_date,
+            allocation_run_id=allocation_run_id,
+            bids_collected=0,
+            orders_placed=0,
+            orders_rejected=0,
+            duplicates_skipped=0,
+            entries_materialized=tick_result.entries_materialized,
+            exits_materialized=tick_result.exits_materialized,
+            tick_errors=tick_result.errors,
+            cycle_status="kill_switch_skipped",
+            cash_balance_end=repository.cash_balance(),
+        )
 
     # ---- Phase 2: collect today's raw bids (no DEDUP — allocator's job) ----
     bids = bid_aggregator.collect_for_date(tick_date)
@@ -1034,6 +1084,16 @@ def run(
         cash_balance_end=repository.cash_balance(),
     )
 
+    # repository.write_tick_completed_once handles both first-run and
+    # recovery-after-fix semantics (6a-L8):
+    #   - If no prior TICK_COMPLETED for tick_date: append TICK_COMPLETED
+    #     with this run's status.
+    #   - If prior TICK_COMPLETED.status == "completed_with_errors" AND
+    #     this run is "completed": append TICK_REPROCESSED_COMPLETED
+    #     (the original TICK_COMPLETED row is NOT modified — audit table
+    #     is append-only per lock xiii).
+    #   - Otherwise (prior TICK_COMPLETED status matches this run, or
+    #     prior was "completed"): no-op.
     repository.write_tick_completed_once(
         tick_date=tick_date,
         context={
@@ -1057,6 +1117,17 @@ def run(
 
     return result
 ```
+
+**`write_tick_completed_once` decision table** (repository internal logic — 6a-L8):
+
+| Prior `TICK_COMPLETED` for `tick_date`? | Prior `status` | New `status` | Action |
+|---|---|---|---|
+| no | — | `completed` or `completed_with_errors` | INSERT `TICK_COMPLETED` |
+| yes | `completed` | any | no-op (already terminal) |
+| yes | `completed_with_errors` | `completed_with_errors` | no-op (same state) |
+| yes | `completed_with_errors` | `completed` | INSERT `TICK_REPROCESSED_COMPLETED` (records the recovery; original `TICK_COMPLETED` row remains, append-only) |
+
+Recovery audit trail: a future query for "did this tick ever fully succeed?" reads the latest event for `tick_date` ordered by `id DESC` and accepts both `TICK_COMPLETED(status=completed)` and `TICK_REPROCESSED_COMPLETED` as success states.
 
 ### 7.2 Determinism + idempotency contract
 
@@ -1170,6 +1241,7 @@ def paper_trading_tick_job() -> None:
             bid_aggregator=bid_aggregator,
             allocator=allocate_for_day,
             calendar=calendar,
+            kill_switch=kill_switch,
         )
 
         logger.info(
@@ -1260,6 +1332,9 @@ tests/backtest/
 
 ```
 test_types.py                     # Layer: invariant
+                                   # Assert frozen-ness only — do NOT assert
+                                   # hashability across the board (future fields
+                                   # may include list/dict context payloads).
 test_clock.py                     # Layer: invariant
 test_calendar.py                  # Layer: invariant
 test_idempotency.py               # Layer: invariant
@@ -1288,7 +1363,7 @@ test_allocation_extraction.py     # Layer: behavioral (Phase 5 cross-check)
 | 6 | Transactionality | Mock DB error during `ORDER_REJECTED` audit → caller sees DB error, NOT `OrderRejected`; no audit row | ix, xxvii |
 | 7 | Single-writer | `grep -rn 'session\.add\(\|session\.execute(insert\|session\.execute(update' marketpulse/` returns matches ONLY inside `marketpulse/trading/repository.py` | iii, viii |
 | 8 | Lifecycle correctness | E2E: place_order → PLACED → tick(entry_date) → ENTRY_FILLED + position OPEN → tick(horizon) → CLOSED + EXIT fill recorded | xi, xix |
-| 9 | Lifecycle correctness | `grep -rn '"FILLED"\|ORDER_FILLED' marketpulse/` returns ZERO matches (must be `ENTRY_FILLED` / `ORDER_ENTRY_FILLED`) | xix |
+| 9 | Lifecycle correctness | `grep -rnE '"FILLED"\|\bORDER_FILLED\b' marketpulse/` returns ZERO matches (word boundary on ORDER_FILLED so we don't false-match ORDER_ENTRY_FILLED; the only legal status string is `ENTRY_FILLED` / event type `ORDER_ENTRY_FILLED`) | xix |
 | 10 | Ledger correctness | `Σ paper_cash_ledger.delta == (SELECT balance_after FROM paper_cash_ledger ORDER BY id DESC LIMIT 1)` after every fixture | xvi, xxi |
 | 11 | Ledger correctness | Property: 100 random cash movements with same timestamp → `balance_after` monotonic by `id`, not timestamp | xxi |
 | 12 | Stateful flow | Full E2E with `FakeClock`: seed evaluation_event → `daily_cycle.run(D0)` → `daily_cycle.run(D5)` → `paper_cash_ledger` shows entry + exit deltas, `realized_pnl` matches Phase 5 math for the same inputs | end-to-end (xxiii, xi, x, xvi) |
@@ -1298,10 +1373,16 @@ test_allocation_extraction.py     # Layer: behavioral (Phase 5 cross-check)
 | 16 | Forward-only recovery | Test fixture: simulate 3-day downtime. Restart → `daily_cycle.run` writes 1 `SCHEDULER_GAP_DETECTED` audit; subsequent rerun on same day writes 0 additional gap audit rows | xxxiii |
 | 17 | Determinism | `daily_cycle.run` produces same `allocation_run_id` across reruns of same tick_date (value: `f"paper-{tick_date}"`) | xxx, 6a-L7 |
 | 19 | Status transitions | `repository.update_paper_order_status(PLACED→ENTRY_FILLED)` succeeds; `(ENTRY_FILLED→PLACED)`, `(CANCELLED→ENTRY_FILLED)`, `(ENTRY_FILLED→CANCELLED)` all raise `InvariantError`. Same enforcement for `paper_position`. | 6a-L6 |
-| 20 | Risk-gate fail-closed exception | `RiskGate.check_pre_trade` raises `RuntimeError("boom")` → exactly one `ORDER_REJECTED` audit (reason=`risk_gate_error`, context includes `error_type="RuntimeError"`) → caller catches `OrderRejected("risk_gate_error")` → 0 paper_order rows. | iv, ix, 6a-L3 |
+| 20a | Risk-gate fail-closed (audit OK) | `RiskGate.check_pre_trade` raises `RuntimeError("boom")` AND audit insert succeeds → exactly one `ORDER_REJECTED` audit (reason=`risk_gate_error`, context includes `error_type="RuntimeError"`) → caller catches `OrderRejected("risk_gate_error")` → 0 paper_order rows. | iv, ix, 6a-L3 |
+| 20b | Risk-gate fail-closed (audit fails) | `RiskGate.check_pre_trade` raises `RuntimeError("boom")` AND `write_audit_event` raises `OperationalError` → caller sees the DB error (NOT `OrderRejected`); no `paper_order` row; no `paper_audit_event` row. A rejection without audit is not a valid completed rejection (lock ix). | iv, ix, 6a-L3 |
 | 21 | TICK_COMPLETED status | Tick with 1 entry success + 1 exit `InvariantError` → `TICK_COMPLETED.context.status == "completed_with_errors"`; `last_processed_tick_date()` returns this `tick_date`; 1 `ENGINE_INVARIANT_ERROR` audit row exists. | 6a-L4, 6a-L5 |
 | 22 | PlaceOrderResult contract | `place_order(req)` first call returns `PlaceOrderResult(created=True, duplicate=False)`; second call returns `PlaceOrderResult(created=False, duplicate=True)` with same `order_id`. No caller pre-checks. | 6a-L2 |
 | 23 | Extraction boundary | `marketpulse/backtest/allocation.py` does NOT import/reference: equity-curve, MTM, CLOSE step, contribution decomposition, rolling-stats finalization. Grep test asserts the absence list. | 6a-L1 |
+| 24 | Kill switch cycle-level | Active kill switch + `daily_cycle.run()` with N seeded events → 0 `paper_order` rows, 0 `ORDER_REJECTED` rows, exactly 1 `KILL_SWITCH_CYCLE_SKIPPED` audit, AND `engine.tick(as_of=tick_date)` still ran (verifiable by seeding an OPEN position with `horizon_date <= tick_date` and confirming it closes). | iv, 6a-L8 |
+| 25 | Kill switch defense-in-depth | Call `engine.place_order(...)` directly with kill switch active (bypassing `daily_cycle`) → `OrderRejected("kill_switch_active")` raised after exactly one `ORDER_REJECTED` audit. The engine-level check is the second layer of the defense (6a-L8). | iv, 6a-L8 |
+| 26 | Recovery audit | Seed a `tick_date` with `TICK_COMPLETED.status=completed_with_errors`. Fix the underlying data. Rerun `daily_cycle.run()` for the same `tick_date` → original row remains; new `TICK_REPROCESSED_COMPLETED` row appended with `prior_status=completed_with_errors` and `new_status=completed`. | 6a-L5, 6a-L8 |
+| 27 | Replay across deploys | Seed paper_order on D0 with `allocator_version=v1`. Bump `allocator_version=v2`. Rerun `daily_cycle.run()` on D0 → no new orders (`PlaceOrderResult.duplicate=True` on every winner); the existing `paper_order` row's `allocator_version` is UNCHANGED (still `v1`); 0 `ORDER_PLACED_DUPLICATE` net-new rows (deduped per `(idempotency_key, tick_date)`). | 6a-L7 |
+| 28 | AllocationContext purity | Test fixture: pass an `AllocationContext` with `allocation_date=D0`, plus a partial `existing_positions` snapshot. Call `allocate_for_day(...)` twice with bit-identical inputs → results equal. Then mock `datetime.now()` to a different value during the second call → results STILL equal (no hidden `today` dependency — 6a-L9). | 6a-L1, 6a-L9 |
 | 18 | Tick result accuracy | `TickResult.entries_materialized` counts actual `PLACED → ENTRY_FILLED` transitions, not net OPEN count diff | (new round-3 lock) |
 
 ### 9.4 6a-4 E2E test (canonical)
@@ -1429,7 +1510,9 @@ These are NOT umbrella-level architectural locks (umbrella stays at 32); they ar
 | **6a-L4** | Tick errors are structured `TickError(phase, order_id, position_id, error)` objects. Every `TickError` corresponds to exactly one `ENGINE_INVARIANT_ERROR` audit row written by `ForwardExecutionEngine.tick`. `TickResult.errors` is `tuple[TickError, ...]`, not `list[str]`. |
 | **6a-L5** | `TICK_COMPLETED.context.status` is `"completed"` or `"completed_with_errors"`. `repository.last_processed_tick_date()` returns the latest `tick_date` regardless of `status` — a tick with errors is still "processed" and gap detection respects it. UI / observability (6g) is responsible for surfacing `tick_errors_total > 0`. `ORDER_PLACED_DUPLICATE` is written at most once per `(idempotency_key, tick_date)` via `repository.write_duplicate_audit_once`. |
 | **6a-L6** | `paper_order.status` and `paper_position.status` transitions are validated by `repository.update_*_status(...)` against the allowed-transition table (§ 10.2). Illegal transitions raise `InvariantError`; the new row is NOT written. |
-| **6a-L7** | Phase 6a permits exactly ONE authoritative allocation run per NY trading day. `allocation_run_id = f"paper-{tick_date.isoformat()}"`. A same-day rerun reuses the same id and is treated as **replay**, not a new run. Future multi-run-per-day support (e.g., open + close cycles) would extend `allocation_run_id` to include a run-mode discriminator; 6a does not anticipate it. |
+| **6a-L7** | Phase 6a permits exactly ONE authoritative allocation run per NY trading day. `allocation_run_id = f"paper-{tick_date.isoformat()}"`. A same-day rerun reuses the same id and is treated as **replay**, not a new run. **Same-day rerun AFTER a code deploy (new `allocator_version` / `execution_engine_version`) is still replay**, not recomputation — `idempotency_key` does not include version fields. The version columns on `paper_order` explain the *original* allocation; they do not authorize an in-place replacement. This is intentional: re-allocating mid-day with a freshly-deployed allocator would silently shift portfolio state in ways the original placement audit cannot explain. Future multi-run-per-day support (open + close cycles) would extend `allocation_run_id` with a run-mode discriminator; 6a does not anticipate it. |
+| **6a-L8** | Kill switch is enforced at TWO layers (defense in depth): (a) `daily_cycle.run` checks `kill_switch.is_active()` at cycle start; if active, the cycle SKIPS bid collection / allocation / new order placement, but STILL calls `engine.tick(as_of=tick_date)` so existing OPEN positions can close at their horizon. A single `KILL_SWITCH_CYCLE_SKIPPED` audit row records the skip. (b) `ForwardExecutionEngine.place_order` also checks the kill switch and writes per-order `ORDER_REJECTED("kill_switch_active")` for any call that bypasses the cycle gate. Recovery semantics: `TICK_COMPLETED` is append-only per `(tick_date)`; if a tick first writes `completed_with_errors` and a later same-day rerun completes cleanly, `repository.write_tick_completed_once(...)` appends `TICK_REPROCESSED_COMPLETED` (does NOT modify the original row — table is append-only per lock xiii). |
+| **6a-L9** | `AllocationContext` (the dataclass passed into `allocate_for_day`) carries every input the allocator needs as an explicit named field — `allocation_date`, `target_vol`, `sector_caps`, `correlation_caps`, `contribution_enabled`, `pool_corr_mode`, `phase5e_warm_pool_overlap_days`, etc. The allocator MUST NOT read any state outside `AllocationContext`, `SizingContext`, `bids`, `existing_positions`, or `cash_available`. No hidden `today` dependency, no environment lookup, no DB read. This is what makes `allocate_for_day` truly pure (6a-L1 companion). |
 
 ### 11.2 Umbrella lock manifestations
 
