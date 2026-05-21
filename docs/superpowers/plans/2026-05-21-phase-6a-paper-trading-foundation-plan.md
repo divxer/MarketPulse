@@ -312,7 +312,7 @@ no DB read.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime
 
 # Version stamped onto paper_order.allocator_version for replay
@@ -1774,6 +1774,119 @@ git add marketpulse/trading/risk_gate.py tests/trading/test_risk_gate.py
 git commit -m "feat(6a-1): RiskGate Protocol + AlwaysApproveRiskGate stub"
 ```
 
+### Task 6a-1.7b: `price_provider.py` — Protocol + StubPriceProvider
+
+**Files:**
+- Create: `marketpulse/trading/price_provider.py`
+- Create: `tests/trading/test_price_provider.py`
+
+This task closes the round-6 Blocker 5 surface area. The `PriceProvider`
+Protocol is used by `daily_cycle._make_order_request` to fill
+`OrderRequest.horizon_price` for forward-running mode (Phase 6 doesn't
+have outcome rows yet at order placement). 6a ships `StubPriceProvider`
+for tests; production wires a real price-feed-backed provider in a
+later phase (out of scope for 6a).
+
+- [ ] **Step 1: Write tests**
+
+```python
+# tests/trading/test_price_provider.py
+# Layer: invariant
+"""6a-1: PriceProvider Protocol + StubPriceProvider determinism."""
+
+from __future__ import annotations
+
+from datetime import date
+from decimal import Decimal
+
+
+def test_stub_price_provider_returns_configured_value():
+    from marketpulse.trading.price_provider import StubPriceProvider
+
+    p = StubPriceProvider(map={("AAPL", date(2026, 5, 28)): Decimal("155.00")})
+    assert p.horizon_price(ticker="AAPL", horizon_date=date(2026, 5, 28)) == Decimal("155.00")
+
+
+def test_stub_price_provider_default_on_missing():
+    from marketpulse.trading.price_provider import StubPriceProvider
+
+    p = StubPriceProvider(default=Decimal("100.00"))
+    assert p.horizon_price(ticker="UNKNOWN", horizon_date=date(2026, 5, 28)) == Decimal("100.00")
+
+
+def test_stub_price_provider_returns_none_when_no_match_no_default():
+    from marketpulse.trading.price_provider import StubPriceProvider
+
+    p = StubPriceProvider()
+    assert p.horizon_price(ticker="X", horizon_date=date(2026, 5, 28)) is None
+```
+
+- [ ] **Step 2: Run failing tests**
+
+```bash
+uv run pytest tests/trading/test_price_provider.py -v
+```
+
+Expected: FAIL (ModuleNotFoundError).
+
+- [ ] **Step 3: Implement**
+
+```python
+# marketpulse/trading/price_provider.py
+"""PriceProvider Protocol — daily_cycle uses an injected provider to
+fill OrderRequest.horizon_price BEFORE construction. With horizon_price
+populated, ForwardExecutionEngine.tick(horizon) will not raise
+ENGINE_INVARIANT_ERROR in the normal forward flow.
+
+6a ships StubPriceProvider for tests. Production wires a real
+provider (yfinance-backed or broker quote API) — out of scope for the
+6a foundation. The seam exists in marketpulse/scheduler/
+paper_trading_tick.py; replace StubPriceProvider with a real
+implementation when shipping."""
+
+from __future__ import annotations
+
+from datetime import date
+from decimal import Decimal
+from typing import Protocol
+
+
+class PriceProvider(Protocol):
+    def horizon_price(self, *, ticker: str, horizon_date: date) -> Decimal | None: ...
+
+
+class StubPriceProvider:
+    """Deterministic test provider. Configured via an exact lookup map
+    and/or a default fallback. Returns None when neither matches."""
+
+    def __init__(
+        self,
+        *,
+        map: dict[tuple[str, date], Decimal] | None = None,
+        default: Decimal | None = None,
+    ) -> None:
+        self._map = map or {}
+        self._default = default
+
+    def horizon_price(self, *, ticker: str, horizon_date: date) -> Decimal | None:
+        return self._map.get((ticker, horizon_date), self._default)
+```
+
+- [ ] **Step 4: Run tests**
+
+```bash
+uv run pytest tests/trading/test_price_provider.py -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add marketpulse/trading/price_provider.py tests/trading/test_price_provider.py
+git commit -m "feat(6a-1): PriceProvider Protocol + StubPriceProvider"
+```
+
 ### Task 6a-1.8: 5 DB model classes in `marketpulse/db/models.py`
 
 **Files:**
@@ -1893,6 +2006,19 @@ class PaperOrder(Base):
             name="ck_paper_order_status",
         ),
         CheckConstraint("quantity > 0", name="ck_paper_order_qty_positive"),
+        # Time-consistency CHECKs (spec § 4.1 — round-7 merge):
+        CheckConstraint(
+            "status != 'PLACED' OR (filled_at IS NULL AND cancelled_at IS NULL)",
+            name="ck_paper_order_placed_no_terminal_ts",
+        ),
+        CheckConstraint(
+            "status != 'ENTRY_FILLED' OR filled_at IS NOT NULL",
+            name="ck_paper_order_entry_filled_has_ts",
+        ),
+        CheckConstraint(
+            "status != 'CANCELLED' OR cancelled_at IS NOT NULL",
+            name="ck_paper_order_cancelled_has_ts",
+        ),
     )
 
 
@@ -2161,6 +2287,19 @@ def upgrade() -> None:
         sa.Column("size_clamped_by_override", sa.Boolean(), nullable=False, server_default=sa.text("0")),
         sa.CheckConstraint("status IN ('PLACED', 'ENTRY_FILLED', 'CANCELLED')", name="ck_paper_order_status"),
         sa.CheckConstraint("quantity > 0", name="ck_paper_order_qty_positive"),
+        # Time-consistency CHECKs (spec § 4.1):
+        sa.CheckConstraint(
+            "status != 'PLACED' OR (filled_at IS NULL AND cancelled_at IS NULL)",
+            name="ck_paper_order_placed_no_terminal_ts",
+        ),
+        sa.CheckConstraint(
+            "status != 'ENTRY_FILLED' OR filled_at IS NOT NULL",
+            name="ck_paper_order_entry_filled_has_ts",
+        ),
+        sa.CheckConstraint(
+            "status != 'CANCELLED' OR cancelled_at IS NOT NULL",
+            name="ck_paper_order_cancelled_has_ts",
+        ),
     )
     op.create_index("ix_paper_order_status_horizon", "paper_order", ["status", "horizon_date"])
     op.create_index("ix_paper_order_status_alloc_date", "paper_order", ["status", "allocation_date"])
@@ -3078,6 +3217,27 @@ def test_cash_ledger_computes_balance_inside_transaction(session):
     assert rows[0].balance_after == Decimal("10000")
     assert rows[1].balance_after == Decimal("8500")
     assert repo.cash_balance() == Decimal("8500")
+
+
+def test_ensure_initial_deposit_strictly_idempotent(session):
+    """3 consecutive calls produce exactly 1 INITIAL_DEPOSIT row.
+    Locks the at-most-once contract; on SQLite the write-lock
+    serializes the count→insert sequence safely."""
+    from sqlalchemy import select
+
+    from marketpulse.db.models import PaperCashLedger
+    from marketpulse.trading.repository import Repository
+
+    repo = Repository(session=session)
+    ts = datetime(2026, 5, 21, tzinfo=UTC)
+    for _ in range(3):
+        repo.ensure_initial_deposit(amount=Decimal("10000"), timestamp=ts)
+    rows = session.execute(
+        select(PaperCashLedger).where(PaperCashLedger.reason == "INITIAL_DEPOSIT")
+    ).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].delta == Decimal("10000")
+    assert rows[0].balance_after == Decimal("10000")
 ```
 
 - [ ] **Step 2: Run failing tests**
