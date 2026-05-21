@@ -8,13 +8,14 @@
 
 ## 1 — Goal
 
-Tech-debt sprint that strengthens Phase 5d's foundation (refactor + tests) and ships the deferred 5b-3 per-strategy YAML sizing override on the cleaner ground. Three threads, one PR:
+Tech-debt sprint that strengthens Phase 5d's foundation (refactor + tests), ships the deferred 5b-3 per-strategy YAML sizing override on the cleaner ground, AND introduces invariant-grade allocation observability that instruments the heuristic-to-optimal residual gap. Four threads, one PR:
 
 1. **Refactor** — `portfolio_simulator.py` 853 → ~770 LOC via targeted extractions.
 2. **Test hardening** — close the tautological-test gap noted across 5d code reviews.
 3. **5b-3 sizing override** — optional `sizing:` block per strategy YAML, with strict validation.
+4. **Allocation observability** — `effective_allocation` + `rank_drift_from_signal` on `StrategyContribution`, always-on, default-on, deterministic-invariant-grade. Instruments the three named system-evolution debts (§ 10): ordering instability, signal-execution mismatch, no unified objective.
 
-No new features beyond the sizing override. No new modules. No DB migration. No new dependencies.
+No new features beyond the sizing override + observability metrics. No new modules. No DB migration. No new dependencies.
 
 ---
 
@@ -37,12 +38,14 @@ No new features beyond the sizing override. No new modules. No DB migration. No 
     - The override is a **post-hoc clamp** applied after the vol-target × conviction math (or after the fixed-mode constant). Single clip operation, no second sizing engine, no double-clipping.
     - This is a hard architectural invariant. Any future change that lets overrides feed back into signal-layer computations would constitute a Phase boundary violation and requires a fresh spec.
 13. **Test taxonomy — invariant tests vs behavioral tests are explicitly tagged.** Every new test in Phase 5e carries a `# Layer: invariant` or `# Layer: behavioral` comment at its docstring header (see § 6). Invariant tests assert structural properties that must hold regardless of synthetic-market dynamics (Σ contribution_returns == pool_return, no NaN, monotonic position-size clipping, override never relaxes global ceiling). Behavioral tests assert dynamics-dependent properties (rank flips occur, correlation has expected sign, avg_pool_corr is non-None given sufficient warm-up). This taxonomy prevents test drift in 5f+ where fixture dynamics evolve.
+14. **Allocation observability — default-ON, no gating flag.** The two new metrics (`effective_allocation`, `rank_drift_from_signal`) are computed at finalization on EVERY backtest run. No `observability_enabled` flag. Rationale: gating would reintroduce the same "silent missing telemetry" failure mode that the warm-pool fixture in Thread B was created to prevent. If display-level filtering is ever needed, add a UI-only / API-only switch — never a computation gate. Stats are either present and complete, or the run did not happen.
+15. **Allocation metrics are INVARIANT-grade telemetry, not stochastic.** `effective_allocation` and `rank_drift_from_signal` are deterministic functions of (final per-strategy capital, bid sequence). Given fixed inputs, the metrics return identical outputs every run. Their tests therefore live in the invariant taxonomy (lock #13). The ONLY behavioral aspect is whether a given fixture *triggers* a non-zero drift — that fixture-shape question is isolated as a separate behavioral guard test, never conflated with the metric's correctness. This separation prevents the metric from drifting into the same ambiguity class that bit `n_would_change_rank` in Phase 5d.
 
 ---
 
 ## 3 — Architecture
 
-### 3.1 Three-thread execution
+### 3.1 Four-thread execution
 
 ```
 Thread A (Refactor, lowest risk)
@@ -66,8 +69,15 @@ Thread C (Sizing override feature)
   ├── C14: Orchestrator threads override map
   └── C15: bid history tooltip when strategy has overrides
 
+Thread D (Allocation observability — default-on, invariant-grade)
+  ├── D16: effective_allocation field on StrategyContribution
+  ├── D17: rank_drift_from_signal field on StrategyContribution
+  ├── D18: Finalization populates both fields from bid_history + avg_bid_weight
+  ├── D19: Strategy table UI — 2 new columns (eff. alloc, rank Δ vs signal)
+  └── D20: 3 metric tests (2 invariant + 1 fixture-shape behavioral guard)
+
 Final
-  └── 16: Full suite + ruff + module-import smoke + route smoke
+  └── 21: Full suite + ruff + module-import smoke + route smoke
 ```
 
 ### 3.2 Refactor mechanics
@@ -367,6 +377,99 @@ This diagram captures the spec § 2 lock #12 invariant as a layer map. Every Pha
 - If a Phase 5e change uses an override value as a signal-layer input (e.g., scaling a rolling Sharpe by a strategy-specific size factor), the change is wrong. Reject.
 - The override map is read in exactly two locations: `compute_position_sizes` (clip envelope) and the route layer's `strategies_with_sizing_overrides` set (UI surfacing only).
 
+### 3.5 Allocation observability mechanics
+
+Phase 5e introduces TWO observation-only metrics on `StrategyContribution`, populated at finalization on every run (no gating flag — spec § 2 lock #14). They measure the gap between **signal-layer ranking** (where the strategy bid) and **execution-layer outcome** (where capital actually landed), which is the load-bearing observable for the three system-evolution debts named in § 10 (ordering instability, signal-execution mismatch, no unified objective).
+
+**StrategyContribution extension** (`marketpulse/backtest/types.py`):
+
+```python
+@dataclass(frozen=True)
+class StrategyContribution:
+    # ... existing fields unchanged ...
+    avg_pool_corr: float | None = None        # Phase 5d
+    n_would_change_rank: int = 0              # Phase 5d
+
+    # NEW Phase 5e Thread D — always populated, invariant-grade
+    effective_allocation: float = 0.0          # share of total won capital, [0.0, 1.0]
+    rank_drift_from_signal: int = 0            # rank(avg_bid_weight) − rank(effective_allocation)
+```
+
+**Effective allocation:**
+
+$$E_s = \frac{\sum_{b \in \text{bid\_history},\, b.\text{strategy}=s,\, b.\text{outcome}=\text{won}} b.\text{position\_size}}{\sum_j \sum_{b'} b'.\text{position\_size}}$$
+
+Implementation:
+```python
+total_won_capital = sum(
+    b.position_size for b in all_bid_records if b.outcome == "won"
+)
+effective_allocation_by_strategy: dict[str, float] = {}
+for s in sorted(daily_curves.keys()):
+    won_size = sum(
+        b.position_size for b in all_bid_records
+        if b.strategy == s and b.outcome == "won"
+    )
+    effective_allocation_by_strategy[s] = (
+        won_size / total_won_capital if total_won_capital > 0 else 0.0
+    )
+```
+
+Range: `[0.0, 1.0]`. Sum across all strategies = 1.0 when any capital was allocated, else all zero.
+
+**Rank drift from signal:**
+
+$$D_s = \mathrm{rank}_\text{desc}(\overline{w}_s) - \mathrm{rank}_\text{desc}(E_s)$$
+
+Where `rank_desc` is the descending-order rank (highest value → rank 0). `avg_bid_weight` is the existing Phase 5a field on `StrategyContribution` (mean of `b.weight` over all bids for the strategy).
+
+Implementation:
+```python
+# Strategies with no bids get sentinel rank == len(strategies) (lowest)
+strategies_sorted_by_weight = sorted(
+    per_strategy_stats.keys(),
+    key=lambda s: -per_strategy_stats[s].avg_bid_weight,
+)
+strategies_sorted_by_capital = sorted(
+    per_strategy_stats.keys(),
+    key=lambda s: -effective_allocation_by_strategy[s],
+)
+rank_by_weight = {s: i for i, s in enumerate(strategies_sorted_by_weight)}
+rank_by_capital = {s: i for i, s in enumerate(strategies_sorted_by_capital)}
+rank_drift_by_strategy: dict[str, int] = {
+    s: rank_by_weight[s] - rank_by_capital[s]
+    for s in per_strategy_stats
+}
+```
+
+Range: `[−(N−1), +(N−1)]` where N is the number of strategies.
+- `D_s = 0`: strategy lands at the rank its signal predicted.
+- `D_s > 0`: signal said "rank higher" than capital outcome (strategy under-allocated relative to bid). Typical cause: caps fired (sector, correlation, size_too_small, cash_short).
+- `D_s < 0`: capital outcome was HIGHER than signal rank predicted. Typical cause: higher-ranked strategies were blocked by caps, leaving capital for this one.
+
+**Determinism (lock #15):** both metrics are pure functions of `all_bid_records` (the finalized BidRecord list) and `per_strategy_stats[s].avg_bid_weight`. Given identical bid history, the metrics return identical values every run. The behavioral aspect — *whether* a given fixture produces non-zero drift — is isolated as a separate fixture-shape guard test (D20.3 in § 6.4).
+
+**UI surfacing** (`backtest_strategy_table_shared.html`):
+
+Two new columns inserted between existing `rank Δ` (Phase 5d) and `avg size`:
+
+```html
+<th class="num">eff. alloc</th>
+<th class="num" title="bid rank − capital rank: + means under-allocated vs signal">rank Δ vs signal</th>
+```
+
+Cells:
+```html
+<td class="num mono tnum">{{ "{:.1%}".format(c.effective_allocation) }}</td>
+<td class="num mono tnum">
+  {% if c.rank_drift_from_signal == 0 %}—{% else %}{{ "{:+d}".format(c.rank_drift_from_signal) }}{% endif %}
+</td>
+```
+
+**No new BidRecord fields.** Both metrics are per-strategy aggregates only.
+
+**No backward-compat issue.** Default values (`0.0`, `0`) mean a pre-Phase-5e `StrategyContribution` constructed without these fields would land in the "no drift" state — semantically correct for legacy reconstruction, though no production code constructs `StrategyContribution` outside the simulator anyway.
+
 ---
 
 ## 4 — Data flow
@@ -550,6 +653,70 @@ All Thread C tests are **invariant** unless explicitly marked otherwise. They as
 
 1. After backtest with one strategy having overrides, assert `strategies_with_sizing_overrides` set is in the template context AND the bid history HTML contains the tooltip text for at least one row.
 
+### 6.4 Thread D (Allocation observability) — 3 new tests
+
+All metric-correctness tests are **invariant** (deterministic functions of bid_history — see lock #15). The fixture-shape guard is **behavioral**.
+
+**Metric correctness (D20.1, D20.2):**
+
+```python
+def test_phase5e_effective_allocation_sums_to_one_or_zero(phase5d_warm_pool):
+    """# Layer: invariant
+    Σ effective_allocation == 1.0 when ANY capital was allocated; else == 0.0.
+    Pure aggregation identity — holds for ANY fixture (including empty).
+    """
+    r = phase5d_warm_pool["shared"]
+    total = sum(c.effective_allocation for c in r.per_strategy_stats.values())
+    won_capital = sum(
+        b.position_size for b in r.bid_history if b.outcome == "won"
+    )
+    if won_capital > 0:
+        assert abs(total - 1.0) < 1e-9
+    else:
+        assert total == 0.0
+
+
+def test_phase5e_rank_drift_sum_to_zero(phase5d_warm_pool):
+    """# Layer: invariant
+    Σ rank_drift_from_signal == 0 by construction (any permutation of N
+    distinct ranks has zero net drift). Pure structural property.
+
+    Note: ties in avg_bid_weight or effective_allocation may produce
+    non-unique ranks; this test uses dense-rank semantics consistent
+    with the simulator's sort, so the equality still holds.
+    """
+    r = phase5d_warm_pool["shared"]
+    drifts = [c.rank_drift_from_signal for c in r.per_strategy_stats.values()]
+    assert sum(drifts) == 0
+```
+
+**Fixture-shape guard (D20.3):**
+
+```python
+def test_phase5e_warm_pool_produces_at_least_one_nonzero_drift(phase5d_warm_pool):
+    """# Layer: behavioral
+    The warm-pool fixture is engineered to fire at least one cap (sector,
+    correlation, or cash-short) so |rank_drift_from_signal| > 0 for at
+    least one strategy. If this test fails, the fixture has drifted and
+    the rank-drift code path is no longer exercised — fix the fixture.
+
+    Pairs with the invariant tests above: those verify the metric IS
+    correct; this verifies the fixture actually USES the metric's
+    non-trivial range.
+    """
+    r = phase5d_warm_pool["shared"]
+    nonzero = [
+        c.rank_drift_from_signal for c in r.per_strategy_stats.values()
+        if c.rank_drift_from_signal != 0
+    ]
+    assert len(nonzero) > 0, (
+        "Fixture too uniform — no rank drift produced. "
+        "Caps must fire for this metric's path to execute."
+    )
+```
+
+**Why this split is load-bearing:** the invariant tests (D20.1, D20.2) catch any regression in the metric implementation — wrong formula, wrong rank ordering, off-by-one in the sum. The behavioral guard (D20.3) catches fixture drift. If a future change makes the fixture too tame, only D20.3 fails — D20.1 and D20.2 still validate the production code on whatever data the fixture produces, including degenerate cases. This is exactly the property that Phase 5d's `n_would_change_rank` tests lacked.
+
 **Final integration (16):**
 
 Full suite green; ~935 tests total (915 + 20 new).
@@ -593,8 +760,11 @@ Full suite green; ~935 tests total (915 + 20 new).
 | 20 | Orchestrator integration: `eff_min ≤ BidRecord.position_size ≤ eff_max`            | C14  | invariant   |
 | 21 | UI: `strategies_with_sizing_overrides` set populated when YAML has block          | C15  | invariant   |
 | 22 | UI: bid history tooltip contains "custom limits" text for overridden strategy bids| C15  | invariant   |
+| 23 | Σ `effective_allocation` == 1.0 (when capital allocated) or 0.0 (when none)       | D20  | invariant   |
+| 24 | Σ `rank_drift_from_signal` == 0 (permutation identity)                            | D20  | invariant   |
+| 25 | Warm-pool fixture produces ≥1 strategy with non-zero `rank_drift_from_signal`     | D20  | behavioral  |
 
-**Counts:** 22 invariant tests + 2 behavioral tests (fixture-shape guards) = 24 new tests. Invariant tests dominate (~92%) because Phase 5e's core deliverables are structural contracts, not new dynamics.
+**Counts:** 24 invariant tests + 3 behavioral tests (fixture-shape guards) = 27 new tests. Invariant tests dominate (~89%) because Phase 5e's core deliverables are structural contracts and deterministic telemetry, not new dynamics.
 
 ---
 
@@ -629,6 +799,28 @@ The Phase 5a-5e arc has been adding constraints and telemetry to a fundamentally
 3. **Real-time bid arbitration** (vs. backtest's batch dedup) introduces ordering dependencies that the current "rank by weight, allocate in order" model cannot express.
 
 This means Phase 6 will likely require a **fresh architectural layer** (a `pool_optimizer.py` or similar) sitting between ALLOC and the execution boundary, with its own contract spec. The 5e refactor preparation (extracted `_decompose_day_contributions`, `_phase5d_kwargs_from_metadata`, `MIN_OVERLAP_DAYS` / `POOL_CORR_MODE` constants) deliberately keeps the simulator's per-day loop legible so Phase 6's combinatorial layer can plug in cleanly.
+
+### Three named hidden debts (instrumented by Thread D)
+
+The Phase 5a-5e architecture stacks heuristics in sequential greedy order (DEDUP → SECTOR_CAP → CORRELATION_CAP → CAPACITY_CAP → ALLOC). This stack produces emergent behavior that no single component is responsible for. Three specific debts will compound across the stack as 5f and 6 add more constraints. Naming them explicitly so the rank-drift telemetry has a clear job:
+
+**Debt 1 — Ordering instability:**
+DEDUP/CAP/ALLOC are sequential greedy operations. The order in which they execute determines which strategy wins when constraints bind. Reordering `sector_cap_full` and `correlation_cap_full` checks would produce different `BidRecord.outcome` distributions for the same bid set. There is no spec lock guaranteeing the order is optimal — only that it is deterministic. The system has no metric that detects when reordering would have produced a different allocation. **Phase 6 implication:** real-time bid arrival (not batch) makes ordering nondeterministic; current heuristics cannot adapt.
+**5e instrumentation:** `rank_drift_from_signal != 0` is a necessary (not sufficient) signal that the heuristic ordering is influencing outcomes beyond what the signal prescribed.
+
+**Debt 2 — Signal-execution mismatch:**
+Phase 5d's `pool_corr_excluding_self` measures correlation in the **signal space** (pre-cap per-day contribution returns). Phase 5e's overrides clamp in the **execution space** (post-allocation capital). These two spaces diverge whenever caps fire. A strategy can have a strongly negative `pool_corr` (signal says: this is a hedge, boost it) AND large rank drift (execution says: caps blocked the boost). The pool's realized risk profile is therefore NOT what the contribution-adjusted Sharpe optimization predicted.
+**5e instrumentation:** comparing `rank_drift_from_signal` against `rewarded_for_negative_corr` reveals strategies that the signal layer wanted to boost but the execution layer suppressed.
+
+**Debt 3 — No unified objective function:**
+The system optimizes a stack of partial objectives:
+- 5a: per-strategy rolling Sharpe (signal)
+- 5d: pool-correlation penalty (signal modifier)
+- 5c: sector + correlation caps (execution constraint)
+- 5e: per-strategy clip envelope (execution constraint)
+
+There is no scalar objective $J$ that the entire stack maximizes. The system is **rule-following, not objective-driven**. Phase 6's optimization layer will require defining $J$ — likely a constrained optimization over $\sum_s x_s w_s$ subject to all current heuristics expressed as linear constraints. Until that exists, the current stack's behavior cannot be proved optimal relative to any criterion.
+**5e instrumentation:** `effective_allocation` is the canonical observable for "what the system actually optimized," distinct from the bid-weight signal. The gap between them is the heuristic-to-optimal residual that Phase 6 will need to close (or accept).
 
 **Architectural drift acknowledged but deferred:**
 
