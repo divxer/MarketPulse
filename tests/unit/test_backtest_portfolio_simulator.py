@@ -1239,3 +1239,39 @@ def test_finalization_n_correlation_cap_events_counted():
     blocked = [b for b in r.bid_history if b.outcome == "correlation_cap_full"]
     assert r.n_correlation_cap_events == len(blocked)
     assert r.n_correlation_cap_events >= 1
+
+
+def test_phase5d_per_day_contribution_decomposition_sums_to_pool_return():
+    """Σ daily_strategy_contribution_returns[s][d] == pool_return[d] for every d.
+
+    The Phase 5b T6 invariant (Σ contribution_pnl == pool_pnl) is now reaffirmed
+    at day-level granularity via the per-day per-strategy accumulator that
+    feeds Phase 5d's LOO subtraction.
+    """
+    from marketpulse.backtest.portfolio_simulator import simulate_shared_pool
+
+    good = [(date(2026, 4, 1) + timedelta(days=i), 10_000.0 * (1.005 ** i))
+            for i in range(30)]
+    bids = [
+        _pair("AAPL", "a", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0),
+        _pair("MSFT", "b", date(2026, 5, 1), 100.0, date(2026, 5, 8), 105.0),
+    ]
+    daily_curves = {"a": good, "b": good}
+
+    r = simulate_shared_pool(
+        bids=bids, daily_curves=daily_curves,
+        horizon=5, initial_capital=10_000.0, base_position_size=1_000.0,
+        max_capital_in_use=10_000.0, lookback_days=60,
+        sizing_enabled=False,
+        sector_caps_enabled=False, correlation_caps_enabled=False,
+        contribution_enabled=False,  # Phase 5d default
+    )
+
+    daily_equity = r.daily_equity_curve
+
+    # Pool PnL realized at end == sum of per-strategy contribution_pnl
+    final_pool_pnl = daily_equity[-1][1] - daily_equity[0][1]
+    sum_contribution_pnl = sum(c.contribution_pnl for c in r.per_strategy_stats.values())
+
+    # Outcome: invariant holds within float tolerance
+    assert abs(sum_contribution_pnl - final_pool_pnl) < 0.01

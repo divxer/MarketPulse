@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
     from marketpulse.backtest.correlation import PriceProvider
 
+from marketpulse.backtest.contribution import daily_contribution_return
 from marketpulse.backtest.correlation import find_correlation_neighbors
 from marketpulse.backtest.metrics import compute_metrics
 from marketpulse.backtest.sharpe import compute_bid_weights, compute_position_sizes
@@ -69,6 +70,9 @@ def simulate_shared_pool(
     correlation_cap_pct: float = 0.40,
     correlation_threshold: float = 0.60,
     price_provider: PriceProvider | None = None,
+    # NEW Phase 5d contribution-adjusted Sharpe (reserved — wired in T6)
+    contribution_enabled: bool = False,
+    contribution_lambda: float = 0.5,
 ) -> PortfolioBacktestResult:
     """Phase 5a shared-pool simulator. See spec § 2 for algorithm.
 
@@ -187,7 +191,47 @@ def simulate_shared_pool(
     capital_in_use_by_day: list[float] = []
     exposure_by_strategy_by_day: dict[str, list[float]] = {}
 
+    # Phase 5d per-day per-strategy accumulators (spec § 5).
+    # realized_pnl_today_by_strategy is RESET every loop iteration; the other
+    # three lists/dicts accumulate across the run for Phase 5d telemetry and
+    # Task 6's pool_corr_excluding_self LOO subtraction.
+    realized_pnl_today_by_strategy: dict[str, float] = {}
+    daily_strategy_contribution_returns: dict[str, list[tuple[date, float]]] = {}
+    daily_pool_returns: list[tuple[date, float]] = []
+    pool_corr_by_strategy: dict[str, list[float | None]] = {}  # noqa: F841 — reserved for T6
+
+    prev_d: date | None = None
     for d in calendar:
+        # Phase 5d: snapshot per-strategy unrealized PnL using YESTERDAY's mark
+        # BEFORE the CLOSE step. `open_positions` at this point is the set of
+        # positions that were open at the END of the previous day. We use
+        # prev_d (not d) as the "current" arg to elapsed_fraction so the mark
+        # is yesterday's mark, not today's.
+        mtm_prev_by_strategy: dict[str, float] = {}
+        if prev_d is not None:
+            for pos in open_positions:
+                if pos.entry_date == prev_d:
+                    # Opened yesterday → same-day no-MTM rule applied yesterday
+                    unrealized_prev = 0.0
+                else:
+                    fraction_prev = elapsed_fraction(
+                        calendar, entry=pos.entry_date,
+                        horizon=pos.horizon_date, current=prev_d,
+                    )
+                    est_price_prev = pos.entry_price + (
+                        pos.horizon_price - pos.entry_price
+                    ) * fraction_prev
+                    unrealized_prev = pos.position_size * (
+                        est_price_prev / pos.entry_price - 1.0
+                    )
+                mtm_prev_by_strategy[pos.strategy] = (
+                    mtm_prev_by_strategy.get(pos.strategy, 0.0) + unrealized_prev
+                )
+
+        # Phase 5d: reset per-day realized PnL bucket; populated in CLOSE.
+        realized_pnl_today_by_strategy.clear()
+
+
         # ─── CLOSE ───
         still_open: list[_OpenPosition] = []
         for pos in open_positions:
@@ -197,6 +241,11 @@ def simulate_shared_pool(
                 trade_returns_by_strategy.setdefault(pos.strategy, []).append(realized_ret)
                 trade_realized_pnl_by_strategy.setdefault(pos.strategy, []).append(
                     realized_ret * pos.position_size
+                )
+                # Phase 5d: also accumulate into per-day bucket (cleared each loop)
+                realized_pnl_today_by_strategy[pos.strategy] = (
+                    realized_pnl_today_by_strategy.get(pos.strategy, 0.0)
+                    + realized_ret * pos.position_size
                 )
             else:
                 still_open.append(pos)
@@ -433,10 +482,15 @@ def simulate_shared_pool(
 
         # ─── MTM ─── (linear interpolation per spec § 2 + Phase 4)
         positions_value = 0.0
+        # Phase 5d: accumulate today's per-strategy unrealized PnL component
+        # using the SAME per-position mark formula as the line above. Sum by
+        # strategy → fed into the day-level contribution decomposition below.
+        mtm_today_by_strategy: dict[str, float] = {}
         for pos in open_positions:
             if pos.entry_date == d:
                 # Newly opened: no same-day MTM (matches Phase 4 invariant)
                 positions_value += pos.position_size
+                unrealized_today = 0.0
             else:
                 fraction = elapsed_fraction(
                     calendar, entry=pos.entry_date,
@@ -446,6 +500,39 @@ def simulate_shared_pool(
                     pos.horizon_price - pos.entry_price
                 ) * fraction
                 positions_value += pos.position_size * (est_price / pos.entry_price)
+                unrealized_today = pos.position_size * (
+                    est_price / pos.entry_price - 1.0
+                )
+            mtm_today_by_strategy[pos.strategy] = (
+                mtm_today_by_strategy.get(pos.strategy, 0.0) + unrealized_today
+            )
+
+        # ─── Phase 5d per-day per-strategy contribution decomposition ───
+        # By construction: pool_pnl_today = Σ_s (realized_today_s
+        #   + mtm_today_s − mtm_prev_s). Dividing by yesterday's equity gives
+        # contribution returns whose sum equals the pool return for this day.
+        pool_equity_prev_day = (
+            equity_curve[-1][1] if equity_curve else initial_capital
+        )
+        all_known_strategies = (
+            set(realized_pnl_today_by_strategy)
+            | set(mtm_prev_by_strategy)
+            | set(mtm_today_by_strategy)
+        )
+        for s in all_known_strategies:
+            pnl_today_s = (
+                realized_pnl_today_by_strategy.get(s, 0.0)
+                + mtm_today_by_strategy.get(s, 0.0)
+                - mtm_prev_by_strategy.get(s, 0.0)
+            )
+            contrib_ret = daily_contribution_return(pnl_today_s, pool_equity_prev_day)
+            daily_strategy_contribution_returns.setdefault(s, []).append((d, contrib_ret))
+        pool_ret_today = sum(
+            daily_strategy_contribution_returns[s][-1][1]
+            for s in all_known_strategies
+            if daily_strategy_contribution_returns.get(s)
+        )
+        daily_pool_returns.append((d, pool_ret_today))
 
         # ─── RECORD ───
         equity_curve.append((d, cash + positions_value))
@@ -457,6 +544,9 @@ def simulate_shared_pool(
                 sum(p.position_size for p in open_positions if p.strategy == s)
                 / initial_capital
             )
+
+        # Phase 5d: advance previous-day pointer for tomorrow's mtm_prev snapshot.
+        prev_d = d
 
     # ─── FINALIZE ───
     # Aggregate metrics over the COMBINED pool's daily curve
