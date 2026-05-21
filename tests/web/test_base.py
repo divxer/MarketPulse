@@ -96,17 +96,22 @@ def test_static_version_helper_returns_stable_hash():
 
 
 def test_base_nav_includes_lab_entry(client: TestClient, monkeypatch):
-    """Verify the top nav exposes a /lab/ai-track entry labeled 实验室.
+    """Verify the top nav exposes BOTH lab destinations:
+    - /lab/ai-track labeled 实验室 (AI evaluation tracker)
+    - /lab/backtest labeled 回测 (backtest workbench)
 
-    Before this PR, /lab/* pages had NO nav entry — only deep links from
-    /stock pages or strategy-table arrows could reach them. Users without
-    bookmarks couldn't find the AI evaluation or backtest pages.
+    Pre-Phase-5e they shared a single nav entry; once Phase 5 promoted
+    backtest to a full first-class product (5a-5e), they became sibling
+    destinations with their own entries.
     """
     r = client.get("/login")
     assert r.status_code == 200
-    # The nav <a> for lab — both href and label must be present
+    # /lab/ai-track entry
     assert 'href="/lab/ai-track"' in r.text
     assert "实验室" in r.text
+    # /lab/backtest entry (Phase 5 promotion)
+    assert 'href="/lab/backtest"' in r.text
+    assert "回测" in r.text
 
 
 def test_base_nav_active_state_highlights_current_page(
@@ -127,11 +132,17 @@ def test_base_nav_active_state_highlights_current_page(
     )
 
 
-def test_base_nav_lab_link_active_on_lab_pages(
+def test_base_nav_lab_links_active_on_their_own_pages(
     client: TestClient, monkeypatch,
 ):
-    """Hitting /lab/ai-track lights up the 实验室 nav entry; /lab/backtest
-    too, since both belong to the same primary destination."""
+    """Each lab nav entry activates ONLY on its own page:
+    - /lab/ai-track activates the 实验室 anchor (not the 回测 anchor)
+    - /lab/backtest activates the 回测 anchor (not the 实验室 anchor)
+
+    Phase 5e split — previously both pages activated the single 实验室
+    entry. After the split, each entry has precise startswith() matching
+    on its own path prefix.
+    """
     # Need auth to reach /lab/* — use the existing test password fixture.
     from marketpulse.auth.password import hash_password
     pw = "secret"
@@ -140,23 +151,30 @@ def test_base_nav_lab_link_active_on_lab_pages(
     get_settings.cache_clear()
     client.post("/login", data={"password": pw})
 
-    # /lab/ai-track should mark 实验室 active
+    import re
+
+    # /lab/ai-track → 实验室 active, 回测 NOT active
     r = client.get("/lab/ai-track")
     assert r.status_code == 200
-    # Look for the active class on the lab nav anchor specifically.
-    # Find the snippet between href="/lab/ai-track" and the closing </a>.
-    import re
-    m = re.search(r'<a\s+href="/lab/ai-track"[^>]*>', r.text)
-    assert m is not None
-    assert "mp-nav-active" in m.group(0), (
-        f"lab nav anchor should have mp-nav-active; got: {m.group(0)}"
+    ai_anchor = re.search(r'<a\s+href="/lab/ai-track"[^>]*>', r.text)
+    bt_anchor = re.search(r'<a\s+href="/lab/backtest"[^>]*>', r.text)
+    assert ai_anchor is not None and bt_anchor is not None
+    assert "mp-nav-active" in ai_anchor.group(0), (
+        f"/lab/ai-track: 实验室 anchor should be active; got: {ai_anchor.group(0)}"
+    )
+    assert "mp-nav-active" not in bt_anchor.group(0), (
+        f"/lab/ai-track: 回测 anchor should NOT be active; got: {bt_anchor.group(0)}"
     )
 
-    # /lab/backtest should also mark 实验室 active (same primary destination)
+    # /lab/backtest → 回测 active, 实验室 NOT active
     r2 = client.get("/lab/backtest")
     assert r2.status_code == 200
-    m2 = re.search(r'<a\s+href="/lab/ai-track"[^>]*>', r2.text)
-    assert m2 is not None
-    assert "mp-nav-active" in m2.group(0), (
-        f"on /lab/backtest, lab nav anchor should still be active; got: {m2.group(0)}"
+    ai_anchor2 = re.search(r'<a\s+href="/lab/ai-track"[^>]*>', r2.text)
+    bt_anchor2 = re.search(r'<a\s+href="/lab/backtest"[^>]*>', r2.text)
+    assert ai_anchor2 is not None and bt_anchor2 is not None
+    assert "mp-nav-active" in bt_anchor2.group(0), (
+        f"/lab/backtest: 回测 anchor should be active; got: {bt_anchor2.group(0)}"
+    )
+    assert "mp-nav-active" not in ai_anchor2.group(0), (
+        f"/lab/backtest: 实验室 anchor should NOT be active; got: {ai_anchor2.group(0)}"
     )
