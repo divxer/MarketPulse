@@ -38,7 +38,12 @@
           <td class="mono tnum">{{ b.date.isoformat() }}</td>
           <td>{{ b.strategy }}</td>
           <td>{{ b.ticker }}</td>
-          <td class="num mono tnum">{{ "{:.2f}".format(b.weight) }}</td>
+          <td class="num mono tnum"
+              title="{% if b.contribution_multiplier != 1.0 %}raw={{ '%.2f'|format(b.raw_bid_weight) }} · ρ={{ '%.2f'|format(b.pool_corr) if b.pool_corr is not none else 'n<30 cold-start' }} · ×{{ '%.2f'|format(b.contribution_multiplier) }}{% else %}raw weight (no adjustment){% endif %}">
+            {{ "{:.2f}".format(b.weight) }}
+            {% if b.rewarded_for_negative_corr %}<span class="mp-chip mp-chip--up" title="hedge boost (ρ<0)">↗</span>{% endif %}
+            {% if b.would_change_rank %}<span class="mp-chip" title="adjusted weight 改变了排名">⇅</span>{% endif %}
+          </td>
           <td class="num mono tnum">
             {% if b.outcome == 'size_too_small' %}
               <span title="raw size = ${{ '{:.0f}'.format(b.position_size) }} (below ${{ '{:.0f}'.format(min_position) }} floor)">—</span>
