@@ -444,12 +444,16 @@ def test_portfolio_result_caps_disabled_provenance() -> None:
 # ─── Phase 5d extensions ───
 
 def test_bid_record_phase5d_fields_have_safe_defaults() -> None:
-    """Phase 5d adds 8 fields to BidRecord, all defaulted for backward-compat."""
+    """Phase 5d adds 7 fields to BidRecord, all defaulted for backward-compat.
+
+    Phase 5e lock #7 dropped pool_corr_excludes_self — promoted to the
+    module-level POOL_CORR_MODE constant in marketpulse.backtest.policy.
+    """
     from datetime import date
 
     from marketpulse.backtest.types import BidRecord
 
-    # Construct with NO Phase 5d kwargs — all 8 fields should default to neutral
+    # Construct with NO Phase 5d kwargs — all fields should default to neutral
     b = BidRecord(
         date=date(2026, 5, 1), strategy="x", ticker="AAPL",
         weight=1.5, outcome="won", winner=None, position_size=1000.0,
@@ -459,7 +463,6 @@ def test_bid_record_phase5d_fields_have_safe_defaults() -> None:
     assert b.contribution_multiplier == 1.0
     assert b.adjusted_bid_weight is None
     assert b.effective_corr_window == 0
-    assert b.pool_corr_excludes_self is True
     assert b.rewarded_for_negative_corr is False
     assert b.would_change_rank is False
 
@@ -478,7 +481,6 @@ def test_bid_record_phase5d_fields_populated() -> None:
         contribution_multiplier=0.85,
         adjusted_bid_weight=1.275,
         effective_corr_window=42,
-        pool_corr_excludes_self=True,
         rewarded_for_negative_corr=False,
         would_change_rank=True,
     )

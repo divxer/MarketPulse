@@ -343,6 +343,7 @@ def simulate_shared_pool(
             weights_adjusted: dict[str, float | None] = {}
             for s in strategies_today:
                 raw = weights_raw.get(s)
+                # Provenance: POOL_CORR_MODE == "LOO_ONLY_v0" — spec § 2 lock #7 + #21.
                 pool_corr, eff_window = pool_corr_excluding_self(
                     daily_strategy_contribution_returns.get(s, []),
                     daily_pool_returns,

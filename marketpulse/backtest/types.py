@@ -130,7 +130,6 @@ class BidRecord:
     contribution_multiplier: float = 1.0
     adjusted_bid_weight: float | None = None
     effective_corr_window: int = 0
-    pool_corr_excludes_self: bool = True
     rewarded_for_negative_corr: bool = False
     would_change_rank: bool = False
 

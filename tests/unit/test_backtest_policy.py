@@ -10,3 +10,14 @@ def test_min_overlap_days_anchored_at_30() -> None:
     from marketpulse.backtest.policy import MIN_OVERLAP_DAYS
     assert MIN_OVERLAP_DAYS == 30
     assert isinstance(MIN_OVERLAP_DAYS, int)
+
+
+def test_pool_corr_mode_anchored_at_loo_only_v0() -> None:
+    """# Layer: invariant
+    Anchors the POOL_CORR_MODE constant. Spec § 2 lock #7 + #21:
+    v0 hardcodes LOO_ONLY; future variants would bump to LOO_OR_CF_v1.
+    The constant is documentary-only — nothing branches on it at runtime.
+    Any rename / bump requires conscious update of this test.
+    """
+    from marketpulse.backtest.policy import POOL_CORR_MODE
+    assert POOL_CORR_MODE == "LOO_ONLY_v0"

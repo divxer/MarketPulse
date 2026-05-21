@@ -1405,8 +1405,6 @@ def test_phase5d_metadata_on_won_bidrecord():
     assert b.contribution_multiplier in (1.0,) or 0.5 <= b.contribution_multiplier <= 1.2
     # effective_corr_window is set (0 if no overlap)
     assert b.effective_corr_window >= 0
-    # pool_corr_excludes_self is True (LOO v0 lock)
-    assert b.pool_corr_excludes_self is True
 
 
 def test_phase5d_metadata_on_sector_cap_full_bidrecord():
@@ -1443,7 +1441,6 @@ def test_phase5d_metadata_on_sector_cap_full_bidrecord():
     assert len(blocked) == 1
     b = blocked[0]
     # Outcome: 5d metadata present
-    assert b.pool_corr_excludes_self is True
     assert b.effective_corr_window >= 0
     # Multiplier should be 1.0 (cold-start or short_circuit; not adjusted)
     assert 0.5 <= b.contribution_multiplier <= 1.2
@@ -1478,7 +1475,6 @@ def test_phase5d_metadata_on_dedup_loser_bidrecord():
     assert len(losers) == 1
     b = losers[0]
     # Outcome: 5d metadata present
-    assert b.pool_corr_excludes_self is True
     assert b.effective_corr_window >= 0
 
 
