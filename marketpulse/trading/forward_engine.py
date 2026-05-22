@@ -46,11 +46,20 @@ class ForwardExecutionEngine:
         clock: Clock,
         kill_switch: KillSwitchState,
         risk_gate: RiskGate,
+        price_provider,    # PriceProvider — duck-typed to avoid circular
+                           # import (lock 6b+L2: REQUIRED, no default)
     ) -> None:
         self._repo = repository
         self._clock = clock
         self._kill_switch = kill_switch
         self._risk_gate = risk_gate
+        self._price_provider = price_provider
+        self._last_price_unavailable_count: int = 0    # lock 6b+L11; T7 uses
+
+    def last_price_unavailable_count(self) -> int:
+        """Lock 6b+L11: read-only diagnostic from most recent tick().
+        Reset to 0 at the start of every tick() (T7 will implement reset)."""
+        return self._last_price_unavailable_count
 
     def place_order(self, *, order_request: OrderRequest) -> PlaceOrderResult:
         # Step 1: compute idempotency key (pure)

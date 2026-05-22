@@ -83,11 +83,12 @@ def _make_deps(session, *, fake_now, allocator):
     repo.ensure_initial_deposit(amount=Decimal("10000"), timestamp=clock.now())
     risk = AlwaysApproveRiskGate()
     ks = KillSwitchState(env_var="MP_NEVER", repository=repo)
+    price_provider = StubPriceProvider(map={})
     engine = ForwardExecutionEngine(
         repository=repo, clock=clock, kill_switch=ks, risk_gate=risk,
+        price_provider=price_provider,
     )
     aggregator = BidAggregator(session=session, calendar=calendar)
-    price_provider = StubPriceProvider(default=Decimal("0"))
     return {
         "clock": clock, "engine": engine, "repository": repo,
         "bid_aggregator": aggregator, "allocator": allocator,
@@ -261,3 +262,28 @@ def test_daily_cycle_allocator_exception_writes_audit_and_still_ticks(session):
     ).scalars().all()
     assert len(tick_completed) == 1
     assert tick_completed[0].context["status"] == "completed_with_errors"
+
+
+def test_daily_cycle_forward_writes_horizon_price_null(session):
+    """Lock 6b+L1: even at T3 (shim stage), forward path never writes
+    a non-None horizon_price into paper_order. T8 strengthens by
+    removing the kwarg entirely; this test guards the invariant from T3
+    onward."""
+    from marketpulse.db.models import PaperOrder
+    from marketpulse.trading import daily_cycle
+
+    deps = _make_deps(
+        session,
+        fake_now=datetime(2026, 5, 21, 21, 30, tzinfo=UTC),
+        allocator=_stub_allocator(expected_winners=[
+            _winner_for("AAPL", "momentum", date(2026, 5, 21)),
+        ]),
+    )
+    daily_cycle.run(**deps)
+    orders = session.execute(select(PaperOrder)).scalars().all()
+    assert len(orders) == 1
+    assert orders[0].horizon_price is None, (
+        "Lock 6b+L1: forward mode must write horizon_price=NULL. If you "
+        "see a non-None value here, daily_cycle._make_order_request is "
+        "passing winner.horizon_price through instead of forcing None."
+    )

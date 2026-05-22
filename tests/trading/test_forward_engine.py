@@ -24,6 +24,7 @@ def _engine(session, *, kill_active=False):
     from marketpulse.trading.clock import FakeClock
     from marketpulse.trading.forward_engine import ForwardExecutionEngine
     from marketpulse.trading.kill_switch import KillSwitchState
+    from marketpulse.trading.price_provider import StubPriceProvider
     from marketpulse.trading.repository import Repository
     from marketpulse.trading.risk_gate import AlwaysApproveRiskGate
 
@@ -38,6 +39,7 @@ def _engine(session, *, kill_active=False):
     engine = ForwardExecutionEngine(
         repository=repo, clock=clock,
         kill_switch=ks, risk_gate=AlwaysApproveRiskGate(),
+        price_provider=StubPriceProvider(map={}),
     )
     return engine, repo, clock, ks
 
@@ -131,6 +133,7 @@ def test_place_order_risk_gate_exception_fail_closed(session):
     from marketpulse.trading.clock import FakeClock
     from marketpulse.trading.forward_engine import ForwardExecutionEngine
     from marketpulse.trading.kill_switch import KillSwitchState
+    from marketpulse.trading.price_provider import StubPriceProvider
     from marketpulse.trading.repository import Repository
     from marketpulse.trading.types import OrderRejected
 
@@ -144,6 +147,7 @@ def test_place_order_risk_gate_exception_fail_closed(session):
         repository=repo, clock=clock,
         kill_switch=KillSwitchState(env_var="MP_NEVER", repository=repo),
         risk_gate=BoomGate(),
+        price_provider=StubPriceProvider(map={}),
     )
 
     with pytest.raises(OrderRejected, match="risk_gate_error"):
@@ -169,6 +173,7 @@ def test_rejection_audit_committed_before_exception(session, monkeypatch):
     from marketpulse.trading.clock import FakeClock
     from marketpulse.trading.forward_engine import ForwardExecutionEngine
     from marketpulse.trading.kill_switch import KillSwitchState
+    from marketpulse.trading.price_provider import StubPriceProvider
     from marketpulse.trading.repository import Repository
     from marketpulse.trading.risk_gate import RiskResult
     from marketpulse.trading.types import OrderRejected
@@ -197,6 +202,7 @@ def test_rejection_audit_committed_before_exception(session, monkeypatch):
         clock=FakeClock(now=datetime(2026, 5, 21, 17, 30, tzinfo=UTC)),
         kill_switch=KillSwitchState(env_var="MP_NEVER", repository=repo),
         risk_gate=_RejectGate(),
+        price_provider=StubPriceProvider(map={}),
     )
 
     with pytest.raises(OrderRejected, match="test_block"):
@@ -367,6 +373,7 @@ def test_forward_engine_propagates_failed_gates_into_audit_context(tmp_path):
     from marketpulse.trading.clock import FakeClock
     from marketpulse.trading.forward_engine import ForwardExecutionEngine
     from marketpulse.trading.kill_switch import KillSwitchState
+    from marketpulse.trading.price_provider import StubPriceProvider
     from marketpulse.trading.repository import Repository
     from marketpulse.trading.risk_gate import RiskResult
     from marketpulse.trading.types import AllocationRunId, OrderRejected, OrderRequest
@@ -403,6 +410,7 @@ def test_forward_engine_propagates_failed_gates_into_audit_context(tmp_path):
         engine = ForwardExecutionEngine(
             repository=repo, clock=clock, kill_switch=ks,
             risk_gate=_ExtendedDenyGate(),
+            price_provider=StubPriceProvider(map={}),
         )
         req = OrderRequest(
             strategy="momentum_breakout", ticker="AAPL", quantity=10,
@@ -436,3 +444,35 @@ def test_forward_engine_propagates_failed_gates_into_audit_context(tmp_path):
         assert ctx["failed_gates"] == ["daily_loss", "sector_exposure"]
         assert len(ctx["per_gate"]) == 4
         assert ctx["per_gate"][2]["reason"] == "daily_loss_limit_exceeded"
+
+
+def test_forward_engine_requires_price_provider_kwarg(tmp_path):
+    """Lock 6b+L2: missing price_provider → TypeError."""
+    from datetime import UTC, datetime
+    from decimal import Decimal
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from marketpulse.db.base import Base
+    from marketpulse.trading.clock import FakeClock
+    from marketpulse.trading.forward_engine import ForwardExecutionEngine
+    from marketpulse.trading.kill_switch import KillSwitchState
+    from marketpulse.trading.repository import Repository
+    from marketpulse.trading.risk_gate import AlwaysApproveRiskGate
+
+    eng_db = tmp_path / "fe.db"
+    db_engine = create_engine(f"sqlite:///{eng_db}")
+    Base.metadata.create_all(db_engine)
+    with Session(db_engine) as s:
+        repo = Repository(session=s)
+        clock = FakeClock(now=datetime(2026, 5, 22, 21, 30, tzinfo=UTC))
+        repo.ensure_initial_deposit(amount=Decimal("10000"), timestamp=clock.now())
+        ks = KillSwitchState(env_var="MP_NEVER", repository=repo)
+        import pytest
+        with pytest.raises(TypeError):
+            ForwardExecutionEngine(
+                repository=repo, clock=clock, kill_switch=ks,
+                risk_gate=AlwaysApproveRiskGate(),
+                # price_provider omitted intentionally
+            )
