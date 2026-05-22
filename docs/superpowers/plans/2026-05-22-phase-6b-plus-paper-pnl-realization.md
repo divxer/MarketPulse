@@ -849,12 +849,44 @@ if horizon_price is None:
 to:
 
 ```python
-# T3 shim: forward mode horizon_price stays None — T8 will delete this
-# whole block and the price_provider kwarg.
-horizon_price = winner.horizon_price    # None in forward; backtest set
+# T3 shim: forward mode ALWAYS leaves horizon_price=None
+# (lock 6b+L1). Even if a winner arrives with a pre-filled
+# horizon_price (Phase 5 backtest convention leaking through
+# the forward path — which shouldn't happen but defend against
+# drift), we ignore it. T8 will delete this whole shim and the
+# price_provider kwarg.
+horizon_price = None
 ```
 
-This single-line shim keeps daily_cycle running while we still accept the `price_provider` kwarg for backward compat. T8 will remove the entire kwarg + this block.
+This explicit `None` (not `winner.horizon_price`) defends lock 6b+L1 even if some future allocator regression starts populating `horizon_price` on forward-mode winners. T8's grep test (lock 6b+L16) is the final safety net.
+
+(f) Add a test asserting paper_order.horizon_price is NULL after forward place_order. In `tests/trading/test_daily_cycle.py`, append:
+
+```python
+def test_daily_cycle_forward_writes_horizon_price_null(session):
+    """Lock 6b+L1: even at T3 (shim stage), forward path never writes
+    a non-None horizon_price into paper_order. T8 strengthens by
+    removing the kwarg entirely; this test guards the invariant from T3
+    onward."""
+    from marketpulse.db.models import PaperOrder
+    from marketpulse.trading import daily_cycle
+
+    deps = _make_deps(
+        session,
+        fake_now=datetime(2026, 5, 21, 21, 30, tzinfo=UTC),
+        allocator=_stub_allocator(expected_winners=[
+            _winner_for("AAPL", "momentum", date(2026, 5, 21)),
+        ]),
+    )
+    daily_cycle.run(**deps)
+    orders = session.execute(select(PaperOrder)).scalars().all()
+    assert len(orders) == 1
+    assert orders[0].horizon_price is None, (
+        "Lock 6b+L1: forward mode must write horizon_price=NULL. If you "
+        "see a non-None value here, daily_cycle._make_order_request is "
+        "passing winner.horizon_price through instead of forcing None."
+    )
+```
 
 - [ ] **Step 8: Run full trading suite — expect ALL PASS**
 
@@ -1104,7 +1136,7 @@ def test_fetch_close_on_date_all_nan_returns_none():
 - [ ] **Step 2: Run to verify failure**
 
 Run: `uv run pytest tests/data/test_yfinance_close_on_date.py -v`
-Expected: 5 FAIL with `AttributeError: 'YFinanceClient' object has no attribute 'fetch_close_on_date'`.
+Expected: 7 FAIL with `AttributeError: 'YFinanceClient' object has no attribute 'fetch_close_on_date'`. (5 base tests + 2 NaN-handling tests.)
 
 - [ ] **Step 3: Add `fetch_close_on_date` to `YFinanceClient`**
 
@@ -1172,7 +1204,7 @@ from datetime import UTC, date, datetime, timedelta
 - [ ] **Step 4: Run to verify tests pass**
 
 Run: `uv run pytest tests/data/test_yfinance_close_on_date.py -v`
-Expected: 5 PASS.
+Expected: 7 PASS (5 base + 2 NaN-handling).
 
 - [ ] **Step 5: Confirm ruff clean**
 
@@ -2966,7 +2998,9 @@ Expected: `All checks passed!`
 - [ ] **Step 3: Alembic head check**
 
 Run: `uv run alembic heads`
-Expected: `0011 (head)`.
+Expected: `0011 (head)`. **Differs from 6b risk-gates baseline** (which kept head at `0010`). 6b+ DOES add a migration (lock 6b+L6 SQLite table rebuild for CHECK extension); the deployment startup hook will run `alembic upgrade head` on container restart.
+
+If you see `0010 (head)`, T2's migration file wasn't picked up — verify the file exists at `alembic/versions/0011_audit_check_price_unavailable.py` and that its `revision = "0011"` and `down_revision = "0010"` are set correctly.
 
 - [ ] **Step 4: Manual import sanity**
 
