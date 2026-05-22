@@ -16,7 +16,12 @@ Translate the existing `paper_audit_event` stream into operator push notificatio
 
 > 不打开数据库、不 SSH、不看日志，也能知道 paper engine 今天是否正常工作。
 
-Concretely: a fill happens → operator knows. A reject happens → operator knows the reason. Kill switch flips → operator knows immediately. PRICE_UNAVAILABLE retries pile up → operator knows the position is stuck. Tick ends → operator gets a one-glance summary.
+Concretely (all signals land on the post-tick notification pass — see § 5.1 / lock 6g-L7 for cadence; there is no real-time fan-out):
+- A fill happens → the next post-tick summary surfaces it.
+- A reject happens → the next post-tick summary names the gate; if it's a daily-loss reject, an additional critical push fires.
+- Kill switch flips → the **next** tick's notification pass emits a standalone critical push (operator may see a delay of up to one tick interval; for daily paper trading this is ≤ 24h).
+- PRICE_UNAVAILABLE attempt_count reaches 3 → standalone critical push at the same tick the third row is written.
+- Tick ends → operator gets a one-glance summary (always, even on zero-activity days — daily heartbeat).
 
 ### Anti-goals
 
@@ -77,6 +82,7 @@ Concretely: a fill happens → operator knows. A reject happens → operator kno
 
 - **(6g-L1)** Notifications are emitted **only after** `daily_cycle.run()` completes. Audit writes are never notification-aware. The audit-write code path in `repository.write_audit_event` is unchanged.
 - **(6g-L13)** `observability/` is the audit-consumer layer; `alerts/` remains transport-only. Dependency direction is `observability → alerts`, never reverse.
+- **(6g-L19)** Audit row filter applies `context["tick_date"] == tick_date` **conditionally**: events that carry the key in their context (TICK_COMPLETED, TICK_REPROCESSED_COMPLETED, KILL_SWITCH_CYCLE_SKIPPED, ENGINE_INVARIANT_ERROR) MUST match; events that don't (ORDER_PLACED, ORDER_ENTRY_FILLED, POSITION_CLOSED, PRICE_UNAVAILABLE, KILL_SWITCH_FLIPPED, ORDER_REJECTED, ORDER_CANCELLED, ORDER_PLACED_DUPLICATE, SCHEDULER_GAP_DETECTED) are admitted on the `[since, notify_started_at]` time window alone.
 
 ## 3 — Notification Taxonomy
 
@@ -228,9 +234,12 @@ Forces `since = start_of_day(2026-05-22 UTC)` and runs the same `notify_paper_ti
 
 CLI behavior:
 - Refuses to run when `MP_PAPER_NOTIFICATIONS_ENABLED=false`; exit code 1 (lock 6g-L18).
-- Prints `NotificationResult` to stdout (pushed events, failures, summary preview).
-- Exit code 0 if all sends succeeded, 1 if any failures.
-- No `--dry-run` flag in MVP (YAGNI).
+- Prints `NotificationResult` to stdout in this exact order:
+  1. `critical_pushed`: one line per event_type (e.g. `pushed: PRICE_UNAVAILABLE`)
+  2. `summary_title` + a 200-char-truncated `summary_body` preview
+  3. `failures`: one line per `NotificationFailure` with event_type, title, error
+- Exit code 0 iff `failures == ()`; 1 otherwise.
+- No `--dry-run` flag in MVP (YAGNI). The stdout preview is sufficient for operator inspection before deciding whether to actually re-run.
 
 ### 5.3 Section 5 locks
 
@@ -254,8 +263,8 @@ marketpulse/observability/
 marketpulse/alerts/notifier.py   # Existing; gains get_notifier_from_settings(settings).
 
 marketpulse/trading/repository.py # Existing; gains:
-  - positions_with_prior_price_unavailable(position_ids) -> set[int]   (lock 6g-L17)
-  - kill_switch_cycle_skipped_in_active_period(before) -> bool         (lock 6g-L5)
+  - positions_with_prior_price_unavailable(position_ids, before) -> set[int]   (lock 6g-L17)
+  - kill_switch_cycle_skipped_in_active_period(before) -> bool                 (lock 6g-L5)
 
 marketpulse/scheduler/paper_trading_tick.py   # Existing; adds best-effort notify hook.
 ```
@@ -273,11 +282,21 @@ from marketpulse.trading.repository import Repository
 
 
 @dataclass(frozen=True)
+class NotificationFailure:
+    """Structured failure record so the operator / republish CLI can
+    diagnose which event failed without grepping log lines."""
+    event_type: str        # e.g. "ORDER_REJECTED", "tick_summary"
+    title: str             # the rendered title that was about to be sent
+    error: str             # short error category: "send_returned_false",
+                           # "send_raised:<ExceptionClass>", "template_error:<...>"
+
+
+@dataclass(frozen=True)
 class NotificationResult:
     """Returned for testability and observability of the notifier itself."""
     critical_pushed: tuple[str, ...]   # event_type strings actually pushed
     summary_pushed: bool
-    failures: tuple[str, ...]           # notifier.send returned False or raised
+    failures: tuple[NotificationFailure, ...]
     summary_title: str | None = None    # captured for test assertion
     summary_body: str | None = None     # captured for test assertion
 
@@ -288,30 +307,59 @@ def notify_paper_tick_events(
     tick_date: date,
     repository: Repository,
     notifier: Notifier,
+    clock: Clock,                          # injected — defines window upper bound
     price_unavailable_threshold: int = 3,
 ) -> NotificationResult:
     """Audit-driven operator notification dispatcher.
 
-    Reads paper_audit_event rows with timestamp >= `since` AND
-    context["tick_date"] == tick_date.isoformat() (where applicable),
-    plus historical rows needed for stateless dedup (lock 6g-L5 kill-switch
-    period; lock 6g-L4 recovery detection).
+    **Query window:** `[since, notify_started_at]` where
+    `notify_started_at = clock.now()` is captured at the top of this
+    call. The window upper bound is bounded explicitly to keep the
+    function deterministic under test (FakeClock) and to prevent races
+    with audit rows written by a concurrent process.
 
-    Dispatches via injected Notifier:
+    **Audit row filter:** rows are first filtered by
+    `since <= timestamp <= notify_started_at`. The `tick_date` parameter
+    is applied **conditionally**:
+      - Rows whose `context` carries a `"tick_date"` key (e.g.,
+        TICK_COMPLETED, TICK_REPROCESSED_COMPLETED, KILL_SWITCH_CYCLE_SKIPPED,
+        ENGINE_INVARIANT_ERROR) MUST match `context["tick_date"] ==
+        tick_date.isoformat()` — guards against picking up rows from a
+        prior tick that bled into the time window.
+      - Rows whose context does NOT carry `tick_date` (e.g., ORDER_PLACED,
+        ORDER_ENTRY_FILLED, POSITION_CLOSED, PRICE_UNAVAILABLE,
+        KILL_SWITCH_FLIPPED) are accepted on the time window alone.
+    This is per **lock 6g-L19** (below).
+
+    **Stateless dedup queries:** the entrypoint additionally fetches:
+      - `kill_switch_cycle_skipped_in_active_period(before=notify_started_at)`
+        for the 6g-L5 boundary.
+      - `positions_with_prior_price_unavailable(position_ids=[…],
+        before=POSITION_CLOSED.timestamp)` for the 6g-L4b recovery
+        detection (called per POSITION_CLOSED row).
+
+    **Dispatches via injected Notifier:**
     - 1 standalone send per critical event matched (per § 3).
-    - 1 summary send (📊 Paper Tick ...) per tick, ALWAYS — even on
-      a zero-activity day. The summary functions as a daily heartbeat:
-      "system ran today, nothing happened" is operator-actionable info
-      (matches operator-awareness goal in § 1; matches § 9.1 example).
+    - 1 summary send (📊 Paper Tick ...) per tick when
+      `MP_PAPER_NOTIFICATIONS_ENABLED=true`. The summary is a daily
+      heartbeat — "system ran today, nothing happened" is itself
+      operator-actionable info (matches § 9.1 example).
 
-    Best-effort (lock 6g-L14): notifier.send returning False is recorded
-    in NotificationResult.failures; translator-internal exceptions (template
-    render error, projection bug, etc.) ARE caught and logged — they never
-    propagate to the scheduler or engine.
+    **Best-effort (lock 6g-L14):**
+      - `notifier.send` returning False → append `NotificationFailure(
+        event_type=..., title=..., error="send_returned_false")` and
+        continue.
+      - Translator-internal exceptions (template render bug, repository
+        query crash, projection bug) → caught at the per-event boundary,
+        recorded as `NotificationFailure(error="template_error:<...>")`,
+        and continue. NEVER propagate to scheduler or engine.
 
-    If MP_PAPER_NOTIFICATIONS_ENABLED is False (lock 6g-L15), returns
-    immediately with critical_pushed=(), summary_pushed=False, and a
-    failures entry "disabled by config".
+    **Disabled path (lock 6g-L15):** if
+    `MP_PAPER_NOTIFICATIONS_ENABLED=false`, returns immediately with
+    `critical_pushed=()`, `summary_pushed=False`, no Notifier calls
+    issued, and a single `NotificationFailure(event_type="config",
+    title="", error="disabled_by_config")` so callers can detect
+    the disabled state in tests.
     """
 ```
 
@@ -327,18 +375,41 @@ from decimal import Decimal
 
 @dataclass(frozen=True)
 class CriticalEvent:
-    """One critical audit event scheduled for standalone push."""
+    """One critical audit event scheduled for standalone push.
+
+    Carries the projection's view of the audit row — `templates.py` is
+    pure rendering and should NOT need to reach back into raw context
+    keys for canonical fields (timestamp / strategy / reason).
+    """
     event_type: str        # AuditEventType value
     audit_id: int          # for logging / republish CLI output
-    context: dict          # raw audit row context (passed to templates)
+    timestamp: datetime    # row's timestamp (UTC) — used in body "Time:" line
+    strategy: str | None   # PaperAuditEvent.strategy column (may be None)
+    reason: str            # PaperAuditEvent.reason column (may be "")
+    context: dict          # raw audit row context (passed to templates
+                           # for event-type-specific fields like ticker,
+                           # gate_name, attempt_count, etc.)
+
+
+@dataclass(frozen=True)
+class PlacedOrderDetail:
+    ticker: str
+    strategy: str
+    quantity: int
 
 
 @dataclass(frozen=True)
 class TickSummary:
-    """Aggregate of routine activity for the 📊 summary push."""
+    """Aggregate of routine activity for the 📊 summary push.
+
+    Lists preserved (not just counts) so the template can render
+    "AAPL × 10 (momentum)" style detail lines without a second pass
+    over audit rows.
+    """
     tick_date: date
     cycle_status: str
     orders_placed: int
+    orders_placed_detail: list[PlacedOrderDetail]
     orders_rejected: int
     orders_rejected_breakdown: list[tuple[str, str]]   # (ticker, gate_name)
     orders_cancelled: int
@@ -348,7 +419,7 @@ class TickSummary:
     total_realized_pnl: Decimal
     cash_balance_end: Decimal
     active_positions_count: int
-    active_positions_with_pu: list[tuple[str, int]]    # (ticker, attempt_count)
+    active_positions_with_pu: list[tuple[str, int]]    # (ticker, attempt_count_capped)
 
 
 def select_critical_events(
@@ -570,7 +641,7 @@ Day D+N (provider recovers, exit succeeds): **1 standalone push**:
 
 ### 9.4 Kill switch day
 
-The moment `KILL_SWITCH_FLIPPED(active=true)` is written by an external trigger:
+When `KILL_SWITCH_FLIPPED(active=true)` is written by an external trigger (manual CLI, drawdown gate, etc.), the next post-tick notification pass emits a standalone push (lock 6g-L7 acknowledged delay — may be up to one tick interval after the actual flip):
 
 > 🛑 Kill Switch FLIPPED
 >
@@ -617,7 +688,7 @@ Detailed task breakdown belongs in the plan doc. High-level phases:
 | 6g-L4b | § 3.3 | Recovery push iff `POSITION_CLOSED` row has position with prior PU history (timestamp strictly before POSITION_CLOSED). |
 | 6g-L4c | § 3.3 | Invariant: `attempt_count` is per-position monotonic non-decreasing (enforced by 6b+ T6/T7 + append-only audit). |
 | 6g-L5 | § 3.3 | `KILL_SWITCH_CYCLE_SKIPPED` standalone push iff no prior skip exists since most recent `KILL_SWITCH_FLIPPED(active=true)`. If no FLIPPED row exists, returns False (emit). |
-| 6g-L6 | § 3.3 / § 1 | Paper trading MVP has exactly one routine daily notification: the post-tick summary. No separate daily digest cron. |
+| 6g-L6 | § 3.3 / § 1 | Paper trading MVP has exactly one routine daily notification: the post-tick summary (emitted every tick when `MP_PAPER_NOTIFICATIONS_ENABLED=true`; no-op when disabled). No separate daily digest cron. |
 | 6g-L7 | § 5.3 | `notify_paper_tick_events(since=tick_started_at, ...)` emits only for current-tick audit window. Reprocessing does NOT replay. Kill-switch flips/clears written between ticks land on the NEXT tick's notification. |
 | 6g-L8 | § 5.3 | Replay is operator-triggered only via explicit CLI. No automatic replay fan-out. |
 | 6g-L9 | § 3.3 | `TICK_REPROCESSED_COMPLETED` emits critical standalone push with `⚠️ Tick Reprocessed — YYYY-MM-DD`. |
@@ -630,3 +701,4 @@ Detailed task breakdown belongs in the plan doc. High-level phases:
 | 6g-L16 | § 8.1 | Tests layered: pure projection, templates, notifier entrypoint with seeded DB, one E2E scheduler test. Projection and template tests stay separate. |
 | 6g-L17 | § 6.6 | Recovery detection uses repository batch helper `positions_with_prior_price_unavailable(position_ids)`, not per-position SQL. |
 | 6g-L18 | § 5.3 | `republish_cli` refuses to run when `MP_PAPER_NOTIFICATIONS_ENABLED=false`; exit code 1. |
+| 6g-L19 | § 2.2 | Audit row filter applies `context["tick_date"]` match **conditionally**: required for events whose context carries the key; admitted on time window alone otherwise. |
