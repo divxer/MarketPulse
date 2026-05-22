@@ -9,6 +9,7 @@ clarification in spec § 2)."""
 from __future__ import annotations
 
 from marketpulse.trading.risk_gates._sector import strict_sector
+from marketpulse.trading.risk_gates.composite import CompositeRiskGate
 from marketpulse.trading.risk_gates.config_provider import (
     DailyLossConfig,
     MarketHoursConfig,
@@ -18,11 +19,13 @@ from marketpulse.trading.risk_gates.config_provider import (
     StrategyRiskConfig,
 )
 from marketpulse.trading.risk_gates.daily_loss import DailyLossGate
+from marketpulse.trading.risk_gates.factory import build_standard_composite
 from marketpulse.trading.risk_gates.market_hours import MarketHoursGate
 from marketpulse.trading.risk_gates.sector_exposure import SectorExposureGate
 from marketpulse.trading.risk_gates.strategy_size import StrategySizeGate
 
 __all__ = [
+    "CompositeRiskGate",
     "DailyLossConfig",
     "DailyLossGate",
     "MarketHoursConfig",
@@ -33,5 +36,6 @@ __all__ = [
     "SectorExposureGate",
     "StrategyRiskConfig",
     "StrategySizeGate",
+    "build_standard_composite",
     "strict_sector",
 ]
