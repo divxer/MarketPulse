@@ -62,8 +62,12 @@ def test_migration_creates_and_drops_paper_tables(tmp_path, monkeypatch):
     assert {"paper_order", "paper_fill", "paper_position",
             "paper_cash_ledger", "paper_audit_event"} <= tables
 
-    # Downgrade by one revision and confirm removal.
-    subprocess.run(["uv", "run", "alembic", "downgrade", "-1"], check=True)
+    # Downgrade past 0010 and confirm removal. 0011 is now head, so we must
+    # downgrade two revisions (0011 -> 0010 -> 0009) to drop the paper_* tables.
+    subprocess.run(
+        ["uv", "run", "alembic", "downgrade", "0009_aianalyses_strategy"],
+        check=True,
+    )
     insp = inspect(eng)
     tables = set(insp.get_table_names())
     assert "paper_order" not in tables
