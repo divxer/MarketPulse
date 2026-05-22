@@ -170,5 +170,55 @@ def _parse_sector_exposure(d: dict, path: Path) -> SectorExposureConfig:
 
 
 def _parse_strategy_dir(strategies_dir: Path) -> dict[str, StrategyRiskConfig]:
-    """Filled in at T6. Empty dict for T5 so global-only tests pass."""
-    return {}
+    """Lock 6b-L14: strategy lookup key is YAML filename stem. Reads ONLY
+    the `risk:` block — never `signals`, `sizing`, or other strategy-
+    execution blocks.
+
+    Behavior matrix:
+      - file has no `risk:` key       → strategy NOT registered
+                                        (strategy_config(stem) → None,
+                                        triggers fail-closed via 6b-L9)
+      - file has `risk: {}` empty     → registered with
+                                        max_position_notional=None
+                                        (still fail-closed via 6b-L9)
+      - file has `risk: {max_position_notional: N}` → registered with
+                                        Decimal(N) (must be >= 0)
+    """
+    out: dict[str, StrategyRiskConfig] = {}
+    if not strategies_dir.exists():
+        return out
+    for yaml_path in sorted(strategies_dir.glob("*.yaml")):
+        data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"{yaml_path}: top-level YAML must be a mapping",
+            )
+        if "risk" not in data:
+            continue  # not registered; fail-closed via 6b-L9
+        risk_block = data["risk"]
+        if risk_block is None:
+            risk_block = {}
+        if not isinstance(risk_block, dict):
+            raise ValueError(
+                f"{yaml_path}: `risk:` must be a mapping, got "
+                f"{type(risk_block).__name__}",
+            )
+        raw = risk_block.get("max_position_notional")
+        if raw is None:
+            cfg = StrategyRiskConfig(max_position_notional=None)
+        else:
+            try:
+                limit = Decimal(str(raw))
+            except Exception as e:
+                raise ValueError(
+                    f"{yaml_path}: risk.max_position_notional must parse as "
+                    f"Decimal (got {raw!r}): {e}",
+                ) from e
+            if limit < 0:
+                raise ValueError(
+                    f"{yaml_path}: risk.max_position_notional must be >= 0 "
+                    f"(got {limit})",
+                )
+            cfg = StrategyRiskConfig(max_position_notional=limit)
+        out[yaml_path.stem] = cfg
+    return out

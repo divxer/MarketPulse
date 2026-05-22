@@ -257,3 +257,189 @@ def test_shipped_default_yaml_parses_via_from_yaml(tmp_path):
     assert g.market_hours.enabled is True
     assert g.daily_loss.enabled is True
     assert g.sector_exposure.enabled is True
+
+
+def _write_min_strategy_yaml(path, *, name, risk=None):
+    """Helper — minimal valid strategy YAML the loader also accepts."""
+    blocks = [
+        f"name: {name}",
+        f"display_name: {name}",
+        "version: v1",
+        "description: test",
+        "applies_when: test",
+        "expected_horizons: [5]",
+        "instructions: test",
+    ]
+    if risk is not None:
+        blocks.append("risk:")
+        for k, v in risk.items():
+            blocks.append(f"  {k}: {v}")
+    path.write_text("\n".join(blocks) + "\n")
+
+
+def test_strategy_dir_parses_risk_block(tmp_path):
+    """T6: strategy YAML with `risk:` block becomes StrategyRiskConfig."""
+    from decimal import Decimal
+
+    from marketpulse.trading.risk_gates.config_provider import RiskConfigProvider
+
+    sd = tmp_path / "strategies"
+    sd.mkdir()
+    _write_min_strategy_yaml(
+        sd / "momentum_breakout.yaml",
+        name="momentum_breakout",
+        risk={"max_position_notional": 25000},
+    )
+    _write_min_strategy_yaml(
+        sd / "general.yaml", name="general",
+        risk={"max_position_notional": 10000},
+    )
+    # Ship a stub global YAML.
+    g = tmp_path / "g.yaml"
+    g.write_text("""
+market_hours:
+  enabled: true
+  exchange: XNYS
+  allow_regular_session: true
+  allow_post_close: true
+  post_close_until: "18:00"
+  allow_premarket: false
+daily_loss:
+  enabled: true
+  daily_loss_limit: 500
+sector_exposure:
+  enabled: true
+  max_sector_exposure_pct: 0.35
+  configured_max_capital_in_use: 10000
+""")
+    p = RiskConfigProvider.from_yaml(global_path=g, strategies_dir=sd)
+    assert p.strategy_config("momentum_breakout").max_position_notional == Decimal("25000")
+    assert p.strategy_config("general").max_position_notional == Decimal("10000")
+
+
+def test_strategy_without_risk_block_returns_none(tmp_path):
+    """Lock 6b-L9: strategy_config() returns None for strategies missing
+    a `risk:` block. StrategySizeGate uses this for fail-closed."""
+    from marketpulse.trading.risk_gates.config_provider import RiskConfigProvider
+
+    sd = tmp_path / "strategies"
+    sd.mkdir()
+    _write_min_strategy_yaml(sd / "no_risk.yaml", name="no_risk")  # no risk block
+    g = tmp_path / "g.yaml"
+    g.write_text("""
+market_hours:
+  enabled: true
+  exchange: XNYS
+  allow_regular_session: true
+  allow_post_close: true
+  post_close_until: "18:00"
+  allow_premarket: false
+daily_loss:
+  enabled: true
+  daily_loss_limit: 500
+sector_exposure:
+  enabled: true
+  max_sector_exposure_pct: 0.35
+  configured_max_capital_in_use: 10000
+""")
+    p = RiskConfigProvider.from_yaml(global_path=g, strategies_dir=sd)
+    assert p.strategy_config("no_risk") is None
+
+
+def test_strategy_with_risk_but_missing_limit_field_returns_config_with_none(tmp_path):
+    """`risk: {}` block (empty mapping) → StrategyRiskConfig with
+    max_position_notional=None. Triggers fail-closed by 6b-L9."""
+    from marketpulse.trading.risk_gates.config_provider import RiskConfigProvider
+
+    sd = tmp_path / "strategies"
+    sd.mkdir()
+    p_yaml = sd / "empty_risk.yaml"
+    _write_min_strategy_yaml(p_yaml, name="empty_risk")
+    # Append empty risk block.
+    p_yaml.write_text(p_yaml.read_text() + "risk: {}\n")
+    g = tmp_path / "g.yaml"
+    g.write_text("""
+market_hours:
+  enabled: true
+  exchange: XNYS
+  allow_regular_session: true
+  allow_post_close: true
+  post_close_until: "18:00"
+  allow_premarket: false
+daily_loss:
+  enabled: true
+  daily_loss_limit: 500
+sector_exposure:
+  enabled: true
+  max_sector_exposure_pct: 0.35
+  configured_max_capital_in_use: 10000
+""")
+    p = RiskConfigProvider.from_yaml(global_path=g, strategies_dir=sd)
+    cfg = p.strategy_config("empty_risk")
+    assert cfg is not None
+    assert cfg.max_position_notional is None
+
+
+def test_strategy_dir_rejects_negative_notional(tmp_path):
+    from marketpulse.trading.risk_gates.config_provider import RiskConfigProvider
+
+    sd = tmp_path / "strategies"
+    sd.mkdir()
+    _write_min_strategy_yaml(
+        sd / "bad.yaml", name="bad",
+        risk={"max_position_notional": -100},
+    )
+    g = tmp_path / "g.yaml"
+    g.write_text("""
+market_hours:
+  enabled: true
+  exchange: XNYS
+  allow_regular_session: true
+  allow_post_close: true
+  post_close_until: "18:00"
+  allow_premarket: false
+daily_loss:
+  enabled: true
+  daily_loss_limit: 500
+sector_exposure:
+  enabled: true
+  max_sector_exposure_pct: 0.35
+  configured_max_capital_in_use: 10000
+""")
+    import pytest
+    with pytest.raises(ValueError, match="max_position_notional"):
+        RiskConfigProvider.from_yaml(global_path=g, strategies_dir=sd)
+
+
+def test_strategy_dir_filename_stem_is_key(tmp_path):
+    """Lock 6b-L14: lookup key is the YAML filename stem."""
+    from marketpulse.trading.risk_gates.config_provider import RiskConfigProvider
+
+    sd = tmp_path / "strategies"
+    sd.mkdir()
+    _write_min_strategy_yaml(
+        sd / "sector_rotation.yaml", name="sector_rotation",
+        risk={"max_position_notional": 5000},
+    )
+    g = tmp_path / "g.yaml"
+    g.write_text("""
+market_hours:
+  enabled: true
+  exchange: XNYS
+  allow_regular_session: true
+  allow_post_close: true
+  post_close_until: "18:00"
+  allow_premarket: false
+daily_loss:
+  enabled: true
+  daily_loss_limit: 500
+sector_exposure:
+  enabled: true
+  max_sector_exposure_pct: 0.35
+  configured_max_capital_in_use: 10000
+""")
+    p = RiskConfigProvider.from_yaml(global_path=g, strategies_dir=sd)
+    # Lookup by stem.
+    assert p.strategy_config("sector_rotation") is not None
+    # Lookup by unrelated key.
+    assert p.strategy_config("not_a_strategy") is None
