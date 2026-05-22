@@ -259,6 +259,28 @@ def _first_failed_gate(context: Mapping[str, object]) -> str:
     return "unknown"
 
 
+def _order_request_field(
+    context: Mapping[str, object],
+    key: str,
+    default: object = "?",
+) -> object:
+    order_request = context.get("order_request")
+    if isinstance(order_request, Mapping):
+        return order_request.get(key, default)
+    return default
+
+
+def _context_field(
+    context: Mapping[str, object],
+    key: str,
+    default: object = "?",
+) -> object:
+    value = context.get(key)
+    if value is not None:
+        return value
+    return _order_request_field(context, key, default)
+
+
 def _resolve_cycle_status(
     rows,
     tick_date: date,
@@ -320,15 +342,17 @@ def summarize_tick(
         if row.event_type == "ORDER_PLACED":
             orders_placed_detail.append(
                 PlacedOrderDetail(
-                    ticker=str(context.get("ticker", "?")),
-                    strategy=str(row.strategy or context.get("strategy", "?")),
-                    quantity=int(context.get("quantity", 0) or 0),
+                    ticker=str(_context_field(context, "ticker")),
+                    strategy=str(
+                        row.strategy or _context_field(context, "strategy")
+                    ),
+                    quantity=int(_context_field(context, "quantity", 0) or 0),
                 )
             )
         elif row.event_type == "ORDER_REJECTED":
             orders_rejected_breakdown.append(
                 (
-                    str(context.get("ticker", "?")),
+                    str(_context_field(context, "ticker")),
                     _first_failed_gate(context),
                 )
             )

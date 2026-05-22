@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from marketpulse.observability.audit_projection import CriticalEvent, TickSummary
+from marketpulse.recap.push import _BODY_LIMITS, _truncate
 
 _NY = ZoneInfo("America/New_York")
 _PU_CAP = 4
@@ -60,8 +62,14 @@ def _render_engine_invariant_error(event: CriticalEvent) -> tuple[str, str]:
 
 
 def _render_scheduler_gap(event: CriticalEvent) -> tuple[str, str]:
-    last_tick = event.context.get("last_tick_date", "?")
-    gap_days = event.context.get("gap_days", "?")
+    last_tick = event.context.get(
+        "last_tick_date",
+        event.context.get("last_processed_tick_date", "?"),
+    )
+    gap_days = event.context.get(
+        "gap_days",
+        event.context.get("missed_business_days", "?"),
+    )
     body = f"Last tick: {last_tick}\nMissing:   {gap_days} trading day(s)"
     return "🛑 Scheduler Gap Detected", body
 
@@ -71,11 +79,47 @@ def _render_tick_reprocessed(event: CriticalEvent) -> tuple[str, str]:
     return "⚠️ Tick Reprocessed", f"Date: {tick_date}\nOriginal run superseded"
 
 
+def _order_request_field(
+    context: Mapping[str, object],
+    key: str,
+    default: object = "?",
+) -> object:
+    order_request = context.get("order_request")
+    if isinstance(order_request, Mapping):
+        return order_request.get(key, default)
+    return default
+
+
+def _daily_loss_value(context: Mapping[str, object]) -> object:
+    if "loss_today" in context:
+        return context["loss_today"]
+
+    per_gate = context.get("per_gate")
+    if not isinstance(per_gate, (list, tuple)):
+        return "0"
+    for gate_result in per_gate:
+        if not isinstance(gate_result, Mapping):
+            continue
+        if gate_result.get("gate_name") != "daily_loss":
+            continue
+        gate_context = gate_result.get("context")
+        if isinstance(gate_context, Mapping):
+            return gate_context.get("today_realized_pnl", "0")
+    return "0"
+
+
 def _render_daily_loss_reject(event: CriticalEvent) -> tuple[str, str]:
-    ticker = event.context.get("ticker", "?")
-    strategy = event.strategy or event.context.get("strategy", "?")
-    quantity = event.context.get("quantity", "?")
-    loss_raw = event.context.get("loss_today", "0")
+    ticker = event.context.get("ticker", _order_request_field(event.context, "ticker"))
+    strategy = (
+        event.strategy
+        or event.context.get("strategy")
+        or _order_request_field(event.context, "strategy")
+    )
+    quantity = event.context.get(
+        "quantity",
+        _order_request_field(event.context, "quantity"),
+    )
+    loss_raw = _daily_loss_value(event.context)
     try:
         loss = _money_signed(Decimal(str(loss_raw)))
     except Exception:
@@ -150,7 +194,11 @@ def _format_pu_attempt(attempt: int) -> str:
     return f"{attempt}/3"
 
 
-def render_tick_summary(summary: TickSummary) -> tuple[str, str]:
+def render_tick_summary(
+    summary: TickSummary,
+    *,
+    notifier_kind: str | None = None,
+) -> tuple[str, str]:
     """Render the routine per-tick heartbeat summary."""
     title = f"📊 Paper Tick {summary.tick_date.isoformat()}"
     lines: list[str] = []
@@ -201,4 +249,6 @@ def render_tick_summary(summary: TickSummary) -> tuple[str, str]:
     lines.append(active_line)
     lines.append("")
     lines.append(f"Status: {summary.cycle_status}")
-    return title, "\n".join(lines)
+    body = "\n".join(lines)
+    limit = _BODY_LIMITS.get((notifier_kind or "").lower())
+    return title, _truncate(body, limit)

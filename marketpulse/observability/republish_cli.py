@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 from contextlib import suppress
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time, timedelta
 
 from marketpulse.alerts.notifier import get_notifier_from_settings
 from marketpulse.config import get_settings
@@ -75,7 +75,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     tick_date: date = args.date
-    since = datetime.combine(tick_date, datetime.min.time(), tzinfo=UTC)
+    since = datetime.combine(tick_date, time.min, tzinfo=UTC)
+    until = (
+        datetime.combine(tick_date + timedelta(days=1), time.min, tzinfo=UTC)
+        - timedelta(microseconds=1)
+    )
     notifier = get_notifier_from_settings(settings)
     clock = WallClock()
 
@@ -88,6 +92,7 @@ def main(argv: list[str] | None = None) -> int:
             repository=Repository(session=session),
             notifier=notifier,
             clock=clock,
+            until=until,
         )
     finally:
         with suppress(StopIteration):

@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import select
 
 from marketpulse.alerts.notifier import Notifier
 from marketpulse.config import get_settings
-from marketpulse.db.models import PaperAuditEvent, PaperPosition
+from marketpulse.db.models import PaperAuditEvent, PaperOrder, PaperPosition
 from marketpulse.logging import get_logger
 from marketpulse.observability.audit_projection import (
     CriticalEvent,
@@ -58,8 +59,37 @@ class NotificationResult:
     summary_body: str | None = None
 
 
+@dataclass(frozen=True)
+class _ProjectionAuditRow:
+    """Read-side audit row enriched for observability rendering only."""
+
+    id: int
+    timestamp: datetime
+    event_type: str
+    order_id: int | None
+    strategy: str | None
+    reason: str
+    context: dict
+
+
 def _is_enabled() -> bool:
     return get_settings().paper_notifications_enabled
+
+
+def _record_query_failure(
+    failures: list[NotificationFailure],
+    *,
+    event_type: str,
+    title: str,
+    exc: Exception,
+) -> None:
+    failures.append(
+        NotificationFailure(
+            event_type=event_type,
+            title=title,
+            error=f"query_error:{type(exc).__name__}:{exc}",
+        )
+    )
 
 
 def _query_window_rows(
@@ -99,7 +129,129 @@ def _query_window_rows(
     return filtered
 
 
-def _dedup_before_for_kscs(rows: list[PaperAuditEvent], fallback: datetime) -> datetime:
+def _context_int(context: Mapping[str, object], key: str) -> int | None:
+    value = context.get(key)
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _enrich_order_request(context: dict) -> None:
+    order_request = context.get("order_request")
+    if not isinstance(order_request, Mapping):
+        return
+    for key in ("ticker", "strategy", "quantity"):
+        value = order_request.get(key)
+        if value is not None:
+            context.setdefault(key, value)
+
+
+def _enrich_rows(
+    repository: Repository,
+    rows: list[PaperAuditEvent],
+    failures: list[NotificationFailure],
+) -> list[_ProjectionAuditRow]:
+    session = repository._session  # noqa: SLF001 - read-side projection.
+    position_ids = sorted(
+        {
+            position_id
+            for row in rows
+            if (position_id := _context_int(row.context or {}, "position_id"))
+            is not None
+        }
+    )
+    positions_by_id: dict[int, PaperPosition] = {}
+    if position_ids:
+        positions = session.execute(
+            select(PaperPosition).where(PaperPosition.id.in_(position_ids))
+        ).scalars().all()
+        positions_by_id = {position.id: position for position in positions}
+
+    order_ids = {
+        int(row.order_id)
+        for row in rows
+        if row.order_id is not None
+    }
+    order_ids.update(position.order_id for position in positions_by_id.values())
+    orders_by_id: dict[int, PaperOrder] = {}
+    if order_ids:
+        orders = session.execute(
+            select(PaperOrder).where(PaperOrder.id.in_(sorted(order_ids)))
+        ).scalars().all()
+        orders_by_id = {order.id: order for order in orders}
+
+    enriched_rows: list[_ProjectionAuditRow] = []
+    for row in rows:
+        context = dict(row.context or {})
+        _enrich_order_request(context)
+
+        order = orders_by_id.get(row.order_id) if row.order_id is not None else None
+        if order is not None:
+            context.setdefault("ticker", order.ticker)
+            context.setdefault("quantity", order.quantity)
+            context.setdefault("strategy", order.strategy)
+            context.setdefault("horizon_date", order.horizon_date.isoformat())
+
+        position_id = _context_int(context, "position_id")
+        position = positions_by_id.get(position_id) if position_id is not None else None
+        if position is not None:
+            context.setdefault("ticker", position.ticker)
+            context.setdefault("quantity", position.quantity)
+            context.setdefault("strategy", position.strategy)
+            context.setdefault("horizon_date", position.horizon_date.isoformat())
+
+        if row.event_type == "POSITION_CLOSED" and position_id is not None:
+            try:
+                prior_attempts = repository.latest_price_unavailable_attempt_counts(
+                    position_ids=[position_id],
+                    before=row.timestamp,
+                )
+            except Exception as exc:
+                _record_query_failure(
+                    failures,
+                    event_type="POSITION_CLOSED",
+                    title="latest_price_unavailable_attempt_counts",
+                    exc=exc,
+                )
+                log.warning(
+                    "paper_tick_notify_recovery_attempts_query_failed",
+                    error=str(exc),
+                )
+            else:
+                attempt_count = prior_attempts.get(position_id)
+                if attempt_count is not None:
+                    context.setdefault("retry_count", attempt_count)
+
+        strategy = row.strategy
+        context_strategy = context.get("strategy")
+        if strategy is None and context_strategy is not None:
+            strategy = str(context_strategy)
+
+        enriched_rows.append(
+            _ProjectionAuditRow(
+                id=row.id,
+                timestamp=row.timestamp,
+                event_type=row.event_type,
+                order_id=row.order_id,
+                strategy=strategy,
+                reason=row.reason,
+                context=context,
+            )
+        )
+    return enriched_rows
+
+
+def _dedup_before_for_kscs(
+    rows: list[_ProjectionAuditRow],
+    fallback: datetime,
+) -> datetime:
     skipped_rows = [
         row for row in rows if row.event_type == "KILL_SWITCH_CYCLE_SKIPPED"
     ]
@@ -108,50 +260,39 @@ def _dedup_before_for_kscs(rows: list[PaperAuditEvent], fallback: datetime) -> d
     return min(row.timestamp for row in skipped_rows)
 
 
-def _prior_pu_before_for_closed_positions(
-    rows: list[PaperAuditEvent],
-    fallback: datetime,
-) -> datetime:
-    closed_rows = [row for row in rows if row.event_type == "POSITION_CLOSED"]
-    if not closed_rows:
-        return fallback
-    return min(row.timestamp for row in closed_rows)
-
-
 def _positions_with_prior_pu(
     repository: Repository,
-    rows: list[PaperAuditEvent],
-    *,
-    before: datetime,
+    rows: list[_ProjectionAuditRow],
 ) -> set[int]:
-    position_ids = sorted(
-        {
-            int((row.context or {}).get("position_id"))
-            for row in rows
-            if row.event_type == "POSITION_CLOSED"
-            and isinstance((row.context or {}).get("position_id"), int)
-        }
-    )
-    if not position_ids:
-        return set()
-    return repository.positions_with_prior_price_unavailable(
-        position_ids=position_ids,
-        before=before,
-    )
+    out: set[int] = set()
+    for row in rows:
+        if row.event_type != "POSITION_CLOSED":
+            continue
+        position_id = _context_int(row.context or {}, "position_id")
+        if position_id is None:
+            continue
+        out.update(
+            repository.positions_with_prior_price_unavailable(
+                position_ids=[position_id],
+                before=row.timestamp,
+            )
+        )
+    return out
 
 
 def _prior_pu_attempts(
     repository: Repository,
-    rows: list[PaperAuditEvent],
+    rows: list[_ProjectionAuditRow],
     *,
     before: datetime,
 ) -> dict[int, int]:
     position_ids = sorted(
         {
-            int((row.context or {}).get("position_id"))
+            position_id
             for row in rows
             if row.event_type == "PRICE_UNAVAILABLE"
-            and isinstance((row.context or {}).get("position_id"), int)
+            and (position_id := _context_int(row.context or {}, "position_id"))
+            is not None
         }
     )
     if not position_ids:
@@ -164,6 +305,8 @@ def _prior_pu_attempts(
 
 def _active_positions(
     repository: Repository,
+    *,
+    before: datetime,
 ) -> tuple[int, list[tuple[str, int]]]:
     session = repository._session  # noqa: SLF001 - read-side projection.
     positions = session.execute(
@@ -171,9 +314,14 @@ def _active_positions(
         .where(PaperPosition.status == "OPEN")
         .order_by(PaperPosition.id)
     ).scalars().all()
+    position_ids = [position.id for position in positions]
+    attempts_by_position = repository.latest_price_unavailable_attempt_counts(
+        position_ids=position_ids,
+        before=before,
+    )
     active_with_pu: list[tuple[str, int]] = []
     for position in positions:
-        attempts = repository.count_price_unavailable_attempts(position_id=position.id)
+        attempts = attempts_by_position.get(position.id, 0)
         if attempts > 0:
             active_with_pu.append((position.ticker, int(attempts)))
     return len(positions), active_with_pu
@@ -236,9 +384,11 @@ def _safe_render_critical(
 def _safe_render_summary(
     summary: TickSummary,
     failures: list[NotificationFailure],
+    *,
+    notifier_kind: str | None,
 ) -> tuple[str, str] | None:
     try:
-        return render_tick_summary(summary)
+        return render_tick_summary(summary, notifier_kind=notifier_kind)
     except Exception as exc:
         failures.append(
             NotificationFailure(
@@ -259,10 +409,12 @@ def notify_paper_tick_events(
     notifier: Notifier,
     clock: Clock,
     price_unavailable_threshold: int = 3,
+    until: datetime | None = None,
 ) -> NotificationResult:
     """Dispatch critical paper audit pushes plus one routine tick summary."""
     failures: list[NotificationFailure] = []
-    if not _is_enabled():
+    settings = get_settings()
+    if not settings.paper_notifications_enabled:
         failures.append(
             NotificationFailure(
                 event_type="config",
@@ -276,23 +428,30 @@ def notify_paper_tick_events(
             failures=tuple(failures),
         )
 
-    notify_started_at = clock.now()
+    notify_started_at = until or clock.now()
     try:
         latest_tick_completed_at = repository.latest_tick_completed_timestamp(
             before=since,
         )
     except Exception as exc:
         latest_tick_completed_at = None
+        _record_query_failure(
+            failures,
+            event_type="audit_query",
+            title="latest_tick_completed_timestamp",
+            exc=exc,
+        )
         log.warning("paper_tick_notify_latest_tick_query_failed", error=str(exc))
 
     try:
-        rows = _query_window_rows(
+        raw_rows = _query_window_rows(
             repository,
             since=since,
             until=notify_started_at,
             tick_date=tick_date,
             latest_tick_completed_at=latest_tick_completed_at,
         )
+        rows = _enrich_rows(repository, raw_rows, failures)
     except Exception as exc:
         failures.append(
             NotificationFailure(
@@ -309,16 +468,27 @@ def notify_paper_tick_events(
         )
     except Exception as exc:
         kscs_in_period = False
+        _record_query_failure(
+            failures,
+            event_type="KILL_SWITCH_CYCLE_SKIPPED",
+            title="kill_switch_cycle_skipped_in_active_period",
+            exc=exc,
+        )
         log.warning("paper_tick_notify_kscs_query_failed", error=str(exc))
 
     try:
         positions_with_prior_pu = _positions_with_prior_pu(
             repository,
             rows,
-            before=_prior_pu_before_for_closed_positions(rows, notify_started_at),
         )
     except Exception as exc:
         positions_with_prior_pu = set()
+        _record_query_failure(
+            failures,
+            event_type="POSITION_CLOSED",
+            title="positions_with_prior_price_unavailable",
+            exc=exc,
+        )
         log.warning("paper_tick_notify_prior_pu_query_failed", error=str(exc))
 
     try:
@@ -329,6 +499,12 @@ def notify_paper_tick_events(
         )
     except Exception as exc:
         prior_attempts_by_position = {}
+        _record_query_failure(
+            failures,
+            event_type="PRICE_UNAVAILABLE",
+            title="latest_price_unavailable_attempt_counts",
+            exc=exc,
+        )
         log.warning("paper_tick_notify_prior_attempts_query_failed", error=str(exc))
 
     try:
@@ -375,12 +551,27 @@ def notify_paper_tick_events(
         cash_balance_end = repository.cash_balance()
     except Exception as exc:
         cash_balance_end = Decimal("0")
+        _record_query_failure(
+            failures,
+            event_type="tick_summary",
+            title="cash_balance",
+            exc=exc,
+        )
         log.warning("paper_tick_notify_cash_query_failed", error=str(exc))
 
     try:
-        active_count, active_with_pu = _active_positions(repository)
+        active_count, active_with_pu = _active_positions(
+            repository,
+            before=notify_started_at + timedelta(microseconds=1),
+        )
     except Exception as exc:
         active_count, active_with_pu = 0, []
+        _record_query_failure(
+            failures,
+            event_type="tick_summary",
+            title="active_positions",
+            exc=exc,
+        )
         log.warning("paper_tick_notify_active_positions_failed", error=str(exc))
 
     try:
@@ -409,7 +600,11 @@ def notify_paper_tick_events(
     summary_title: str | None = None
     summary_body: str | None = None
     summary_sent = False
-    rendered_summary = _safe_render_summary(summary, failures)
+    rendered_summary = _safe_render_summary(
+        summary,
+        failures,
+        notifier_kind=settings.notifier_kind,
+    )
     if rendered_summary is not None:
         summary_title, summary_body = rendered_summary
         summary_sent = _safe_send(

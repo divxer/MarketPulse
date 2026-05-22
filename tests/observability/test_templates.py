@@ -125,6 +125,26 @@ def test_render_scheduler_gap_detected():
     assert "4" in body
 
 
+def test_render_scheduler_gap_detected_real_writer_context():
+    from marketpulse.observability.templates import render_critical_event
+
+    event = _ev(
+        "SCHEDULER_GAP_DETECTED",
+        context={
+            "last_processed_tick_date": "2026-05-15",
+            "resume_date": "2026-05-22",
+            "missed_business_days": 4,
+            "mode": "forward_only_skip",
+        },
+    )
+
+    title, body = render_critical_event(event)
+
+    assert title == "🛑 Scheduler Gap Detected"
+    assert "2026-05-15" in body
+    assert "4" in body
+
+
 def test_render_tick_reprocessed_completed():
     from marketpulse.observability.templates import render_critical_event
 
@@ -158,6 +178,39 @@ def test_render_daily_loss_reject():
     assert "momentum" in body
     assert "10" in body
     assert "daily_loss" in body
+    assert "-$150.00" in body
+
+
+def test_render_daily_loss_reject_real_writer_context():
+    from marketpulse.observability.templates import render_critical_event
+
+    event = _ev(
+        "ORDER_REJECTED",
+        strategy="momentum",
+        context={
+            "order_request": {
+                "ticker": "AAPL",
+                "strategy": "momentum",
+                "quantity": 10,
+            },
+            "failed_gates": ["daily_loss"],
+            "per_gate": [
+                {
+                    "gate_name": "daily_loss",
+                    "approved": False,
+                    "context": {
+                        "today_realized_pnl": "-150.00",
+                        "daily_loss_limit": "100.00",
+                    },
+                },
+            ],
+        },
+    )
+
+    title, body = render_critical_event(event)
+
+    assert title == "🛑 Daily Loss Limit Tripped"
+    assert "AAPL momentum × 10" in body
     assert "-$150.00" in body
 
 
@@ -340,3 +393,25 @@ def test_render_summary_status_skipped():
     _, body = render_tick_summary(_summary(cycle_status="skipped"))
 
     assert "Status: skipped" in body
+
+
+def test_render_summary_truncates_to_notifier_body_limit():
+    from marketpulse.observability.audit_projection import PlacedOrderDetail
+    from marketpulse.observability.templates import render_tick_summary
+
+    summary = _summary(
+        orders_placed=500,
+        orders_placed_detail=[
+            PlacedOrderDetail(
+                ticker=f"TICK{i:03d}",
+                strategy="very_long_strategy_name",
+                quantity=i + 1,
+            )
+            for i in range(500)
+        ],
+    )
+
+    _, body = render_tick_summary(summary, notifier_kind="bark")
+
+    assert len(body) <= 3500
+    assert body.endswith("…")

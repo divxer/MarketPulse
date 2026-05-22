@@ -92,6 +92,81 @@ def _repo(session):
     return repo
 
 
+def _seed_order(session, *, order_id: int, ticker: str, quantity: int, strategy: str):
+    from marketpulse.db.models import PaperOrder
+
+    ts = datetime(2026, 5, 22, 14, 0, tzinfo=UTC)
+    order = PaperOrder(
+        id=order_id,
+        idempotency_key=f"key-{order_id}",
+        allocation_run_id=f"run-{order_id}",
+        strategy=strategy,
+        ticker=ticker,
+        quantity=quantity,
+        event_time=ts,
+        allocation_date=date(2026, 5, 22),
+        horizon_date=date(2026, 5, 23),
+        placed_at=ts,
+        filled_at=ts + timedelta(minutes=1),
+        cancelled_at=None,
+        cancel_reason=None,
+        event_price=Decimal("100.00"),
+        horizon_price=Decimal("110.00"),
+        status="ENTRY_FILLED",
+        strategy_version="test",
+        allocator_version="test",
+        execution_engine_version="test",
+        weight=1.0,
+        raw_bid_weight=None,
+        pool_corr=None,
+        contribution_multiplier=1.0,
+        adjusted_bid_weight=None,
+        effective_corr_window=60,
+        rewarded_for_negative_corr=False,
+        would_change_rank=False,
+        size_clamped_by_override=False,
+    )
+    session.add(order)
+    session.flush()
+    return order
+
+
+def _seed_position(
+    session,
+    *,
+    position_id: int,
+    order_id: int,
+    ticker: str,
+    quantity: int,
+    strategy: str,
+    status: str = "OPEN",
+):
+    from marketpulse.db.models import PaperPosition
+
+    ts = datetime(2026, 5, 22, 14, 1, tzinfo=UTC)
+    closed = status == "CLOSED"
+    position = PaperPosition(
+        id=position_id,
+        order_id=order_id,
+        entry_fill_id=position_id * 10,
+        exit_fill_id=position_id * 10 + 1 if closed else None,
+        strategy=strategy,
+        ticker=ticker,
+        quantity=quantity,
+        entry_price=Decimal("100.00"),
+        entry_date=date(2026, 5, 22),
+        horizon_date=date(2026, 5, 23),
+        status=status,
+        opened_at=ts,
+        closed_at=ts + timedelta(days=1) if closed else None,
+        exit_price=Decimal("115.00") if closed else None,
+        realized_pnl=Decimal("45.00") if closed else None,
+    )
+    session.add(position)
+    session.flush()
+    return position
+
+
 def test_disabled_path_emits_no_notifications(session, required_env, monkeypatch):
     monkeypatch.setenv("MP_PAPER_NOTIFICATIONS_ENABLED", "false")
     from marketpulse.config import get_settings
@@ -356,6 +431,69 @@ def test_position_closed_with_prior_pu_recovery_critical(
 
     assert [push.event_type for push in result.critical_sent] == ["POSITION_CLOSED"]
     assert notifier.sent[0][0] == "✅ Position Recovered — AAPL"
+
+
+def test_position_recovery_uses_each_close_timestamp(
+    session,
+    required_env,
+    monkeypatch,
+):
+    monkeypatch.setenv("MP_PAPER_NOTIFICATIONS_ENABLED", "true")
+    from marketpulse.config import get_settings
+
+    get_settings.cache_clear()
+
+    from marketpulse.observability.paper_tick_notifier import notify_paper_tick_events
+
+    repo = _repo(session)
+    since = datetime(2026, 5, 22, 21, 0, tzinfo=UTC)
+    _seed_audit(
+        session,
+        event_type="POSITION_CLOSED",
+        timestamp=since + timedelta(minutes=3),
+        context={
+            "ticker": "AAPL",
+            "position_id": 42,
+            "exit_price": "152.10",
+            "realized_pnl": "21.00",
+        },
+    )
+    _seed_audit(
+        session,
+        event_type="PRICE_UNAVAILABLE",
+        timestamp=since + timedelta(minutes=4),
+        context={"ticker": "MSFT", "position_id": 99, "attempt_count": 1},
+    )
+    _seed_audit(
+        session,
+        event_type="POSITION_CLOSED",
+        timestamp=since + timedelta(minutes=5),
+        context={
+            "ticker": "MSFT",
+            "position_id": 99,
+            "exit_price": "312.00",
+            "realized_pnl": "18.00",
+        },
+    )
+    _seed_audit(
+        session,
+        event_type="TICK_COMPLETED",
+        timestamp=since + timedelta(minutes=8),
+        context={"tick_date": "2026-05-22", "status": "completed"},
+    )
+    session.commit()
+    notifier = CapturingNotifier()
+
+    result = notify_paper_tick_events(
+        since=since,
+        tick_date=date(2026, 5, 22),
+        repository=repo,
+        notifier=notifier,
+        clock=_clock(since + timedelta(minutes=10)),
+    )
+
+    assert [push.event_type for push in result.critical_sent] == ["POSITION_CLOSED"]
+    assert result.critical_sent[0].title == "✅ Position Recovered — MSFT"
 
 
 def test_kill_switch_flipped_between_ticks_picked_up(
@@ -646,3 +784,225 @@ def test_audit_window_boundaries_and_prior_rows(session, required_env, monkeypat
     assert "⚠️ Position Stuck — OLD" not in titles
     assert "⚠️ Position Stuck — AAPL" in titles
     assert "⚠️ Position Stuck — MSFT" in titles
+
+
+def test_notifier_enriches_real_writer_audit_contexts(
+    session,
+    required_env,
+    monkeypatch,
+):
+    monkeypatch.setenv("MP_PAPER_NOTIFICATIONS_ENABLED", "true")
+    from marketpulse.config import get_settings
+
+    get_settings.cache_clear()
+
+    from marketpulse.observability.paper_tick_notifier import notify_paper_tick_events
+
+    repo = _repo(session)
+    _seed_order(session, order_id=10, ticker="AAPL", quantity=7, strategy="momentum")
+    _seed_position(
+        session,
+        position_id=20,
+        order_id=10,
+        ticker="AAPL",
+        quantity=7,
+        strategy="momentum",
+        status="CLOSED",
+    )
+    since = datetime(2026, 5, 22, 21, 0, tzinfo=UTC)
+    _seed_audit(
+        session,
+        event_type="ORDER_PLACED",
+        timestamp=since + timedelta(minutes=1),
+        order_id=10,
+        strategy="momentum",
+        context={"idempotency_key": "key-10", "allocation_run_id": "run-10"},
+    )
+    _seed_audit(
+        session,
+        event_type="ORDER_ENTRY_FILLED",
+        timestamp=since + timedelta(minutes=2),
+        order_id=10,
+        strategy="momentum",
+        context={
+            "position_id": 20,
+            "fill_price": "101.50",
+            "cash_balance_after": "9289.50",
+        },
+    )
+    _seed_audit(
+        session,
+        event_type="PRICE_UNAVAILABLE",
+        timestamp=since + timedelta(minutes=3),
+        strategy="momentum",
+        context={
+            "position_id": 20,
+            "ticker": "AAPL",
+            "horizon_date": "2026-05-23",
+            "as_of": "2026-05-23",
+            "lookback_days": 5,
+            "source": "yfinance",
+            "attempt_count": 4,
+        },
+    )
+    _seed_audit(
+        session,
+        event_type="POSITION_CLOSED",
+        timestamp=since + timedelta(minutes=4),
+        strategy="momentum",
+        context={
+            "position_id": 20,
+            "exit_price": "115.00",
+            "realized_pnl": "45.00",
+            "cash_balance_after": "10045.00",
+            "requested_horizon_date": "2026-05-23",
+            "actual_price_date": "2026-05-22",
+            "price_source": "yfinance",
+            "roll_policy": "previous_available_close",
+        },
+    )
+    _seed_audit(
+        session,
+        event_type="SCHEDULER_GAP_DETECTED",
+        timestamp=since + timedelta(minutes=5),
+        reason="forward_only_skip",
+        context={
+            "last_processed_tick_date": "2026-05-20",
+            "resume_date": "2026-05-22",
+            "missed_business_days": 1,
+            "mode": "forward_only_skip",
+        },
+    )
+    _seed_audit(
+        session,
+        event_type="ORDER_REJECTED",
+        timestamp=since + timedelta(minutes=6),
+        strategy="momentum",
+        reason="daily_loss_limit_exceeded",
+        context={
+            "order_request": {
+                "ticker": "MSFT",
+                "strategy": "momentum",
+                "quantity": 3,
+            },
+            "failed_gates": ["daily_loss"],
+            "per_gate": [
+                {
+                    "gate_name": "daily_loss",
+                    "approved": False,
+                    "context": {
+                        "today_realized_pnl": "-150.00",
+                        "daily_loss_limit": "100.00",
+                    },
+                },
+            ],
+        },
+    )
+    _seed_audit(
+        session,
+        event_type="TICK_COMPLETED",
+        timestamp=since + timedelta(minutes=7),
+        context={"tick_date": "2026-05-22", "status": "completed"},
+    )
+    session.commit()
+    notifier = CapturingNotifier()
+
+    result = notify_paper_tick_events(
+        since=since,
+        tick_date=date(2026, 5, 22),
+        repository=repo,
+        notifier=notifier,
+        clock=_clock(since + timedelta(minutes=10)),
+    )
+
+    titles = [title for title, _, _ in notifier.sent]
+    bodies = [body for _, body, _ in notifier.sent]
+    assert "✅ Position Recovered — AAPL" in titles
+    recovered_body = bodies[titles.index("✅ Position Recovered — AAPL")]
+    assert "Closed after 4 retries" in recovered_body
+    assert "🛑 Scheduler Gap Detected" in titles
+    gap_body = bodies[titles.index("🛑 Scheduler Gap Detected")]
+    assert "2026-05-20" in gap_body
+    assert "1 trading day" in gap_body
+    assert "🛑 Daily Loss Limit Tripped" in titles
+    loss_body = bodies[titles.index("🛑 Daily Loss Limit Tripped")]
+    assert "MSFT momentum × 3" in loss_body
+    assert "-$150.00" in loss_body
+    assert result.summary_body is not None
+    assert "AAPL × 7 (momentum)" in result.summary_body
+    assert "AAPL @ 101.50" in result.summary_body
+    assert "EXIT:  AAPL @ 115.00, P&L +$45.00" in result.summary_body
+
+
+def test_degraded_read_helpers_return_failures_and_continue(
+    session,
+    required_env,
+    monkeypatch,
+):
+    monkeypatch.setenv("MP_PAPER_NOTIFICATIONS_ENABLED", "true")
+    from marketpulse.config import get_settings
+    from marketpulse.trading.repository import Repository
+
+    get_settings.cache_clear()
+
+    from marketpulse.observability.paper_tick_notifier import notify_paper_tick_events
+
+    class DegradedRepository(Repository):
+        def latest_tick_completed_timestamp(self, *, before):
+            raise RuntimeError("latest down")
+
+        def kill_switch_cycle_skipped_in_active_period(self, *, before):
+            raise RuntimeError("kscs down")
+
+        def positions_with_prior_price_unavailable(self, *, position_ids, before):
+            raise RuntimeError("prior pu down")
+
+        def latest_price_unavailable_attempt_counts(self, *, position_ids, before):
+            raise RuntimeError("attempts down")
+
+        def cash_balance(self):
+            raise RuntimeError("cash down")
+
+    _repo(session)
+    since = datetime(2026, 5, 22, 21, 0, tzinfo=UTC)
+    _seed_audit(
+        session,
+        event_type="PRICE_UNAVAILABLE",
+        timestamp=since + timedelta(minutes=1),
+        context={"ticker": "AAPL", "position_id": 42, "attempt_count": 3},
+    )
+    _seed_audit(
+        session,
+        event_type="POSITION_CLOSED",
+        timestamp=since + timedelta(minutes=2),
+        context={
+            "ticker": "AAPL",
+            "position_id": 42,
+            "exit_price": "152.10",
+            "realized_pnl": "21.00",
+        },
+    )
+    _seed_audit(
+        session,
+        event_type="TICK_COMPLETED",
+        timestamp=since + timedelta(minutes=5),
+        context={"tick_date": "2026-05-22", "status": "completed"},
+    )
+    session.commit()
+
+    result = notify_paper_tick_events(
+        since=since,
+        tick_date=date(2026, 5, 22),
+        repository=DegradedRepository(session=session),
+        notifier=CapturingNotifier(),
+        clock=_clock(since + timedelta(minutes=10)),
+    )
+
+    assert result.summary_sent is True
+    failure_titles = {failure.title for failure in result.failures}
+    assert "latest_tick_completed_timestamp" in failure_titles
+    assert "kill_switch_cycle_skipped_in_active_period" in failure_titles
+    assert "positions_with_prior_price_unavailable" in failure_titles
+    assert "latest_price_unavailable_attempt_counts" in failure_titles
+    assert "cash_balance" in failure_titles
+    assert "active_positions" in failure_titles

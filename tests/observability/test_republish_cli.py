@@ -173,3 +173,55 @@ def test_republish_cli_failure_exit_code(patched_db, monkeypatch, capsys):
     assert exit_code == 1
     captured = capsys.readouterr()
     assert "send_returned_false" in captured.out
+
+
+def test_republish_cli_date_window_excludes_later_non_tick_dated_events(
+    patched_db,
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setenv("MP_PAPER_NOTIFICATIONS_ENABLED", "true")
+    from marketpulse.config import get_settings
+
+    get_settings.cache_clear()
+
+    with Session(patched_db) as session:
+        _seed_tick(session)
+        session.add(
+            PaperAuditEvent(
+                timestamp=datetime(2026, 5, 23, 15, 0, tzinfo=UTC),
+                event_type="PRICE_UNAVAILABLE",
+                order_id=None,
+                strategy="momentum",
+                reason="no_data",
+                context={
+                    "ticker": "MSFT",
+                    "position_id": 99,
+                    "attempt_count": 3,
+                    "horizon_date": "2026-05-23",
+                    "source": "yfinance",
+                },
+            )
+        )
+        session.commit()
+
+    class FakeWallClock:
+        def now(self):
+            return datetime(2026, 5, 24, 12, 0, tzinfo=UTC)
+
+    notifier = CapturingNotifier()
+    from marketpulse.observability import republish_cli as cli_module
+
+    monkeypatch.setattr(cli_module, "WallClock", FakeWallClock)
+    monkeypatch.setattr(
+        cli_module,
+        "get_notifier_from_settings",
+        lambda settings: notifier,
+    )
+
+    exit_code = cli_module.main(["--date", "2026-05-22"])
+
+    assert exit_code == 0
+    assert all("Position Stuck" not in title for title, _, _ in notifier.sent)
+    captured = capsys.readouterr()
+    assert "MSFT" not in captured.out
