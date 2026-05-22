@@ -162,3 +162,98 @@ def test_strategy_risk_config_optional_limit():
     assert c.max_position_notional == Decimal("25000")
     c2 = StrategyRiskConfig(max_position_notional=None)
     assert c2.max_position_notional is None
+
+
+def test_from_yaml_global_only_parses_shipped_default(tmp_path):
+    """T5: parses config/risk_gates.yaml shape correctly."""
+    from datetime import time
+    from decimal import Decimal
+
+    from marketpulse.trading.risk_gates.config_provider import RiskConfigProvider
+
+    yaml_text = """
+market_hours:
+  enabled: true
+  exchange: XNYS
+  allow_regular_session: true
+  allow_post_close: true
+  post_close_until: "18:00"
+  allow_premarket: false
+daily_loss:
+  enabled: true
+  daily_loss_limit: 500
+sector_exposure:
+  enabled: true
+  max_sector_exposure_pct: 0.35
+  configured_max_capital_in_use: 10000
+"""
+    global_path = tmp_path / "risk_gates.yaml"
+    global_path.write_text(yaml_text)
+    strategies_dir = tmp_path / "strategies"
+    strategies_dir.mkdir()
+    provider = RiskConfigProvider.from_yaml(
+        global_path=global_path, strategies_dir=strategies_dir,
+    )
+    g = provider.global_config()
+    assert g.market_hours.enabled is True
+    assert g.market_hours.post_close_until == time(18, 0)
+    assert g.market_hours.allow_premarket is False
+    assert g.daily_loss.daily_loss_limit == Decimal("500")
+    assert g.sector_exposure.max_sector_exposure_pct == 0.35
+    assert g.sector_exposure.configured_max_capital_in_use == Decimal("10000")
+
+
+def test_from_yaml_missing_global_raises(tmp_path):
+    from marketpulse.trading.risk_gates.config_provider import RiskConfigProvider
+
+    strategies_dir = tmp_path / "strategies"
+    strategies_dir.mkdir()
+    import pytest
+    with pytest.raises(FileNotFoundError):
+        RiskConfigProvider.from_yaml(
+            global_path=tmp_path / "missing.yaml",
+            strategies_dir=strategies_dir,
+        )
+
+
+def test_from_yaml_global_missing_required_key_raises(tmp_path):
+    from marketpulse.trading.risk_gates.config_provider import RiskConfigProvider
+
+    # Drop `sector_exposure` block.
+    bad = """
+market_hours:
+  enabled: true
+  exchange: XNYS
+  allow_regular_session: true
+  allow_post_close: true
+  post_close_until: "18:00"
+  allow_premarket: false
+daily_loss:
+  enabled: true
+  daily_loss_limit: 500
+"""
+    p = tmp_path / "bad.yaml"
+    p.write_text(bad)
+    sd = tmp_path / "strategies"
+    sd.mkdir()
+    import pytest
+    with pytest.raises(ValueError, match="sector_exposure"):
+        RiskConfigProvider.from_yaml(global_path=p, strategies_dir=sd)
+
+
+def test_shipped_default_yaml_parses_via_from_yaml(tmp_path):
+    """Locks the shipped default config — if config/risk_gates.yaml
+    drifts away from the documented shape, this test catches it."""
+    from pathlib import Path
+
+    from marketpulse.trading.risk_gates.config_provider import RiskConfigProvider
+
+    repo_root = Path(__file__).resolve().parents[3]
+    real_global = repo_root / "config" / "risk_gates.yaml"
+    sd = tmp_path / "strategies"
+    sd.mkdir()
+    provider = RiskConfigProvider.from_yaml(global_path=real_global, strategies_dir=sd)
+    g = provider.global_config()
+    assert g.market_hours.enabled is True
+    assert g.daily_loss.enabled is True
+    assert g.sector_exposure.enabled is True

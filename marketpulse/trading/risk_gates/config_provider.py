@@ -18,6 +18,8 @@ from datetime import time
 from decimal import Decimal
 from pathlib import Path
 
+import yaml
+
 __all__ = [
     "MarketHoursConfig",
     "DailyLossConfig",
@@ -90,5 +92,83 @@ class RiskConfigProvider:
         global_path: Path,
         strategies_dir: Path,
     ) -> RiskConfigProvider:
-        # Filled in at T5 (global) and T6 (strategy YAMLs).
-        raise NotImplementedError("RiskConfigProvider.from_yaml — see T5/T6")
+        global_cfg = _parse_global_yaml(global_path)
+        strategy_cfgs = _parse_strategy_dir(strategies_dir)
+        return cls(global_cfg=global_cfg, strategy_cfgs=strategy_cfgs)
+
+
+def _parse_global_yaml(path: Path) -> RiskGateConfig:
+    if not path.exists():
+        raise FileNotFoundError(
+            f"risk_gates global config not found: {path}",
+        )
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: top-level YAML must be a mapping")
+    for key in ("market_hours", "daily_loss", "sector_exposure"):
+        if key not in data:
+            raise ValueError(f"{path}: missing required top-level key {key!r}")
+    return RiskGateConfig(
+        market_hours=_parse_market_hours(data["market_hours"], path),
+        daily_loss=_parse_daily_loss(data["daily_loss"], path),
+        sector_exposure=_parse_sector_exposure(data["sector_exposure"], path),
+    )
+
+
+def _parse_market_hours(d: dict, path: Path) -> MarketHoursConfig:
+    required = (
+        "enabled", "exchange", "allow_regular_session",
+        "allow_post_close", "post_close_until", "allow_premarket",
+    )
+    for k in required:
+        if k not in d:
+            raise ValueError(f"{path}: market_hours missing {k!r}")
+    hh, mm = str(d["post_close_until"]).split(":")
+    return MarketHoursConfig(
+        enabled=bool(d["enabled"]),
+        exchange=str(d["exchange"]),
+        allow_regular_session=bool(d["allow_regular_session"]),
+        allow_post_close=bool(d["allow_post_close"]),
+        post_close_until=time(int(hh), int(mm)),
+        allow_premarket=bool(d["allow_premarket"]),
+    )
+
+
+def _parse_daily_loss(d: dict, path: Path) -> DailyLossConfig:
+    for k in ("enabled", "daily_loss_limit"):
+        if k not in d:
+            raise ValueError(f"{path}: daily_loss missing {k!r}")
+    limit = Decimal(str(d["daily_loss_limit"]))
+    if limit < 0:
+        raise ValueError(
+            f"{path}: daily_loss.daily_loss_limit must be non-negative "
+            f"(got {limit})",
+        )
+    return DailyLossConfig(enabled=bool(d["enabled"]), daily_loss_limit=limit)
+
+
+def _parse_sector_exposure(d: dict, path: Path) -> SectorExposureConfig:
+    for k in ("enabled", "max_sector_exposure_pct", "configured_max_capital_in_use"):
+        if k not in d:
+            raise ValueError(f"{path}: sector_exposure missing {k!r}")
+    pct = float(d["max_sector_exposure_pct"])
+    if not 0.0 <= pct <= 1.0:
+        raise ValueError(
+            f"{path}: sector_exposure.max_sector_exposure_pct must be in [0,1] "
+            f"(got {pct})",
+        )
+    cap = Decimal(str(d["configured_max_capital_in_use"]))
+    if cap <= 0:
+        raise ValueError(
+            f"{path}: sector_exposure.configured_max_capital_in_use must be > 0",
+        )
+    return SectorExposureConfig(
+        enabled=bool(d["enabled"]),
+        max_sector_exposure_pct=pct,
+        configured_max_capital_in_use=cap,
+    )
+
+
+def _parse_strategy_dir(strategies_dir: Path) -> dict[str, StrategyRiskConfig]:
+    """Filled in at T6. Empty dict for T5 so global-only tests pass."""
+    return {}
