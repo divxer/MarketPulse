@@ -199,7 +199,15 @@ class ForwardExecutionEngine:
     def tick(self, *, as_of: date) -> TickResult:
         """Per-row transactional. Each entry / exit gets its own
         Repository.transaction(); InvariantError → audit + continue
-        (6a-L4)."""
+        (6a-L4).
+
+        Lock 6b+L11: resets _last_price_unavailable_count at start.
+        Lock 6b+L7: PRICE_UNAVAILABLE (False return from _materialize_exit)
+        is NOT a TickError; only increments the counter and leaves the
+        position OPEN for the next tick to retry.
+        """
+        self._last_price_unavailable_count = 0    # lock 6b+L11: reset per tick
+
         entries = 0
         exits = 0
         errors: list[TickError] = []
@@ -235,8 +243,13 @@ class ForwardExecutionEngine:
         # Phase B: exits
         for position in self._repo.find_positions_for_exit(as_of=as_of):
             try:
-                self._materialize_exit(position, exit_date=as_of)
-                exits += 1
+                closed = self._materialize_exit(position, exit_date=as_of)
+                if closed:
+                    exits += 1
+                else:
+                    # Lock 6b+L7: PRICE_UNAVAILABLE is NOT an InvariantError.
+                    # Position stays OPEN; next tick will retry. Counter only.
+                    self._last_price_unavailable_count += 1
             except InvariantError as e:
                 err = TickError(
                     phase="exit_materialization",
@@ -308,15 +321,48 @@ class ForwardExecutionEngine:
                 timestamp=fill_time,
             )
 
-    def _materialize_exit(self, position, *, exit_date: date) -> None:
+    def _materialize_exit(self, position, *, exit_date: date) -> bool:
+        """Lock 6b+L1: exit_price comes from PriceProvider at this point
+        in time (NOT from order.horizon_price; the shim is sealed).
+
+        Lock 6b+L7: returns True when the position CLOSED, False when the
+        provider returned None (PRICE_UNAVAILABLE). On False the position
+        stays OPEN and the next tick retries — this is NOT an
+        InvariantError."""
         exit_time = self._clock.now()
-        order = self._repo.find_paper_order_by_id(position.order_id)
-        if order.horizon_price is None:
-            raise InvariantError(
-                f"order {order.id} has no horizon_price; "
-                "ForwardExecutionEngine cannot exit without it (lock xii)"
+
+        close = self._price_provider.close_on_date(
+            ticker=position.ticker,
+            on_date=position.horizon_date,
+        )
+        if close is None:
+            # Lock 6b+L7: NOT an InvariantError. Position stays OPEN;
+            # next tick retries.
+            prior_attempts = self._repo.count_price_unavailable_attempts(
+                position_id=position.id,
             )
-        exit_price = order.horizon_price
+            with self._repo.transaction():
+                self._repo.write_audit_event(
+                    event_type=AuditEventType.PRICE_UNAVAILABLE,
+                    order_id=position.order_id,     # lock 6b+L4
+                    strategy=position.strategy,
+                    reason="close_on_date_returned_none",
+                    context={
+                        "position_id": position.id,
+                        "ticker": position.ticker,
+                        "horizon_date": position.horizon_date.isoformat(),
+                        "as_of": exit_date.isoformat(),
+                        # Lock 6b+L8: read provider properties, NOT hardcoded.
+                        "lookback_days": self._price_provider.lookback_days,
+                        "source": self._price_provider.source,
+                        "attempt_count": prior_attempts + 1,
+                    },
+                    timestamp=exit_time,
+                )
+            return False
+
+        # Success path: write fill at the price the provider returned.
+        exit_price = close.price    # provider already quantized (lock 6b+L14)
         cash_inflow = exit_price * Decimal(position.quantity)
         realized_pnl = (
             (exit_price - position.entry_price) * Decimal(position.quantity)
@@ -347,6 +393,17 @@ class ForwardExecutionEngine:
                     "exit_price": str(exit_price),
                     "realized_pnl": str(realized_pnl),
                     "cash_balance_after": str(self._repo.cash_balance()),
+                    # Lock 6b+L1 provenance — 4 new fields tied to the
+                    # provider's ClosePrice for paper-PnL auditability.
+                    "requested_horizon_date": position.horizon_date.isoformat(),
+                    "actual_price_date": close.price_date.isoformat(),
+                    "price_source": close.source,
+                    "roll_policy": (
+                        "exact_match"
+                        if close.price_date == position.horizon_date
+                        else "previous_available_close"
+                    ),
                 },
                 timestamp=exit_time,
             )
+        return True

@@ -20,7 +20,7 @@ def session(tmp_path):
         yield s
 
 
-def _engine(session, *, kill_active=False):
+def _engine(session, *, kill_active=False, price_provider=None):
     from marketpulse.trading.clock import FakeClock
     from marketpulse.trading.forward_engine import ForwardExecutionEngine
     from marketpulse.trading.kill_switch import KillSwitchState
@@ -39,7 +39,7 @@ def _engine(session, *, kill_active=False):
     engine = ForwardExecutionEngine(
         repository=repo, clock=clock,
         kill_switch=ks, risk_gate=AlwaysApproveRiskGate(),
-        price_provider=StubPriceProvider(map={}),
+        price_provider=price_provider or StubPriceProvider(map={}),
     )
     return engine, repo, clock, ks
 
@@ -256,10 +256,21 @@ def test_cancel_order_idempotent_on_already_cancelled(session):
 
 
 def test_tick_materializes_entry_then_exit(session):
-    """E2E single-position lifecycle through tick()."""
-    from marketpulse.db.models import PaperCashLedger, PaperFill, PaperPosition
+    """E2E single-position lifecycle through tick().
 
-    engine, repo, clock, _ = _engine(session)
+    Lock 6b+L1: exit price now comes from PriceProvider — seed the stub
+    with a ClosePrice for the horizon date so the EXIT tick succeeds."""
+    from marketpulse.db.models import PaperCashLedger, PaperFill, PaperPosition
+    from marketpulse.trading.price_provider import ClosePrice, StubPriceProvider
+
+    horizon = date(2026, 5, 28)
+    provider = StubPriceProvider(map={
+        ("AAPL", horizon): ClosePrice(
+            price=Decimal("155.000000"),
+            price_date=horizon, requested_date=horizon, source="stub",
+        ),
+    })
+    engine, repo, clock, _ = _engine(session, price_provider=provider)
 
     # Initial deposit
     repo.ensure_initial_deposit(
@@ -326,11 +337,26 @@ def test_tick_is_idempotent(session):
 
 
 def test_tick_invariant_error_writes_audit_and_continues(session):
-    """6a-L4: horizon_price is None → ENGINE_INVARIANT_ERROR audit; other
-    positions in the same tick keep processing."""
-    from marketpulse.db.models import PaperAuditEvent, PaperOrder
+    """6a-L4: exit-path InvariantError → ENGINE_INVARIANT_ERROR audit; other
+    positions in the same tick keep processing.
 
-    engine, repo, _, _ = _engine(session)
+    Phase 6b+T7 update: the original test corrupted order.horizon_price to
+    None to trigger the InvariantError. Lock 6b+L1 sealed that path —
+    _materialize_exit no longer reads order.horizon_price. To preserve
+    6a-L4 coverage we instead corrupt the position's status to an illegal
+    value, which makes update_paper_position_exit's transition check raise
+    InvariantError (a non-price invariant)."""
+    from marketpulse.db.models import PaperAuditEvent, PaperPosition
+    from marketpulse.trading.price_provider import ClosePrice, StubPriceProvider
+
+    horizon = date(2026, 5, 28)
+    provider = StubPriceProvider(map={
+        ("AAPL", horizon): ClosePrice(
+            price=Decimal("155.000000"),
+            price_date=horizon, requested_date=horizon, source="stub",
+        ),
+    })
+    engine, repo, _, _ = _engine(session, price_provider=provider)
     repo.ensure_initial_deposit(
         amount=Decimal("10000"),
         timestamp=datetime(2026, 5, 21, tzinfo=UTC),
@@ -340,13 +366,19 @@ def test_tick_invariant_error_writes_audit_and_continues(session):
     engine.place_order(order_request=_request(strategy="ok"))
     engine.tick(as_of=date(2026, 5, 21))  # materialize entry
 
-    # Manually corrupt horizon_price to None on the order
-    bad = session.execute(select(PaperOrder)).scalars().first()
-    bad.horizon_price = None
-    session.commit()
+    # Inject a non-price invariant in the exit path: patch the
+    # repository's update_paper_position_exit to raise InvariantError.
+    # This exercises the same 6a-L4 catch+audit path the original test
+    # guarded, just via a different (still real) failure mode now that
+    # lock 6b+L1 sealed the horizon_price=None path.
+    from marketpulse.trading.types import InvariantError
 
-    # Now tick the horizon → should record ENGINE_INVARIANT_ERROR
-    result = engine.tick(as_of=date(2026, 5, 28))
+    def _raise(**kwargs):
+        raise InvariantError("synthetic exit-path invariant for 6a-L4 coverage")
+
+    repo.update_paper_position_exit = _raise  # type: ignore[method-assign]
+
+    result = engine.tick(as_of=horizon)
     assert len(result.errors) == 1
     assert result.errors[0].phase == "exit_materialization"
 
@@ -356,6 +388,9 @@ def test_tick_invariant_error_writes_audit_and_continues(session):
         ),
     ).scalars().all()
     assert len(audits) == 1
+    # And critically: the position is NOT closed (transaction rolled back).
+    pos = session.execute(select(PaperPosition)).scalars().first()
+    assert pos.status == "OPEN"
 
 
 def test_forward_engine_propagates_failed_gates_into_audit_context(tmp_path):
@@ -470,7 +505,7 @@ def test_forward_engine_requires_price_provider_kwarg(tmp_path):
         repo.ensure_initial_deposit(amount=Decimal("10000"), timestamp=clock.now())
         ks = KillSwitchState(env_var="MP_NEVER", repository=repo)
         import pytest
-        with pytest.raises(TypeError):
+        with pytest.raises(TypeError, match="price_provider"):
             ForwardExecutionEngine(
                 repository=repo, clock=clock, kill_switch=ks,
                 risk_gate=AlwaysApproveRiskGate(),
