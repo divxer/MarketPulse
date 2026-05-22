@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.12+ • SQLAlchemy 2 • existing alerts/notifier.py Protocol • httpx (already used) • argparse (stdlib).
 
-**Spec reference:** `docs/superpowers/specs/2026-05-22-phase-6g-observability-design.md` (23 locks: 6g-L1 .. 6g-L21 incl. L4a/L4b/L4c).
+**Spec reference:** `docs/superpowers/specs/2026-05-22-phase-6g-observability-design.md` (**21 numbered locks 6g-L1..6g-L21 + 3 L4 sublocks (L4a/L4b/L4c) = 23 lock entries total**).
 
 **Branch:** `plan/phase-6g-observability` (already checked out). Single squash-or-rebase PR at end of T9.
 
@@ -331,6 +331,8 @@ EOF
 
 All 3 helpers are read-only `select()` — must pass the architecture guard at `tests/architecture/test_repository_boundary.py`.
 
+**Production-write boundary (lock iii reminder):** the T2 *tests* directly INSERT `PaperAuditEvent` rows via `session.add(...)` to seed query fixtures. This is **test-only**. Production code MUST go through `Repository.write_audit_event` for ALL audit writes — the engine and risk-gate paths already do this, and 6g introduces no new audit write sites. If a future change starts writing audit rows from outside the repository wrapper, the lock-iii boundary test should catch it.
+
 - [ ] **Step 1: Write failing helper tests**
 
 Create `tests/trading/test_repository_observability_helpers.py`:
@@ -443,7 +445,7 @@ def test_kscs_in_period_returns_false_when_no_skip_since_flip(session):
     t = datetime(2026, 5, 22, 18, 0, tzinfo=UTC)
     _audit(session, event_type="KILL_SWITCH_FLIPPED",
            timestamp=t - timedelta(hours=2),
-           context={"active": True, "reason": "drawdown"})
+           context={"to_state": True, "reason": "drawdown"})
     repo = Repository(session=session)
     assert repo.kill_switch_cycle_skipped_in_active_period(before=t) is False
 
@@ -453,7 +455,7 @@ def test_kscs_in_period_returns_true_when_skip_exists_since_flip(session):
     t = datetime(2026, 5, 22, 18, 0, tzinfo=UTC)
     _audit(session, event_type="KILL_SWITCH_FLIPPED",
            timestamp=t - timedelta(hours=3),
-           context={"active": True})
+           context={"to_state": True})
     _audit(session, event_type="KILL_SWITCH_CYCLE_SKIPPED",
            timestamp=t - timedelta(hours=1),
            context={"tick_date": "2026-05-22"})
@@ -468,16 +470,16 @@ def test_kscs_in_period_resets_after_clear_and_re_flip(session):
     t = datetime(2026, 5, 22, 18, 0, tzinfo=UTC)
     _audit(session, event_type="KILL_SWITCH_FLIPPED",
            timestamp=t - timedelta(days=5),
-           context={"active": True})
+           context={"to_state": True})
     _audit(session, event_type="KILL_SWITCH_CYCLE_SKIPPED",
            timestamp=t - timedelta(days=4),
            context={"tick_date": "2026-05-17"})
     _audit(session, event_type="KILL_SWITCH_FLIPPED",
            timestamp=t - timedelta(days=3),
-           context={"active": False})
+           context={"to_state": False})
     _audit(session, event_type="KILL_SWITCH_FLIPPED",
            timestamp=t - timedelta(hours=2),
-           context={"active": True})
+           context={"to_state": True})
     # No skip yet in the NEW active period → False
     repo = Repository(session=session)
     assert repo.kill_switch_cycle_skipped_in_active_period(before=t) is False
@@ -488,7 +490,7 @@ def test_kscs_in_period_respects_before_cutoff(session):
     t = datetime(2026, 5, 22, 18, 0, tzinfo=UTC)
     _audit(session, event_type="KILL_SWITCH_FLIPPED",
            timestamp=t - timedelta(hours=3),
-           context={"active": True})
+           context={"to_state": True})
     # SKIP is AT `before` — must be excluded (strictly before)
     _audit(session, event_type="KILL_SWITCH_CYCLE_SKIPPED",
            timestamp=t, context={"tick_date": "2026-05-22"})
@@ -594,7 +596,7 @@ In `marketpulse/trading/repository.py`, after the existing `count_price_unavaila
             select(PaperAuditEvent.timestamp)
             .where(PaperAuditEvent.event_type == "KILL_SWITCH_FLIPPED")
             .where(
-                func.json_extract(PaperAuditEvent.context, "$.active") == 1
+                func.json_extract(PaperAuditEvent.context, "$.to_state") == 1
             )
             .where(PaperAuditEvent.timestamp < before)
             .order_by(desc(PaperAuditEvent.timestamp))
@@ -889,7 +891,7 @@ def test_kill_switch_flipped_active_true_is_critical():
     row = _Row(
         id=30, timestamp=_ts(), event_type="KILL_SWITCH_FLIPPED",
         reason="max_drawdown_exceeded",
-        context={"active": True, "reason": "max_drawdown_exceeded"},
+        context={"to_state": True, "reason": "max_drawdown_exceeded"},
     )
     out = select_critical_events(
         new_audit_rows=[row],
@@ -904,7 +906,7 @@ def test_kill_switch_flipped_active_false_is_critical():
     from marketpulse.observability.audit_projection import select_critical_events
     row = _Row(
         id=31, timestamp=_ts(), event_type="KILL_SWITCH_FLIPPED",
-        context={"active": False, "reason": "manual_reset"},
+        context={"to_state": False, "reason": "manual_reset"},
     )
     out = select_critical_events(
         new_audit_rows=[row],
@@ -1040,7 +1042,7 @@ def test_select_critical_events_preserves_audit_order():
     from marketpulse.observability.audit_projection import select_critical_events
     rows = [
         _Row(id=1, timestamp=_ts(), event_type="KILL_SWITCH_FLIPPED",
-             context={"active": True}),
+             context={"to_state": True}),
         _Row(id=2, timestamp=_ts(), event_type="PRICE_UNAVAILABLE",
              context={"ticker": "AAPL", "position_id": 1,
                       "attempt_count": 3}),
@@ -1553,16 +1555,34 @@ Append to `marketpulse/observability/audit_projection.py`:
 
 # === summarize_tick (lock 6g-L21) ===
 
-def _safe_decimal(value, default: str = "0") -> Decimal:
+def _safe_decimal(
+    value, default: str = "0", *,
+    field_name: str | None = None,
+    failures: "list[NotificationFailure] | None" = None,
+) -> Decimal:
     """Convert audit-context numeric (str / Decimal / int / float) to
     Decimal defensively. Returns Decimal(default) on any conversion
     failure rather than raising — heartbeat summary must never crash on
-    a malformed context."""
+    a malformed context.
+
+    If `field_name` AND `failures` are both supplied, a non-None value
+    that fails conversion appends a NotificationFailure(event_type=
+    "tick_summary", error=f"malformed_numeric:{field_name}") so the
+    operator can tell the heartbeat went through with a stub default
+    instead of real data. None values are treated as "missing" and do
+    NOT generate a failure (the audit row simply didn't carry the key).
+    """
+    if value is None:
+        return Decimal(default)
     try:
-        if value is None:
-            return Decimal(default)
         return Decimal(str(value))
-    except Exception:
+    except Exception as exc:
+        if field_name is not None and failures is not None:
+            failures.append(NotificationFailure(
+                event_type="tick_summary",
+                title="",
+                error=f"malformed_numeric:{field_name}:{type(exc).__name__}",
+            ))
         return Decimal(default)
 
 
@@ -1628,6 +1648,12 @@ def summarize_tick(
     (heartbeat discipline)."""
     cycle_status, failure = _resolve_cycle_status(new_audit_rows, tick_date)
 
+    # Auxiliary failures collected during numeric coercion (lock 6g-L21
+    # heartbeat discipline: summary always emits; malformed audit fields
+    # are recorded as supplementary NotificationFailure entries so the
+    # operator can tell the heartbeat went through with stub defaults).
+    aux_failures: list[NotificationFailure] = []
+
     orders_placed_detail: list[PlacedOrderDetail] = []
     orders_rejected_breakdown: list[tuple[str, str]] = []
     entries_filled: list[tuple[str, Decimal]] = []
@@ -1657,13 +1683,19 @@ def summarize_tick(
         elif et == "ORDER_ENTRY_FILLED":
             entries_filled.append((
                 str(ctx.get("ticker", "?")),
-                _safe_decimal(ctx.get("fill_price")),
+                _safe_decimal(ctx.get("fill_price"),
+                              field_name="fill_price",
+                              failures=aux_failures),
             ))
         elif et == "POSITION_CLOSED":
-            pnl = _safe_decimal(ctx.get("realized_pnl"))
+            pnl = _safe_decimal(ctx.get("realized_pnl"),
+                                field_name="realized_pnl",
+                                failures=aux_failures)
             positions_closed.append((
                 str(ctx.get("ticker", "?")),
-                _safe_decimal(ctx.get("exit_price")),
+                _safe_decimal(ctx.get("exit_price"),
+                              field_name="exit_price",
+                              failures=aux_failures),
                 pnl,
             ))
             total_realized += pnl
@@ -1684,8 +1716,19 @@ def summarize_tick(
         active_positions_count=active_positions_count,
         active_positions_with_pu=list(active_positions_with_pu_attempts),
     )
-    return summary, failure
+    # Combine cycle_status failure (if any) + numeric-coercion failures.
+    # Caller (paper_tick_notifier.py) extends NotificationResult.failures
+    # with this tuple — the heartbeat summary still ships.
+    all_failures = tuple(([failure] if failure is not None else []) + aux_failures)
+    return summary, all_failures
 ```
+
+> **Return-shape note:** `summarize_tick` now returns
+> `tuple[TickSummary, tuple[NotificationFailure, ...]]` (was `tuple[
+> TickSummary, NotificationFailure | None]`). The caller in T6 must
+> iterate the tuple rather than checking `is not None`. Spec 6g-L21
+> phrasing remains compatible — "optional" was always "0..N failures"
+> in spirit; the type just makes it explicit.
 
 - [ ] **Step 4: Run to verify tests pass**
 
@@ -1770,7 +1813,7 @@ def _ev(event_type, **kwargs):
 def test_render_kill_switch_flipped_active_true():
     from marketpulse.observability.templates import render_critical_event
     ev = _ev("KILL_SWITCH_FLIPPED",
-             context={"active": True, "reason": "max_drawdown_exceeded"})
+             context={"to_state": True, "reason": "max_drawdown_exceeded"})
     title, body = render_critical_event(ev)
     assert title == "🛑 Kill Switch FLIPPED"
     assert "max_drawdown_exceeded" in body
@@ -1780,7 +1823,7 @@ def test_render_kill_switch_flipped_active_true():
 def test_render_kill_switch_flipped_active_false():
     from marketpulse.observability.templates import render_critical_event
     ev = _ev("KILL_SWITCH_FLIPPED",
-             context={"active": False, "reason": "manual_reset"})
+             context={"to_state": False, "reason": "manual_reset"})
     title, body = render_critical_event(ev)
     assert title == "✅ Kill Switch CLEARED"
     assert "manual_reset" in body
@@ -2100,9 +2143,15 @@ def _hhmm_ny(ts: datetime) -> str:
 # === Critical event templates (spec § 4.2) ===
 
 def _render_kill_switch_flipped(ev: CriticalEvent) -> tuple[str, str]:
-    active = bool(ev.context.get("active"))
-    reason = ev.context.get("reason", ev.reason or "")
-    if active:
+    """Render KILL_SWITCH_FLIPPED. The audit row's context schema (per
+    marketpulse/trading/kill_switch.py L40-L60) is:
+        {"from_state": bool, "to_state": bool, "actor": str}
+    `reason` lives on the audit row's reason column (not context).
+    `to_state=True` means the switch is now ACTIVE (flipped to stop).
+    `to_state=False` means it just CLEARED."""
+    to_state = bool(ev.context.get("to_state"))
+    reason = ev.reason or ""   # reason is a column, not context field
+    if to_state:
         title = "🛑 Kill Switch FLIPPED"
     else:
         title = "✅ Kill Switch CLEARED"
@@ -2435,7 +2484,7 @@ def test_disabled_path_emits_no_notifications(session, monkeypatch):
     since = datetime(2026, 5, 22, 21, 0, tzinfo=UTC)
     _seed_audit(session, event_type="KILL_SWITCH_FLIPPED",
                 timestamp=since + timedelta(minutes=10),
-                context={"active": True, "reason": "drawdown"})
+                context={"to_state": True, "reason": "drawdown"})
     _seed_audit(session, event_type="ORDER_PLACED",
                 timestamp=since + timedelta(minutes=15),
                 strategy="momentum",
@@ -2582,7 +2631,8 @@ def test_price_unavailable_attempt_3_critical_plus_summary(session, monkeypatch)
         repository=repo, notifier=notifier,
         clock=_clock(since + timedelta(minutes=10)),
     )
-    assert result.critical_pushed == ("PRICE_UNAVAILABLE",)
+    assert len(result.critical_pushed) == 1
+    assert result.critical_pushed[0].event_type == "PRICE_UNAVAILABLE"
     assert result.summary_pushed is True
     assert len(notifier.sent) == 2
     # Critical first, then summary
@@ -2678,7 +2728,8 @@ def test_position_closed_with_prior_pu_recovery_critical(session, monkeypatch):
         repository=repo, notifier=notifier,
         clock=_clock(since + timedelta(minutes=10)),
     )
-    assert result.critical_pushed == ("POSITION_CLOSED",)
+    assert len(result.critical_pushed) == 1
+    assert result.critical_pushed[0].event_type == "POSITION_CLOSED"
     assert result.summary_pushed is True
     assert notifier.sent[0][0] == "✅ Position Recovered — AAPL"
 
@@ -2714,7 +2765,7 @@ def test_kill_switch_flipped_between_ticks_picked_up(session, monkeypatch):
     flip_ts = datetime(2026, 5, 22, 16, 0, tzinfo=UTC)
     _seed_audit(session, event_type="KILL_SWITCH_FLIPPED",
                 timestamp=flip_ts,
-                context={"active": True, "reason": "manual"})
+                context={"to_state": True, "reason": "manual"})
     # New tick starts later
     since = datetime(2026, 5, 22, 21, 0, tzinfo=UTC)
     _seed_audit(session, event_type="TICK_COMPLETED",
@@ -2728,7 +2779,8 @@ def test_kill_switch_flipped_between_ticks_picked_up(session, monkeypatch):
         repository=repo, notifier=notifier,
         clock=_clock(since + timedelta(minutes=10)),
     )
-    assert "KILL_SWITCH_FLIPPED" in result.critical_pushed
+    pushed_event_types = [p.event_type for p in result.critical_pushed]
+    assert "KILL_SWITCH_FLIPPED" in pushed_event_types
     titles = [s[0] for s in notifier.sent]
     assert "🛑 Kill Switch FLIPPED" in titles
 
@@ -2758,7 +2810,7 @@ def test_kill_switch_cycle_skipped_dedup(session, monkeypatch):
     flip_ts = datetime(2026, 5, 21, 14, 0, tzinfo=UTC)
     _seed_audit(session, event_type="KILL_SWITCH_FLIPPED",
                 timestamp=flip_ts,
-                context={"active": True, "reason": "drawdown"})
+                context={"to_state": True, "reason": "drawdown"})
 
     # === Tick D (first skip): the SKIP is INSIDE the window
     since_d = datetime(2026, 5, 22, 21, 0, tzinfo=UTC)
@@ -2835,7 +2887,8 @@ def test_engine_invariant_error_admitted_without_tick_date(session, monkeypatch)
         repository=repo, notifier=notifier,
         clock=_clock(since + timedelta(minutes=10)),
     )
-    assert "ENGINE_INVARIANT_ERROR" in result.critical_pushed
+    pushed_event_types = [p.event_type for p in result.critical_pushed]
+    assert "ENGINE_INVARIANT_ERROR" in pushed_event_types
     titles = [s[0] for s in notifier.sent]
     assert "🛑 Engine Invariant Error" in titles
 
@@ -2865,7 +2918,7 @@ def test_notifier_returning_false_is_recorded_and_proceeds(session, monkeypatch)
     since = datetime(2026, 5, 22, 21, 0, tzinfo=UTC)
     _seed_audit(session, event_type="KILL_SWITCH_FLIPPED",
                 timestamp=since + timedelta(minutes=1),
-                context={"active": True, "reason": "drawdown"})
+                context={"to_state": True, "reason": "drawdown"})
     _seed_audit(session, event_type="TICK_COMPLETED",
                 timestamp=since + timedelta(minutes=5),
                 context={"tick_date": "2026-05-22", "status": "completed"})
@@ -2921,7 +2974,87 @@ def test_notifier_raising_does_not_propagate(session, monkeypatch):
     assert any(f.error.startswith("send_raised:") for f in result.failures)
 
 
-# === 11. Tick-window isolation (lock 6g-L7) ===
+# === 11. Tick-window isolation (lock 6g-L7) + boundary cases ===
+
+def test_audit_row_at_exact_since_is_included(session, monkeypatch):
+    """Boundary: a row whose timestamp == since (the inclusive lower
+    bound) IS included. Test pins the closed-on-both-ends semantic of
+    the query window."""
+    monkeypatch.setenv("MP_PAPER_NOTIFICATIONS_ENABLED", "true")
+    get_settings.cache_clear()
+    since = datetime(2026, 5, 22, 21, 30, tzinfo=UTC)
+    # Seed PRICE_UNAVAILABLE attempt 3 EXACTLY at `since`
+    _audit(session, event_type="PRICE_UNAVAILABLE", timestamp=since,
+           context={"position_id": 1, "ticker": "AAPL",
+                    "attempt_count": 3, "horizon_date": "2026-05-22",
+                    "as_of": "2026-05-22", "source": "yfinance",
+                    "lookback_days": 10})
+    session.flush()
+    repo = Repository(session=session)
+    notifier = CapturingNotifier()
+    result = notify_paper_tick_events(
+        since=since, tick_date=date(2026, 5, 22),
+        repository=repo, notifier=notifier,
+        clock=_clock(since + timedelta(seconds=10)),
+    )
+    pushed_event_types = [p.event_type for p in result.critical_pushed]
+    assert "PRICE_UNAVAILABLE" in pushed_event_types, (
+        "row at timestamp == since should be included (closed lower bound)"
+    )
+
+
+def test_audit_row_at_exact_notify_started_at_is_included(session, monkeypatch):
+    """Boundary: a row whose timestamp == notify_started_at (the upper
+    bound) IS included. notify_started_at is captured INSIDE the
+    entrypoint via clock.now(), so a row written at exactly that
+    instant must land in the window."""
+    monkeypatch.setenv("MP_PAPER_NOTIFICATIONS_ENABLED", "true")
+    get_settings.cache_clear()
+    since = datetime(2026, 5, 22, 21, 30, tzinfo=UTC)
+    notify_at = since + timedelta(seconds=10)
+    _audit(session, event_type="PRICE_UNAVAILABLE", timestamp=notify_at,
+           context={"position_id": 1, "ticker": "AAPL",
+                    "attempt_count": 3, "horizon_date": "2026-05-22",
+                    "as_of": "2026-05-22", "source": "yfinance",
+                    "lookback_days": 10})
+    session.flush()
+    repo = Repository(session=session)
+    notifier = CapturingNotifier()
+    result = notify_paper_tick_events(
+        since=since, tick_date=date(2026, 5, 22),
+        repository=repo, notifier=notifier,
+        clock=_clock(notify_at),    # clock.now() returns notify_at exactly
+    )
+    pushed_event_types = [p.event_type for p in result.critical_pushed]
+    assert "PRICE_UNAVAILABLE" in pushed_event_types, (
+        "row at timestamp == notify_started_at must be included "
+        "(closed upper bound)"
+    )
+
+
+def test_audit_row_one_microsecond_before_since_is_excluded(session, monkeypatch):
+    """Boundary: a row written one microsecond before `since` is NOT
+    in the window — guards against an off-by-one that would double-push
+    on tick reprocess."""
+    monkeypatch.setenv("MP_PAPER_NOTIFICATIONS_ENABLED", "true")
+    get_settings.cache_clear()
+    since = datetime(2026, 5, 22, 21, 30, tzinfo=UTC)
+    _audit(session, event_type="PRICE_UNAVAILABLE",
+           timestamp=since - timedelta(microseconds=1),
+           context={"position_id": 1, "ticker": "AAPL",
+                    "attempt_count": 3, "horizon_date": "2026-05-22",
+                    "as_of": "2026-05-22", "source": "yfinance",
+                    "lookback_days": 10})
+    session.flush()
+    repo = Repository(session=session)
+    notifier = CapturingNotifier()
+    result = notify_paper_tick_events(
+        since=since, tick_date=date(2026, 5, 22),
+        repository=repo, notifier=notifier,
+        clock=_clock(since + timedelta(seconds=10)),
+    )
+    assert result.critical_pushed == ()
+
 
 def test_prior_run_audit_rows_filtered_out(session, monkeypatch):
     """Lock 6g-L7: rows with timestamp < since are NOT picked up.
@@ -3030,9 +3163,30 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 
 @dataclass(frozen=True)
+class CriticalPush:
+    """One critical push successfully dispatched. Carries enough info
+    for republish_cli stdout + per-event test assertions WITHOUT
+    requiring the test to re-query the audit table.
+
+    Note: the per-event audit_id disambiguates multiple same-event-type
+    rows in one tick (e.g., three ENGINE_INVARIANT_ERROR rows produce
+    three CriticalPush entries with distinct audit_id values — the
+    `critical_pushed` tuple of bare event_type strings would not).
+    """
+    event_type: str
+    audit_id: int
+    title: str    # the rendered title that was sent
+
+
+@dataclass(frozen=True)
 class NotificationResult:
-    """Returned for testability + republish_cli output (spec § 5.2)."""
-    critical_pushed: tuple[str, ...]   # event_type strings actually pushed
+    """Returned for testability + republish_cli output (spec § 5.2).
+
+    `critical_pushed` is a tuple of `CriticalPush` records (NOT bare
+    event_type strings) so the operator can distinguish multiple
+    same-event-type pushes within one tick — see CriticalPush docstring.
+    """
+    critical_pushed: tuple[CriticalPush, ...]
     summary_pushed: bool
     failures: tuple[NotificationFailure, ...]
     summary_title: str | None = None
@@ -3040,10 +3194,15 @@ class NotificationResult:
 
 
 def _is_enabled() -> bool:
-    """Lock 6g-L15: master switch. Read fresh from Settings every call
-    so test monkeypatch of env takes effect."""
-    from marketpulse.config import Settings
-    return Settings().paper_notifications_enabled
+    """Lock 6g-L15: master switch. Reads via `get_settings()` so we
+    share the project's single canonical settings source — then calls
+    `get_settings.cache_clear()` is the canonical way to refresh after
+    a monkeypatch in tests. (Earlier draft used `Settings()` directly
+    to avoid cache; that worked but bypassed the project convention.
+    Tests now use `monkeypatch.setenv(...)` followed by
+    `get_settings.cache_clear()`.)"""
+    from marketpulse.config import get_settings
+    return get_settings().paper_notifications_enabled
 
 
 def _query_window_rows(
@@ -3291,18 +3450,23 @@ def notify_paper_tick_events(
         criticals = []
 
     # Dispatch critical pushes (one per event; lock 6g-L14 isolation).
-    critical_pushed: list[str] = []
+    # Each successful dispatch produces a CriticalPush record so the
+    # operator can disambiguate multiple same-event-type rows in one tick.
+    critical_pushed: list[CriticalPush] = []
     for ev in criticals:
         rendered = _safe_render_critical(ev, failures)
         if rendered is None:
             continue
         title, body = rendered
         # Lock 6g-L11: url=None in MVP.
-        _safe_send(
+        sent_ok = _safe_send(
             notifier, title=title, body=body, url=None,
             event_type=ev.event_type, failures=failures,
         )
-        critical_pushed.append(ev.event_type)
+        if sent_ok:
+            critical_pushed.append(CriticalPush(
+                event_type=ev.event_type, audit_id=ev.audit_id, title=title,
+            ))
 
     # Build + dispatch summary.
     try:
@@ -3316,7 +3480,7 @@ def notify_paper_tick_events(
     )
 
     try:
-        summary, summary_failure = summarize_tick(
+        summary, summary_failures = summarize_tick(
             new_audit_rows=rows,
             tick_date=tick_date,
             cash_balance_end=cash_balance_end,
@@ -3335,8 +3499,9 @@ def notify_paper_tick_events(
             summary_pushed=False,
             failures=tuple(failures),
         )
-    if summary_failure is not None:
-        failures.append(summary_failure)
+    # summary_failures is a tuple of 0..N NotificationFailure (lock 6g-L21
+    # malformed_numeric annotations + missing_tick_completed_row).
+    failures.extend(summary_failures)
 
     rendered_summary = _safe_render_summary(summary, failures)
     summary_pushed = False
@@ -3510,6 +3675,34 @@ def test_paper_trading_tick_job_default_notifier_is_settings_driven(
 
     # Should not raise; Noop notifier swallows everything
     paper_trading_tick_job()
+
+
+def test_paper_trading_tick_job_signature_compatible_with_apscheduler():
+    """APScheduler invokes job callables with no positional args. We
+    keep `notifier` keyword-only with a default so the scheduler keeps
+    working unchanged. Verify by inspection that:
+      - `paper_trading_tick_job` is callable with zero arguments
+      - `notifier` is keyword-only with a default of None
+    """
+    import inspect
+
+    from marketpulse.scheduler.paper_trading_tick import paper_trading_tick_job
+
+    sig = inspect.signature(paper_trading_tick_job)
+    # All parameters must be keyword-only with defaults — APScheduler
+    # passes no args.
+    for name, param in sig.parameters.items():
+        assert param.kind in (
+            inspect.Parameter.KEYWORD_ONLY,
+            inspect.Parameter.VAR_KEYWORD,
+        ), f"param {name!r} is not keyword-only — would break APScheduler call"
+        assert param.default is not inspect.Parameter.empty, (
+            f"param {name!r} has no default — would break APScheduler call"
+        )
+
+    # `notifier` specifically must exist and default to None
+    assert "notifier" in sig.parameters
+    assert sig.parameters["notifier"].default is None
 
 
 def test_paper_trading_tick_job_notify_failure_does_not_propagate(
@@ -3872,10 +4065,10 @@ def _format_body_preview(body: str | None) -> str:
 
 def _print_result(result: NotificationResult) -> None:
     """Format NotificationResult to stdout per spec §5.2."""
-    # 1. critical_pushed
+    # 1. critical_pushed — each entry is a CriticalPush record
     if result.critical_pushed:
-        for event_type in result.critical_pushed:
-            print(f"pushed: {event_type}")
+        for push in result.critical_pushed:
+            print(f"pushed: {push.event_type} (audit_id={push.audit_id}) :: {push.title}")
     else:
         print("pushed: (none)")
 
@@ -4006,7 +4199,7 @@ EOF
 
 **Files:** none new; verification + PR.
 
-**Locks-Referenced:** all 23 locks (final coverage check). Test strategy itself satisfies lock 6g-L16 (4-layer test plan: pure projection, templates, notifier entrypoint with seeded DB, scheduler E2E).
+**Locks-Referenced:** all 21 numbered locks + 3 L4 sublocks = 23 entries (final coverage check). Test strategy itself satisfies lock 6g-L16 (4-layer test plan: pure projection, templates, notifier entrypoint with seeded DB, scheduler E2E).
 
 - [ ] **Step 1: Full test suite green**
 
@@ -4090,7 +4283,7 @@ for lock in L1 L2 L3 L4a L4b L4c L5 L6 L7 L8 L9 L10 L11 L12 L13 L14 L15 L16 L17 
     if [ "$count" -eq 0 ]; then echo "MISSING: 6g-$lock"; fi
 done
 ```
-Expected: no MISSING output (all 23 locks referenced at least once in plan tasks).
+Expected: no MISSING output (all 21 numbered locks + 3 L4 sublocks = 23 lock entries referenced at least once in plan tasks).
 
 - [ ] **Step 8: Working tree clean**
 
@@ -4189,7 +4382,7 @@ Hand off to `superpowers:finishing-a-development-branch` to drive merge.
 | 6g-L20 | T2 (latest_tick_completed_timestamp helper), T6 (asymmetric extended window for KILL_SWITCH_FLIPPED) |
 | 6g-L21 | T4 (summarize_tick TICK_COMPLETED → KSCS → "unknown" fallback; cash/positions from canonical tables) |
 
-All 23 locks accounted for.
+All **21 numbered locks + 3 L4 sublocks = 23 entries** accounted for.
 
 ### Placeholder scan
 
