@@ -16,6 +16,7 @@ from pathlib import Path
 
 from marketpulse.backtest.allocation import allocate_for_day
 from marketpulse.backtest.sector import get_sector
+from marketpulse.data.yfinance_client import YFinanceClient
 from marketpulse.db.base import session_scope
 from marketpulse.trading import daily_cycle
 from marketpulse.trading.bid_aggregator import BidAggregator
@@ -23,7 +24,7 @@ from marketpulse.trading.calendar import NYTradingCalendar
 from marketpulse.trading.clock import WallClock
 from marketpulse.trading.forward_engine import ForwardExecutionEngine
 from marketpulse.trading.kill_switch import KillSwitchState
-from marketpulse.trading.price_provider import StubPriceProvider
+from marketpulse.trading.price_provider import YFinancePriceProvider
 from marketpulse.trading.repository import Repository
 from marketpulse.trading.risk_gates import (
     RiskConfigProvider,
@@ -64,9 +65,10 @@ def paper_trading_tick_job() -> None:
             clock=clock,
             sector_provider=strict_sector,
         )
-        # TODO(6b+T9): replace StubPriceProvider with YFinancePriceProvider.
-        # T3 shim: map-only stub (no `default` kwarg per lock 6b+L3).
-        price_provider = StubPriceProvider(map={})
+        # 6b+T9: production paper-trading uses real yfinance closes for
+        # exit P&L. Provider is injected into the engine (lock 6b+L2), NOT
+        # threaded through daily_cycle.run (lock 6b+L1, T8).
+        price_provider = YFinancePriceProvider(client=YFinanceClient())
         engine = ForwardExecutionEngine(
             repository=repository, clock=clock,
             kill_switch=kill_switch, risk_gate=risk_gate,
