@@ -17,10 +17,12 @@ from marketpulse.trading.risk_gates.config_provider import (
     SectorExposureConfig,
     StrategyRiskConfig,
 )
+from marketpulse.trading.risk_gates.market_hours import MarketHoursGate
 
 __all__ = [
     "DailyLossConfig",
     "MarketHoursConfig",
+    "MarketHoursGate",
     "RiskConfigProvider",
     "RiskGateConfig",
     "SectorExposureConfig",
