@@ -134,11 +134,14 @@ def _make_deps(session, *, clock, allocator, horizon_price_map=None):
         price_provider=price_provider,
     )
     aggregator = BidAggregator(session=session, calendar=calendar)
+    # T8 / lock 6b+L1: daily_cycle.run no longer accepts a price_provider
+    # kwarg. The engine owns the provider; keep the local reference only
+    # for the ForwardExecutionEngine ctor above.
+    _ = price_provider
     return {
         "clock": clock, "engine": engine, "repository": repo,
         "bid_aggregator": aggregator, "allocator": allocator,
         "calendar": calendar, "kill_switch": ks,
-        "price_provider": price_provider,
     }
 
 
@@ -445,7 +448,6 @@ def test_e2e_phase6b_17_30_ny_happy_path(tmp_path, monkeypatch):
             clock=clock, engine=engine, repository=repo,
             bid_aggregator=BidAggregator(session=s, calendar=calendar),
             allocator=alloc, calendar=calendar, kill_switch=ks,
-            price_provider=StubPriceProvider(map={}),
         )
         assert result.orders_placed == 1
         assert result.cycle_status == "completed"
@@ -533,7 +535,6 @@ def test_e2e_phase6b_sector_cap_denial_writes_per_gate_audit(tmp_path):
             clock=clock, engine=engine, repository=repo,
             bid_aggregator=BidAggregator(session=s, calendar=NYTradingCalendar()),
             allocator=alloc, calendar=NYTradingCalendar(), kill_switch=ks,
-            price_provider=StubPriceProvider(map={}),
         )
         assert result.orders_placed == 0
         assert result.orders_rejected == 1

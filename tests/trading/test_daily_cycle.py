@@ -89,11 +89,15 @@ def _make_deps(session, *, fake_now, allocator):
         price_provider=price_provider,
     )
     aggregator = BidAggregator(session=session, calendar=calendar)
+    # T8 / lock 6b+L1: daily_cycle.run no longer takes a price_provider
+    # kwarg — the engine owns the provider and uses it at exit time.
+    # Keep the local `price_provider` reference for the engine ctor; do
+    # NOT thread it into the returned deps bundle.
+    _ = price_provider
     return {
         "clock": clock, "engine": engine, "repository": repo,
         "bid_aggregator": aggregator, "allocator": allocator,
         "calendar": calendar, "kill_switch": ks,
-        "price_provider": price_provider,
     }
 
 
@@ -287,3 +291,60 @@ def test_daily_cycle_forward_writes_horizon_price_null(session):
         "see a non-None value here, daily_cycle._make_order_request is "
         "passing winner.horizon_price through instead of forcing None."
     )
+
+
+def test_daily_cycle_run_rejects_price_provider_kwarg(session):
+    """T8: price_provider kwarg removed from daily_cycle.run (breaking change)."""
+    from marketpulse.trading import daily_cycle
+    from marketpulse.trading.price_provider import StubPriceProvider
+
+    deps = _make_deps(
+        session,
+        fake_now=datetime(2026, 5, 21, 21, 30, tzinfo=UTC),
+        allocator=_stub_allocator(expected_winners=[]),
+    )
+    # Adding price_provider should raise TypeError
+    with pytest.raises(TypeError, match="price_provider|unexpected"):
+        daily_cycle.run(**deps, price_provider=StubPriceProvider(map={}))
+
+
+def test_daily_cycle_forward_mode_paper_order_horizon_price_is_null(session):
+    """Lock 6b+L1: forward mode never writes horizon_price to paper_order."""
+    from marketpulse.db.models import PaperOrder
+    from marketpulse.trading import daily_cycle
+
+    deps = _make_deps(
+        session,
+        fake_now=datetime(2026, 5, 21, 21, 30, tzinfo=UTC),
+        allocator=_stub_allocator(expected_winners=[
+            _winner_for("AAPL", "momentum", date(2026, 5, 21)),
+        ]),
+    )
+    daily_cycle.run(**deps)
+    orders = session.execute(select(PaperOrder)).scalars().all()
+    assert len(orders) == 1
+    assert orders[0].horizon_price is None
+
+
+def test_daily_cycle_tick_completed_includes_price_unavailable_count(session):
+    """T8 / Lock 6b+L11: TICK_COMPLETED.context surfaces
+    engine.last_price_unavailable_count(). With a no-op tick (no OPEN
+    positions to exit), the count is 0 — but the key must always be
+    present for forward-replay analytics."""
+    from marketpulse.db.models import PaperAuditEvent
+    from marketpulse.trading import daily_cycle
+
+    deps = _make_deps(
+        session,
+        fake_now=datetime(2026, 5, 21, 21, 30, tzinfo=UTC),
+        allocator=_stub_allocator(expected_winners=[]),
+    )
+    daily_cycle.run(**deps)
+    tc_audits = session.execute(
+        select(PaperAuditEvent)
+        .where(PaperAuditEvent.event_type == "TICK_COMPLETED"),
+    ).scalars().all()
+    assert len(tc_audits) == 1
+    # Context has the new key (value 0 since no OPEN positions to exit).
+    assert "price_unavailable_count" in tc_audits[0].context
+    assert tc_audits[0].context["price_unavailable_count"] == 0

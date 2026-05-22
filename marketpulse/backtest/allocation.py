@@ -118,6 +118,11 @@ class AllocationWinner:
     event_price: float
     horizon_date: date
     horizon_price: float | None
+    # Phase 5 backtest: filled by simulator from historical data.
+    # Phase 6+ forward mode: left None; the ForwardExecutionEngine
+    # fetches the actual close at exit time via PriceProvider
+    # (lock 6b+L1). daily_cycle does NOT thread this field into
+    # OrderRequest — it forces None at the boundary.
     quantity: int
     weight: float
     raw_bid_weight: float | None

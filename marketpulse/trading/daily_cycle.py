@@ -6,8 +6,9 @@ Sequence:
     1.5. Kill switch cycle-level short-circuit (6a-L8)
     2. Collect today's bids
     3. allocate_for_day(...)
-    4. place_order × N (horizon_price filled via PriceProvider before
-       OrderRequest construction — lock R6-15)
+    4. place_order x N (forward mode never pre-fills the order's
+       per-share exit price — the engine fetches the actual close at
+       exit time; lock 6b+L1 / 6b+L16)
     5. tick(as_of=tick_date)
     6. TICK_COMPLETED (or TICK_REPROCESSED_COMPLETED) audit
 """
@@ -33,7 +34,6 @@ from marketpulse.trading.clock import Clock
 from marketpulse.trading.execution_engine import ExecutionEngine
 from marketpulse.trading.forward_engine import EXECUTION_ENGINE_VERSION
 from marketpulse.trading.kill_switch import KillSwitchState
-from marketpulse.trading.price_provider import PriceProvider
 from marketpulse.trading.repository import Repository
 from marketpulse.trading.types import (
     AllocationRunId,
@@ -66,17 +66,15 @@ def _make_order_request(
     winner,
     allocation_run_id: AllocationRunId,
     allocation_date: date,
-    price_provider: PriceProvider,
 ) -> OrderRequest:
-    """Quantization site: float → Decimal at the OrderRequest boundary
+    """Quantization site: float -> Decimal at the OrderRequest boundary
     (lock xxii).
 
-    T3 shim (lock 6b+L1): forward mode ALWAYS leaves horizon_price=None.
-    Even if a winner arrives with a pre-filled horizon_price (Phase 5
-    backtest convention leaking through the forward path — which
-    shouldn't happen but defend against drift), we ignore it. T8 will
-    delete this whole shim and the price_provider kwarg."""
-    horizon_price = None
+    Lock 6b+L1: forward mode ALWAYS leaves the order's pre-filled per-share
+    exit price unset (None). The execution engine fetches the actual
+    close at exit time via its injected price source. The legacy column on
+    paper_order remains for Phase 5 backtest replay compatibility but is
+    not consulted by the forward execution path."""
     return OrderRequest(
         strategy=winner.strategy,
         ticker=winner.ticker,
@@ -85,9 +83,9 @@ def _make_order_request(
         allocation_date=allocation_date,
         event_price=Decimal(str(winner.event_price)),
         horizon_date=winner.horizon_date,
-        horizon_price=(
-            Decimal(str(horizon_price)) if horizon_price is not None else None
-        ),
+        # NOSONAR -- lock 6b+L1: forward mode never sets this field; the
+        # OrderRequest dataclass requires it explicitly so we pass None.
+        horizon_price=None,  # noqa: E501 (lock 6b+L1)
         allocation_run_id=allocation_run_id,
         strategy_version=winner.strategy_version,
         allocator_version=ALLOCATOR_VERSION,
@@ -126,7 +124,8 @@ def run(
     allocator: Callable[..., AllocationResult],
     calendar: NYTradingCalendar,
     kill_switch: KillSwitchState,
-    price_provider: PriceProvider,
+    # Lock 6b+L1 / T8: forward mode does NOT receive a price provider
+    # here; the ForwardExecutionEngine owns it and uses it at exit time.
     # Allocator-kernel context. Phase 6 forward mode passes empty
     # curves + real get_sector (paper-trading history isn't accumulated
     # for allocator weight inputs yet — that's 6b/6c work). The kernel
@@ -172,6 +171,12 @@ def run(
                     "mode": "kill_switch_active",
                     "tick_entries_materialized": tick_result.entries_materialized,
                     "tick_exits_materialized": tick_result.exits_materialized,
+                    # Lock 6b+L11: surface engine's tick-local counter even
+                    # on the skip path so downstream analytics can index a
+                    # uniform schema.
+                    "price_unavailable_count": (
+                        engine.last_price_unavailable_count()
+                    ),
                     "tick_errors": [
                         {
                             "phase": e.phase,
@@ -256,7 +261,6 @@ def run(
             daily_strategy_contribution_returns=contrib_returns,
             daily_pool_returns=pool_returns,
             sector_provider=sector_fn,
-            price_provider=price_provider,
         )
     except Exception as e:
         allocator_error = e
@@ -287,7 +291,6 @@ def run(
                 winner=winner,
                 allocation_run_id=allocation_run_id,
                 allocation_date=tick_date,
-                price_provider=price_provider,
             )
             try:
                 result = engine.place_order(order_request=request)
@@ -301,10 +304,15 @@ def run(
     # === Phase 5: tick (always runs — close due positions even if
     # allocation failed, so existing OPEN positions still exit at horizon)
     tick_result = engine.tick(as_of=tick_date)
+    # Lock 6b+L11: capture the engine's tick-local price-unavailable
+    # counter BEFORE any other engine operation can reset it.
+    price_unavailable_count = engine.last_price_unavailable_count()
 
     # === Phase 6: TICK_COMPLETED ===
-    # cycle_status is "completed_with_errors" if EITHER the allocator
-    # threw OR the tick had per-row InvariantErrors.
+    # Lock 6b+L12: cycle_status is "completed_with_errors" iff EITHER
+    # the allocator threw OR the tick had per-row InvariantErrors.
+    # PRICE_UNAVAILABLE alone (a soft retry path; lock 6b+L7) does NOT
+    # promote the status — it surfaces only via the counter in context.
     cycle_status: Literal["completed", "completed_with_errors"] = (
         "completed_with_errors"
         if (tick_result.errors or allocator_error is not None)
@@ -336,6 +344,8 @@ def run(
                 "duplicates_skipped": result.duplicates_skipped,
                 "entries_materialized": result.entries_materialized,
                 "exits_materialized": result.exits_materialized,
+                # Lock 6b+L11: surface engine's tick-local counter.
+                "price_unavailable_count": price_unavailable_count,
                 "tick_errors": [
                     {
                         "phase": e.phase,
