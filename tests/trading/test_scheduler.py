@@ -26,7 +26,10 @@ def test_scheduler_entrypoint_is_thin():
         line for line in src.splitlines()
         if line.strip() and not line.strip().startswith("#")
     ])
-    assert line_count < 60, (
+    # Phase 6b raised the cap from <60 to <90: the composition-root role
+    # (lock 6b-L15) requires constructing 4 risk gates + RiskConfigProvider,
+    # which legitimately grows the DI wiring. Still small — no business logic.
+    assert line_count < 90, (
         f"scheduler entrypoint too thick: {line_count} non-comment lines"
     )
 
@@ -35,3 +38,40 @@ def test_scheduler_entrypoint_is_thin():
         "daily_cycle.run(" in src
         or "from marketpulse.trading import daily_cycle" in src
     )
+
+
+def test_paper_trading_tick_uses_composite_risk_gate(monkeypatch, tmp_path):
+    """6b-T17 DI swap: paper_trading_tick_job must construct a
+    CompositeRiskGate (not AlwaysApproveRiskGate)."""
+    import marketpulse.scheduler.paper_trading_tick as m
+    from marketpulse.db import base as db_base
+    from marketpulse.db.base import Base
+    from marketpulse.trading.risk_gates.composite import CompositeRiskGate
+
+    captured = {}
+
+    real_engine_cls = m.ForwardExecutionEngine
+
+    class _SpyEngine(real_engine_cls):
+        def __init__(self, *args, **kwargs):
+            captured["risk_gate"] = kwargs.get("risk_gate")
+            super().__init__(*args, **kwargs)
+
+        def tick(self, *, as_of):
+            from marketpulse.trading.types import TickResult
+            return TickResult(as_of=as_of, entries_materialized=0,
+                              exits_materialized=0, errors=())
+
+    monkeypatch.setattr(m, "ForwardExecutionEngine", _SpyEngine)
+
+    # Set up an isolated per-test SQLite DB with the paper_* tables created
+    # so the real session_scope context inside paper_trading_tick_job works.
+    db_url = f"sqlite:///{tmp_path / 'test.db'}"
+    db_base.init_engine(db_url)
+    Base.metadata.create_all(db_base.get_engine())
+    try:
+        m.paper_trading_tick_job()
+    finally:
+        db_base.reset_engine()
+
+    assert isinstance(captured["risk_gate"], CompositeRiskGate)
