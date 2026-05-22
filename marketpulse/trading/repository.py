@@ -591,3 +591,122 @@ class Repository:
                 == position_id
             )
         ).scalar() or 0
+
+    # === Phase 6g observability helpers (read-only) ===
+
+    def positions_with_prior_price_unavailable(
+        self,
+        *,
+        position_ids: list[int],
+        before: datetime,
+    ) -> set[int]:
+        """Return position IDs with PRICE_UNAVAILABLE history before cutoff.
+
+        Lock 6g-L17: batch recovery helper. "Prior" is strictly before the
+        supplied timestamp so concurrent rows do not qualify as recovery
+        history.
+        """
+        if not position_ids:
+            return set()
+
+        position_id_expr = func.json_extract(PaperAuditEvent.context, "$.position_id")
+        rows = self._session.execute(
+            select(position_id_expr)
+            .where(PaperAuditEvent.event_type == AuditEventType.PRICE_UNAVAILABLE.value)
+            .where(PaperAuditEvent.timestamp < before)
+            .where(position_id_expr.in_(position_ids))
+            .distinct()
+        ).all()
+        return {int(row[0]) for row in rows if row[0] is not None}
+
+    def kill_switch_cycle_skipped_in_active_period(
+        self,
+        *,
+        before: datetime,
+    ) -> bool:
+        """Return whether the active kill-switch period already had a skip.
+
+        Lock 6g-L5: inspect the most recent KILL_SWITCH_FLIPPED before the
+        cutoff, regardless of state. If the latest flip cleared the switch or
+        no flip exists, the current skip is not deduped.
+        """
+        latest_flip = self._session.execute(
+            select(
+                PaperAuditEvent.timestamp,
+                func.json_extract(PaperAuditEvent.context, "$.to_state"),
+            )
+            .where(
+                PaperAuditEvent.event_type
+                == AuditEventType.KILL_SWITCH_FLIPPED.value
+            )
+            .where(PaperAuditEvent.timestamp < before)
+            .order_by(desc(PaperAuditEvent.timestamp))
+            .limit(1)
+        ).first()
+        if latest_flip is None:
+            return False
+
+        flip_ts, flip_to_state = latest_flip
+        if flip_to_state not in (True, 1):
+            return False
+
+        skip_exists = self._session.execute(
+            select(func.count(PaperAuditEvent.id))
+            .where(
+                PaperAuditEvent.event_type
+                == AuditEventType.KILL_SWITCH_CYCLE_SKIPPED.value
+            )
+            .where(PaperAuditEvent.timestamp > flip_ts)
+            .where(PaperAuditEvent.timestamp < before)
+        ).scalar() or 0
+        return skip_exists > 0
+
+    def latest_price_unavailable_attempt_counts(
+        self,
+        *,
+        position_ids: list[int],
+        before: datetime,
+    ) -> dict[int, int]:
+        """Return prior max PRICE_UNAVAILABLE attempt_count by position.
+
+        Lock 6g-L4c: the observability projection uses this read-only helper
+        to check monotonic attempt counts across all prior audit history.
+        """
+        if not position_ids:
+            return {}
+
+        position_id_expr = func.json_extract(PaperAuditEvent.context, "$.position_id")
+        attempt_expr = func.json_extract(PaperAuditEvent.context, "$.attempt_count")
+        rows = self._session.execute(
+            select(
+                position_id_expr.label("position_id"),
+                func.max(attempt_expr).label("max_attempt"),
+            )
+            .where(PaperAuditEvent.event_type == AuditEventType.PRICE_UNAVAILABLE.value)
+            .where(PaperAuditEvent.timestamp < before)
+            .where(position_id_expr.in_(position_ids))
+            .group_by(position_id_expr)
+        ).all()
+        return {
+            int(row.position_id): int(row.max_attempt)
+            for row in rows
+            if row.position_id is not None and row.max_attempt is not None
+        }
+
+    def latest_tick_completed_timestamp(
+        self,
+        *,
+        before: datetime,
+    ) -> datetime | None:
+        """Return latest TICK_COMPLETED timestamp strictly before cutoff.
+
+        Lock 6g-L20: used by the notifier to build the between-tick
+        KILL_SWITCH_FLIPPED window.
+        """
+        return self._session.execute(
+            select(PaperAuditEvent.timestamp)
+            .where(PaperAuditEvent.event_type == AuditEventType.TICK_COMPLETED.value)
+            .where(PaperAuditEvent.timestamp < before)
+            .order_by(desc(PaperAuditEvent.timestamp))
+            .limit(1)
+        ).scalar()
