@@ -78,8 +78,8 @@ def test_place_order_result_carries_created_and_duplicate_flags():
     assert r2.duplicate is True
 
 
-def test_audit_event_type_enum_has_12_values():
-    """6a audit event types: 12 total."""
+def test_audit_event_type_enum_has_13_values():
+    """6a audit event types: 12 baseline + 6b+ PRICE_UNAVAILABLE = 13 total."""
     from marketpulse.trading.types import AuditEventType
 
     expected = {
@@ -95,6 +95,7 @@ def test_audit_event_type_enum_has_12_values():
         "TICK_REPROCESSED_COMPLETED",
         "SCHEDULER_GAP_DETECTED",
         "ENGINE_INVARIANT_ERROR",
+        "PRICE_UNAVAILABLE",
     }
     actual = {e.value for e in AuditEventType}
     assert actual == expected, f"Missing: {expected - actual}; Extra: {actual - expected}"
@@ -108,6 +109,21 @@ def test_layer_stateful_tag_accepted_by_hook():
     # Layer: stateful
     """
     assert True
+
+
+# Layer: pure
+# 6b+T1: AuditEventType.PRICE_UNAVAILABLE.
+
+
+def test_audit_event_type_price_unavailable_value():
+    from marketpulse.trading.types import AuditEventType
+    assert AuditEventType.PRICE_UNAVAILABLE == "PRICE_UNAVAILABLE"
+    assert AuditEventType.PRICE_UNAVAILABLE.value == "PRICE_UNAVAILABLE"
+
+
+def test_audit_event_type_is_str_enum_member():
+    from marketpulse.trading.types import AuditEventType
+    assert isinstance(AuditEventType.PRICE_UNAVAILABLE, str)
 
 
 def test_all_trading_modules_importable():

@@ -57,6 +57,9 @@ class AuditEventType(StrEnum):
     TICK_REPROCESSED_COMPLETED = "TICK_REPROCESSED_COMPLETED"
     SCHEDULER_GAP_DETECTED = "SCHEDULER_GAP_DETECTED"
     ENGINE_INVARIANT_ERROR = "ENGINE_INVARIANT_ERROR"
+    # Phase 6b+: price source unavailable at exit time (transient data
+    # gap, NOT an InvariantError — see lock 6b+L7).
+    PRICE_UNAVAILABLE = "PRICE_UNAVAILABLE"
 
 
 # === Exceptions ===
