@@ -9,6 +9,7 @@ bid_aggregator (layered dependency rule)."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
@@ -547,3 +548,27 @@ class Repository:
             .where(PaperFill.filled_at < utc_end)
         ).scalar()
         return Decimal(total or 0)
+
+    def sector_exposure_notional(
+        self,
+        *,
+        sector_provider: Callable[[str], str | None],
+    ) -> dict[str, Decimal]:
+        """OPEN paper_position rows grouped by sector. Notional per position
+        = quantity * entry_price (Phase 6 does NOT mark-to-market). Tickers
+        whose sector_provider returns None are EXCLUDED from the result
+        (locks 6b-L8 + 6b-L11). Returns {sector: total_notional}."""
+        from marketpulse.db.models import PaperPosition
+
+        rows = self._session.execute(
+            select(PaperPosition).where(PaperPosition.status == "OPEN")
+        ).scalars().all()
+        out: dict[str, Decimal] = {}
+        for p in rows:
+            sector = sector_provider(p.ticker)
+            if sector is None:
+                continue
+            out[sector] = out.get(sector, Decimal(0)) + (
+                Decimal(p.quantity) * p.entry_price
+            )
+        return out
