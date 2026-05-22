@@ -8,6 +8,7 @@ clarification in spec § 2)."""
 
 from __future__ import annotations
 
+from marketpulse.trading.risk_gates._sector import strict_sector
 from marketpulse.trading.risk_gates.config_provider import (
     DailyLossConfig,
     MarketHoursConfig,
@@ -24,4 +25,5 @@ __all__ = [
     "RiskGateConfig",
     "SectorExposureConfig",
     "StrategyRiskConfig",
+    "strict_sector",
 ]
