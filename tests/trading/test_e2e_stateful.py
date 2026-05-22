@@ -549,3 +549,417 @@ def test_e2e_phase6b_sector_cap_denial_writes_per_gate_audit(tmp_path):
         # so strategy_size approves; only sector_exposure denies).
         assert "sector_exposure" in ctx["failed_gates"]
         assert len(ctx["per_gate"]) == 4
+
+
+# === Phase 6b+ — Paper P&L Realization E2E ===
+
+def test_e2e_phase6b_plus_happy_path_real_pnl(tmp_path):
+    """Op-test #1: exit_price from PriceProvider; realized_pnl from
+    paper_fill.price (NOT order.horizon_price)."""
+    from datetime import UTC, date, datetime
+    from decimal import Decimal
+
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import Session
+
+    from marketpulse.backtest.allocation import AllocationResult, AllocationWinner
+    from marketpulse.db.base import Base
+    from marketpulse.db.models import PaperFill, PaperOrder, PaperPosition
+    from marketpulse.trading import daily_cycle
+    from marketpulse.trading.bid_aggregator import BidAggregator
+    from marketpulse.trading.calendar import NYTradingCalendar
+    from marketpulse.trading.clock import FakeClock
+    from marketpulse.trading.forward_engine import ForwardExecutionEngine
+    from marketpulse.trading.kill_switch import KillSwitchState
+    from marketpulse.trading.price_provider import ClosePrice, StubPriceProvider
+    from marketpulse.trading.repository import Repository
+    from marketpulse.trading.risk_gate import AlwaysApproveRiskGate
+
+    eng = create_engine(f"sqlite:///{tmp_path / 'e2e_pnl.db'}")
+    Base.metadata.create_all(eng)
+    with Session(eng) as s:
+        repo = Repository(session=s)
+        clock = FakeClock(now=datetime(2026, 5, 22, 21, 30, tzinfo=UTC))
+        repo.ensure_initial_deposit(amount=Decimal("10000"), timestamp=clock.now())
+        ks = KillSwitchState(env_var="MP_NEVER", repository=repo)
+        # Provider returns concrete price for horizon date
+        horizon_date = date(2026, 5, 22)
+        provider = StubPriceProvider(map={
+            ("AAPL", horizon_date): ClosePrice(
+                price=Decimal("155.500000"),
+                price_date=horizon_date,
+                requested_date=horizon_date,
+                source="stub",
+            ),
+        })
+        engine = ForwardExecutionEngine(
+            repository=repo, clock=clock, kill_switch=ks,
+            risk_gate=AlwaysApproveRiskGate(),
+            price_provider=provider,
+        )
+
+        # Allocator returns a winner with horizon=today (same-day exit
+        # for simplicity in this test)
+        def alloc(**kw):
+            return AllocationResult(
+                winners=(
+                    AllocationWinner(
+                        strategy="momentum_breakout", ticker="AAPL",
+                        event_time=datetime(2026, 5, 22, 14, 0, tzinfo=UTC),
+                        event_price=150.0,
+                        horizon_date=horizon_date,
+                        horizon_price=None,    # forward mode
+                        quantity=10,
+                        weight=1.0, raw_bid_weight=1.0, pool_corr=0.1,
+                        contribution_multiplier=1.0, adjusted_bid_weight=1.0,
+                        effective_corr_window=60,
+                        rewarded_for_negative_corr=False,
+                        would_change_rank=False,
+                        size_clamped_by_override=False,
+                        strategy_version="v1",
+                    ),
+                ),
+                blocked=(), cash_used=1500.0, cash_remaining=8500.0,
+                timeline=(),
+            )
+        alloc.__version__ = "v1"
+
+        result = daily_cycle.run(
+            clock=clock, engine=engine, repository=repo,
+            bid_aggregator=BidAggregator(session=s, calendar=NYTradingCalendar()),
+            allocator=alloc, calendar=NYTradingCalendar(), kill_switch=ks,
+        )
+
+        # Order placed + entry materialized + exit materialized in same tick
+        assert result.orders_placed == 1
+        assert result.entries_materialized == 1
+        assert result.exits_materialized == 1
+        assert result.cycle_status == "completed"
+
+        # Verify P&L from paper_fill (lock 6b+L1), NOT from
+        # paper_order.horizon_price (which should be NULL).
+        order = s.execute(select(PaperOrder)).scalar_one()
+        assert order.horizon_price is None    # lock 6b+L1
+
+        exit_fill = s.execute(
+            select(PaperFill).where(PaperFill.side == "EXIT")
+        ).scalar_one()
+        assert exit_fill.price == Decimal("155.500000")
+        assert exit_fill.realized_pnl == Decimal("55.000000")   # (155.5-150)*10
+
+        position = s.execute(select(PaperPosition)).scalar_one()
+        assert position.status == "CLOSED"
+        assert position.exit_price == Decimal("155.500000")
+        assert position.realized_pnl == Decimal("55.000000")
+
+
+def test_e2e_phase6b_plus_roll_back_to_prior_session(tmp_path):
+    """Op-test #2: horizon_date is non-session → price_date < horizon_date,
+    POSITION_CLOSED audit roll_policy='previous_available_close'."""
+    from datetime import UTC, date, datetime
+    from decimal import Decimal
+
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import Session
+
+    from marketpulse.backtest.allocation import AllocationResult, AllocationWinner
+    from marketpulse.db.base import Base
+    from marketpulse.db.models import PaperAuditEvent
+    from marketpulse.trading import daily_cycle
+    from marketpulse.trading.bid_aggregator import BidAggregator
+    from marketpulse.trading.calendar import NYTradingCalendar
+    from marketpulse.trading.clock import FakeClock
+    from marketpulse.trading.forward_engine import ForwardExecutionEngine
+    from marketpulse.trading.kill_switch import KillSwitchState
+    from marketpulse.trading.price_provider import ClosePrice, StubPriceProvider
+    from marketpulse.trading.repository import Repository
+    from marketpulse.trading.risk_gate import AlwaysApproveRiskGate
+
+    eng = create_engine(f"sqlite:///{tmp_path / 'e2e_rollback.db'}")
+    Base.metadata.create_all(eng)
+    with Session(eng) as s:
+        repo = Repository(session=s)
+        clock = FakeClock(now=datetime(2026, 5, 22, 21, 30, tzinfo=UTC))
+        repo.ensure_initial_deposit(amount=Decimal("10000"), timestamp=clock.now())
+        ks = KillSwitchState(env_var="MP_NEVER", repository=repo)
+
+        # horizon = Monday but Memorial Day → rolls back to Friday
+        requested = date(2026, 5, 25)
+        actual = date(2026, 5, 22)
+        provider = StubPriceProvider(map={
+            ("AAPL", requested): ClosePrice(
+                price=Decimal("152.000000"),
+                price_date=actual,
+                requested_date=requested,
+                source="stub",
+            ),
+        })
+        engine = ForwardExecutionEngine(
+            repository=repo, clock=clock, kill_switch=ks,
+            risk_gate=AlwaysApproveRiskGate(),
+            price_provider=provider,
+        )
+
+        def alloc(**kw):
+            return AllocationResult(
+                winners=(
+                    AllocationWinner(
+                        strategy="momentum_breakout", ticker="AAPL",
+                        event_time=datetime(2026, 5, 22, 14, 0, tzinfo=UTC),
+                        event_price=150.0,
+                        horizon_date=requested,
+                        horizon_price=None,
+                        quantity=10,
+                        weight=1.0, raw_bid_weight=1.0, pool_corr=0.1,
+                        contribution_multiplier=1.0, adjusted_bid_weight=1.0,
+                        effective_corr_window=60,
+                        rewarded_for_negative_corr=False,
+                        would_change_rank=False,
+                        size_clamped_by_override=False,
+                        strategy_version="v1",
+                    ),
+                ),
+                blocked=(), cash_used=1500.0, cash_remaining=8500.0,
+                timeline=(),
+            )
+        alloc.__version__ = "v1"
+
+        # We need horizon_date >= as_of for exit to fire; use a fake_now
+        # later than requested so positions become eligible.
+        # Place the order on day D=2026-05-22, then run a 2nd tick on
+        # D+10 to trigger exit.
+        result1 = daily_cycle.run(
+            clock=clock, engine=engine, repository=repo,
+            bid_aggregator=BidAggregator(session=s, calendar=NYTradingCalendar()),
+            allocator=alloc, calendar=NYTradingCalendar(), kill_switch=ks,
+        )
+        assert result1.orders_placed == 1
+        # Position is OPEN; horizon (May 25) hasn't been reached yet
+
+        # Tick forward
+        clock_2 = FakeClock(now=datetime(2026, 6, 2, 21, 30, tzinfo=UTC))
+        engine._clock = clock_2    # bump engine clock for materialize
+        # No new allocations on the second tick
+        def alloc2(**kw):
+            return AllocationResult(
+                winners=(), blocked=(), cash_used=0.0, cash_remaining=8500.0,
+                timeline=(),
+            )
+        alloc2.__version__ = "v1"
+        result2 = daily_cycle.run(
+            clock=clock_2, engine=engine, repository=repo,
+            bid_aggregator=BidAggregator(session=s, calendar=NYTradingCalendar()),
+            allocator=alloc2, calendar=NYTradingCalendar(), kill_switch=ks,
+        )
+        assert result2.exits_materialized == 1
+        assert result2.cycle_status == "completed"
+
+        # Verify POSITION_CLOSED audit has roll-back provenance
+        audits = s.execute(
+            select(PaperAuditEvent)
+            .where(PaperAuditEvent.event_type == "POSITION_CLOSED")
+        ).scalars().all()
+        assert len(audits) == 1
+        ctx = audits[0].context
+        assert ctx["requested_horizon_date"] == "2026-05-25"
+        assert ctx["actual_price_date"] == "2026-05-22"
+        assert ctx["roll_policy"] == "previous_available_close"
+        assert ctx["price_source"] == "stub"
+
+
+def test_e2e_phase6b_plus_price_unavailable_retry_then_succeed(tmp_path):
+    """Op-test #5: tick 1 PRICE_UNAVAILABLE, tick 2 succeeds. attempt_count
+    sequence on the audit rows is [1] then position CLOSED on tick 2."""
+    from datetime import UTC, date, datetime
+    from decimal import Decimal
+
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import Session
+
+    from marketpulse.backtest.allocation import AllocationResult, AllocationWinner
+    from marketpulse.db.base import Base
+    from marketpulse.db.models import PaperAuditEvent, PaperPosition
+    from marketpulse.trading import daily_cycle
+    from marketpulse.trading.bid_aggregator import BidAggregator
+    from marketpulse.trading.calendar import NYTradingCalendar
+    from marketpulse.trading.clock import FakeClock
+    from marketpulse.trading.forward_engine import ForwardExecutionEngine
+    from marketpulse.trading.kill_switch import KillSwitchState
+    from marketpulse.trading.price_provider import ClosePrice, StubPriceProvider
+    from marketpulse.trading.repository import Repository
+    from marketpulse.trading.risk_gate import AlwaysApproveRiskGate
+
+    eng = create_engine(f"sqlite:///{tmp_path / 'e2e_retry.db'}")
+    Base.metadata.create_all(eng)
+    with Session(eng) as s:
+        repo = Repository(session=s)
+        clock = FakeClock(now=datetime(2026, 5, 22, 21, 30, tzinfo=UTC))
+        repo.ensure_initial_deposit(amount=Decimal("10000"), timestamp=clock.now())
+        ks = KillSwitchState(env_var="MP_NEVER", repository=repo)
+
+        horizon = date(2026, 5, 22)
+        empty_provider = StubPriceProvider(map={})
+        engine = ForwardExecutionEngine(
+            repository=repo, clock=clock, kill_switch=ks,
+            risk_gate=AlwaysApproveRiskGate(),
+            price_provider=empty_provider,
+        )
+
+        def alloc(**kw):
+            return AllocationResult(
+                winners=(
+                    AllocationWinner(
+                        strategy="momentum_breakout", ticker="AAPL",
+                        event_time=datetime(2026, 5, 22, 14, 0, tzinfo=UTC),
+                        event_price=150.0,
+                        horizon_date=horizon, horizon_price=None,
+                        quantity=10,
+                        weight=1.0, raw_bid_weight=1.0, pool_corr=0.1,
+                        contribution_multiplier=1.0, adjusted_bid_weight=1.0,
+                        effective_corr_window=60,
+                        rewarded_for_negative_corr=False,
+                        would_change_rank=False,
+                        size_clamped_by_override=False,
+                        strategy_version="v1",
+                    ),
+                ),
+                blocked=(), cash_used=1500.0, cash_remaining=8500.0,
+                timeline=(),
+            )
+        alloc.__version__ = "v1"
+
+        # Tick 1: entry + exit-attempt fails (provider empty)
+        result1 = daily_cycle.run(
+            clock=clock, engine=engine, repository=repo,
+            bid_aggregator=BidAggregator(session=s, calendar=NYTradingCalendar()),
+            allocator=alloc, calendar=NYTradingCalendar(), kill_switch=ks,
+        )
+        assert result1.entries_materialized == 1
+        assert result1.exits_materialized == 0     # PRICE_UNAVAILABLE
+        assert result1.cycle_status == "completed"  # lock 6b+L12
+
+        pu_audits = s.execute(
+            select(PaperAuditEvent)
+            .where(PaperAuditEvent.event_type == "PRICE_UNAVAILABLE")
+        ).scalars().all()
+        assert len(pu_audits) == 1
+        assert pu_audits[0].context["attempt_count"] == 1
+
+        # Tick 2: provider now has the price → position CLOSED
+        engine._price_provider = StubPriceProvider(map={
+            ("AAPL", horizon): ClosePrice(
+                price=Decimal("160.000000"),
+                price_date=horizon,
+                requested_date=horizon,
+                source="stub",
+            ),
+        })
+        clock_2 = FakeClock(now=datetime(2026, 5, 23, 21, 30, tzinfo=UTC))
+        engine._clock = clock_2
+
+        def alloc2(**kw):
+            return AllocationResult(
+                winners=(), blocked=(), cash_used=0.0, cash_remaining=8500.0,
+                timeline=(),
+            )
+        alloc2.__version__ = "v1"
+        result2 = daily_cycle.run(
+            clock=clock_2, engine=engine, repository=repo,
+            bid_aggregator=BidAggregator(session=s, calendar=NYTradingCalendar()),
+            allocator=alloc2, calendar=NYTradingCalendar(), kill_switch=ks,
+        )
+        assert result2.exits_materialized == 1
+        assert result2.cycle_status == "completed"
+
+        position = s.execute(select(PaperPosition)).scalar_one()
+        assert position.status == "CLOSED"
+        assert position.realized_pnl == Decimal("100.000000")   # (160-150)*10
+
+
+def test_e2e_phase6b_plus_price_unavailable_does_not_mutate_state(tmp_path):
+    """Op-test #19: after 3 consecutive PRICE_UNAVAILABLE, position
+    still OPEN, no EXIT fill, cash_balance unchanged."""
+    from datetime import UTC, date, datetime
+    from decimal import Decimal
+
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import Session
+
+    from marketpulse.db.base import Base
+    from marketpulse.db.models import PaperFill, PaperPosition
+    from marketpulse.trading.clock import FakeClock
+    from marketpulse.trading.forward_engine import ForwardExecutionEngine
+    from marketpulse.trading.kill_switch import KillSwitchState
+    from marketpulse.trading.price_provider import StubPriceProvider
+    from marketpulse.trading.repository import Repository
+    from marketpulse.trading.risk_gate import AlwaysApproveRiskGate
+
+    eng = create_engine(f"sqlite:///{tmp_path / 'e2e_nostate.db'}")
+    Base.metadata.create_all(eng)
+    with Session(eng) as s:
+        repo = Repository(session=s)
+        clock = FakeClock(now=datetime(2026, 5, 22, 21, 30, tzinfo=UTC))
+        repo.ensure_initial_deposit(amount=Decimal("10000"), timestamp=clock.now())
+        cash_before = repo.cash_balance()
+        ks = KillSwitchState(env_var="MP_NEVER", repository=repo)
+
+        provider = StubPriceProvider(map={})    # always None
+        engine = ForwardExecutionEngine(
+            repository=repo, clock=clock, kill_switch=ks,
+            risk_gate=AlwaysApproveRiskGate(),
+            price_provider=provider,
+        )
+
+        # Manually create an OPEN position
+        from marketpulse.db.models import PaperOrder
+        order = PaperOrder(
+            idempotency_key="k1", allocation_run_id="r1",
+            strategy="momentum_breakout", ticker="AAPL", quantity=10,
+            event_time=datetime(2026, 5, 22, 14, 0, tzinfo=UTC),
+            allocation_date=date(2026, 5, 22),
+            horizon_date=date(2026, 5, 22),
+            placed_at=datetime(2026, 5, 22, 14, 0, tzinfo=UTC),
+            filled_at=datetime(2026, 5, 22, 14, 1, tzinfo=UTC),
+            event_price=Decimal("150.000000"),
+            horizon_price=None, status="ENTRY_FILLED",
+            strategy_version="v1", allocator_version="phase6a-v1",
+            execution_engine_version="phase6a-v1",
+            weight=1.0, raw_bid_weight=1.0, pool_corr=0.1,
+            contribution_multiplier=1.0, adjusted_bid_weight=1.0,
+            effective_corr_window=60,
+            rewarded_for_negative_corr=False, would_change_rank=False,
+            size_clamped_by_override=False,
+        )
+        s.add(order)
+        s.flush()
+        position = PaperPosition(
+            order_id=order.id, strategy="momentum_breakout", ticker="AAPL",
+            quantity=10, entry_price=Decimal("150.000000"),
+            entry_date=date(2026, 5, 22), horizon_date=date(2026, 5, 22),
+            status="OPEN",
+            opened_at=datetime(2026, 5, 22, 14, 1, tzinfo=UTC),
+            entry_fill_id=None, exit_fill_id=None,
+        )
+        s.add(position)
+        s.flush()
+
+        # 3 consecutive ticks; all PRICE_UNAVAILABLE
+        for _ in range(3):
+            engine._materialize_exit(position, exit_date=date(2026, 5, 23))
+
+        # Refresh position from DB
+        refreshed = s.execute(
+            select(PaperPosition).where(PaperPosition.id == position.id)
+        ).scalar_one()
+        assert refreshed.status == "OPEN"
+        assert refreshed.realized_pnl is None
+        assert refreshed.exit_price is None
+
+        # No EXIT fill rows
+        exit_fills = s.execute(
+            select(PaperFill).where(PaperFill.side == "EXIT")
+        ).scalars().all()
+        assert exit_fills == []
+
+        # cash_balance unchanged
+        assert repo.cash_balance() == cash_before
