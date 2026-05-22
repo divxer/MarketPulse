@@ -19,6 +19,7 @@ from marketpulse.trading.risk_gates.config_provider import (
 )
 from marketpulse.trading.risk_gates.daily_loss import DailyLossGate
 from marketpulse.trading.risk_gates.market_hours import MarketHoursGate
+from marketpulse.trading.risk_gates.sector_exposure import SectorExposureGate
 from marketpulse.trading.risk_gates.strategy_size import StrategySizeGate
 
 __all__ = [
@@ -29,6 +30,7 @@ __all__ = [
     "RiskConfigProvider",
     "RiskGateConfig",
     "SectorExposureConfig",
+    "SectorExposureGate",
     "StrategyRiskConfig",
     "StrategySizeGate",
     "strict_sector",
