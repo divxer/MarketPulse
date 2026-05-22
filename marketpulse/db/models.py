@@ -478,7 +478,8 @@ class PaperAuditEvent(Base):
             "'ORDER_CANCELLED', 'ORDER_ENTRY_FILLED', 'POSITION_CLOSED', "
             "'KILL_SWITCH_FLIPPED', 'KILL_SWITCH_CYCLE_SKIPPED', "
             "'TICK_COMPLETED', 'TICK_REPROCESSED_COMPLETED', "
-            "'SCHEDULER_GAP_DETECTED', 'ENGINE_INVARIANT_ERROR'"
+            "'SCHEDULER_GAP_DETECTED', 'ENGINE_INVARIANT_ERROR', "
+            "'PRICE_UNAVAILABLE'"
             ")",
             name="ck_paper_audit_event_type",
         ),

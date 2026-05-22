@@ -572,3 +572,22 @@ class Repository:
                 Decimal(p.quantity) * p.entry_price
             )
         return out
+
+    def count_price_unavailable_attempts(self, *, position_id: int) -> int:
+        """Count of PRICE_UNAVAILABLE audit rows for a given position.
+
+        Lock 6b+L9: wrapper-only. External code MUST NOT write
+        json_extract inline — go through this method.
+
+        Uses json_extract(context, '$.position_id') matching so we don't
+        depend on the order ↔ position 1:1 invariant (Phase 7 may relax)."""
+        from marketpulse.db.models import PaperAuditEvent
+
+        return self._session.execute(
+            select(func.count(PaperAuditEvent.id))
+            .where(PaperAuditEvent.event_type == "PRICE_UNAVAILABLE")
+            .where(
+                func.json_extract(PaperAuditEvent.context, "$.position_id")
+                == position_id
+            )
+        ).scalar() or 0
