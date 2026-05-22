@@ -13,6 +13,10 @@ import exchange_calendars as xcals
 
 _NY = ZoneInfo("America/New_York")
 
+# Public alias — Phase 6b risk_gates package imports `NY` directly to
+# avoid leaking a private symbol across module boundaries.
+NY = _NY
+
 
 class NYTradingCalendar:
     """US equities (XNYS) calendar wrapper.
