@@ -33,3 +33,7 @@ instructions: |
   - bullish: 估值合理偏低 + 基本面稳健 + 行业地位牢固 → 20-60d 跑赢 SPY
   - bearish: 估值看似低但基本面恶化 / 行业结构性下行
   - neutral: 估值合理但缺乏催化、或基本面混合信号
+
+# Phase 6b risk gate config (StrategySizeGate cap — lock 6b-L9).
+risk:
+  max_position_notional: 25000

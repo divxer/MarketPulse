@@ -28,3 +28,7 @@ instructions: |
   - bullish: 事件正面 + 市场反应不足 + 1-5d 内继续 drift up
   - bearish: 事件负面 / 市场反应不足 / 1-5d 内 drift down,或正面但已 overpriced
   - neutral: 事件被充分定价、信号混合、二次效应不明
+
+# Phase 6b risk gate config (StrategySizeGate cap — lock 6b-L9).
+risk:
+  max_position_notional: 25000
