@@ -49,3 +49,46 @@ def test_order_request_defaults_risk_intent_to_open():
         size_clamped_by_override=False,
     )
     assert req.risk_intent == RiskIntent.OPEN
+
+
+def test_risk_result_defaults_are_back_compat():
+    """6a callers construct RiskResult(approved, reason, gate_name); new
+    fields default to () and an empty read-only mapping so the old
+    signature still works."""
+    from marketpulse.trading.risk_gate import RiskResult
+    r = RiskResult(approved=True, reason="", gate_name="x")
+    assert r.failed_gates == ()
+    assert dict(r.context) == {}
+
+
+def test_risk_result_full_construction():
+    from marketpulse.trading.risk_gate import RiskResult
+    r = RiskResult(
+        approved=False,
+        reason="market_hours_outside_window",
+        gate_name="market_hours",
+        failed_gates=("market_hours",),
+        context={"per_gate": [{"gate_name": "market_hours", "approved": False}]},
+    )
+    assert r.failed_gates == ("market_hours",)
+    assert r.context["per_gate"][0]["approved"] is False
+
+
+def test_risk_result_context_is_immutable_mapping():
+    """Lock 6b-L16: top-level context mutation raises TypeError. Gate
+    authors pass plain dicts; __post_init__ wraps in MappingProxyType."""
+    from marketpulse.trading.risk_gate import RiskResult
+    r = RiskResult(approved=False, reason="x", gate_name="g", context={"a": 1})
+    import pytest
+    with pytest.raises(TypeError):
+        r.context["a"] = 2  # type: ignore[index]
+    with pytest.raises(TypeError):
+        r.context["new_key"] = 99  # type: ignore[index]
+
+
+def test_risk_gate_module_reexports_risk_intent():
+    """6b-L12 back-compat: callers may still write
+    `from marketpulse.trading.risk_gate import RiskIntent`."""
+    from marketpulse.trading.risk_gate import RiskIntent as RI1
+    from marketpulse.trading.types import RiskIntent as RI2
+    assert RI1 is RI2
