@@ -144,3 +144,8 @@ def build_notifier(settings: Settings) -> Notifier:
             to_addr=settings.notifier_email_to,
         )
     return NoopNotifier()
+
+
+def get_notifier_from_settings(settings: Settings) -> Notifier:
+    """Return the configured notifier using the Phase 6g boundary-doc name."""
+    return build_notifier(settings)
