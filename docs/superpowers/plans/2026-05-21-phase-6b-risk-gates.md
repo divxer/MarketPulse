@@ -22,16 +22,25 @@
 
 ## File Structure
 
-**New files (8 production + 9 tests + 1 script):**
+**New files (10 production + 11 tests + 1 script):**
 
 ```
+marketpulse/trading/audit_json.py            # normalize_for_json shared util
+                                             #   (lock 6b-L17 — single audit
+                                             #   JSON normalizer)
+
 marketpulse/trading/risk_gates/
 ├── __init__.py             # Re-exports CompositeRiskGate, 4 gate classes,
 │                           #   RiskConfigProvider, dataclasses,
-│                           #   strict_sector helper
+│                           #   strict_sector, build_standard_composite
 ├── config_provider.py      # 5 frozen dataclasses + RiskConfigProvider.from_yaml
-├── composite.py            # CompositeRiskGate (run-all + deny-if-any +
-│                           #   exception=deny + audit-all) + _normalize_context
+├── composite.py            # CompositeRiskGate(gates: Sequence[RiskGate])
+│                           #   — run-all + deny-if-any + exception=deny +
+│                           #   audit-all via normalize_for_json (locks
+│                           #   6b-L2, 6b-L15, 6b-L17)
+├── factory.py              # build_standard_composite(...) — canonical
+│                           #   4-gate factory used by paper_trading_tick.py
+│                           #   (lock 6b-L15)
 ├── market_hours.py         # MarketHoursGate + _window_check
 ├── strategy_size.py        # StrategySizeGate
 ├── daily_loss.py           # DailyLossGate
@@ -58,7 +67,7 @@ marketpulse/scheduler/paper_trading_tick.py   # DI swap to CompositeRiskGate
 marketpulse/strategies/definitions/*.yaml  (6 files) — each gains `risk: { max_position_notional: <N> }`
 ```
 
-**New test files (9):**
+**New test files (11):**
 
 ```
 tests/trading/risk_gates/__init__.py
@@ -68,8 +77,10 @@ tests/trading/risk_gates/test_strategy_size.py
 tests/trading/risk_gates/test_daily_loss.py
 tests/trading/risk_gates/test_sector_exposure.py
 tests/trading/risk_gates/test_composite.py
+tests/trading/risk_gates/test_factory.py
 tests/trading/risk_gates/test_strict_sector.py
 tests/trading/test_repository_risk_extensions.py
+tests/trading/test_audit_json.py
 ```
 
 **Modified test files (3):**
@@ -99,9 +110,10 @@ tests/trading/test_e2e_stateful.py       # 17:30 NY happy path + composite deny 
 - T12 — `StrategySizeGate`
 - T13 — `DailyLossGate`
 - T14 — `SectorExposureGate`
-- T15 — `CompositeRiskGate` + `_normalize_context` (lock 6b-L10)
-- T16 — `ForwardExecutionEngine` ORDER_REJECTED context carries `failed_gates`+`per_gate`
-- T17 — `paper_trading_tick.py` DI swap
+- T14a — `marketpulse/trading/audit_json.py` shared `normalize_for_json` util (lock 6b-L17)
+- T15 — `CompositeRiskGate(gates=Sequence[RiskGate])` + `build_standard_composite` factory (locks 6b-L15, 6b-L16, 6b-L17)
+- T16 — `ForwardExecutionEngine._dump` delegates to `normalize_for_json`; ORDER_REJECTED context carries `failed_gates`+`per_gate`
+- T17 — `paper_trading_tick.py` DI swap via `build_standard_composite(...)`
 - T18 — E2E `tests/trading/test_e2e_stateful.py` 17:30 NY happy + composite deny scenarios; preflight sector script
 - T19 — Final integration: full suite, ruff, alembic, route smoke; merge
 
@@ -283,11 +295,12 @@ Append:
 ```python
 def test_risk_result_defaults_are_back_compat():
     """6a callers construct RiskResult(approved, reason, gate_name); new
-    fields default to () and {} so the old signature still works."""
+    fields default to () and an empty read-only mapping so the old
+    signature still works."""
     from marketpulse.trading.risk_gate import RiskResult
     r = RiskResult(approved=True, reason="", gate_name="x")
     assert r.failed_gates == ()
-    assert r.context == {}
+    assert dict(r.context) == {}
 
 
 def test_risk_result_full_construction():
@@ -301,6 +314,18 @@ def test_risk_result_full_construction():
     )
     assert r.failed_gates == ("market_hours",)
     assert r.context["per_gate"][0]["approved"] is False
+
+
+def test_risk_result_context_is_immutable_mapping():
+    """Lock 6b-L16: top-level context mutation raises TypeError. Gate
+    authors pass plain dicts; __post_init__ wraps in MappingProxyType."""
+    from marketpulse.trading.risk_gate import RiskResult
+    r = RiskResult(approved=False, reason="x", gate_name="g", context={"a": 1})
+    import pytest
+    with pytest.raises(TypeError):
+        r.context["a"] = 2  # type: ignore[index]
+    with pytest.raises(TypeError):
+        r.context["new_key"] = 99  # type: ignore[index]
 
 
 def test_risk_gate_module_reexports_risk_intent():
@@ -327,13 +352,18 @@ Replace the file with:
 gate's run-all + audit-all contract. The 6a contract (approved, reason,
 gate_name) stays intact via default values.
 
+Lock 6b-L16: `context` is wrapped in MappingProxyType post-construction
+so top-level mutation raises TypeError. Gate authors pass plain dicts
+for ergonomics — the dataclass freezes them.
+
 Re-exports `RiskIntent` from types.py for back-compat (canonical home is
 types.py per lock 6b-L12)."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from types import MappingProxyType
+from typing import Any, Mapping, Protocol
 
 from marketpulse.trading.types import OrderRequest, RiskIntent
 
@@ -345,16 +375,27 @@ __all__ = [
 ]
 
 
+_EMPTY_CONTEXT: Mapping[str, Any] = MappingProxyType({})
+
+
 @dataclass(frozen=True)
 class RiskResult:
     approved: bool
     reason: str
     gate_name: str = ""
     failed_gates: tuple[str, ...] = ()
-    # Default factory: each instance owns its dict (frozen=True forbids
-    # mutating it after construction, but composite still wants to pass
-    # fresh dicts at every check).
-    context: dict[str, Any] = field(default_factory=dict)
+    # Lock 6b-L16: top-level immutability. Gate authors pass plain dicts;
+    # __post_init__ wraps in MappingProxyType so external mutation raises
+    # TypeError. Nested dict mutation is still possible — that's
+    # deliberately left to the normalize_for_json serialization boundary
+    # (lock 6b-L17) which materializes deep copies.
+    context: Mapping[str, Any] = field(
+        default_factory=lambda: _EMPTY_CONTEXT,
+    )
+
+    def __post_init__(self) -> None:
+        if isinstance(self.context, dict):
+            object.__setattr__(self, "context", MappingProxyType(self.context))
 
 
 class RiskGate(Protocol):
@@ -2954,12 +2995,211 @@ EOF
 
 ---
 
-### Task T15: `CompositeRiskGate` + `_normalize_context`
+### Task T14a: `marketpulse/trading/audit_json.py` shared util (lock 6b-L17)
+
+**Files:**
+- Create: `marketpulse/trading/audit_json.py`
+- Test: `tests/trading/test_audit_json.py` (new)
+
+This task ships the single canonical JSON normalizer used by every audit-writing code path. Without it, `forward_engine._dump`, `composite._normalize_context`, and future audit writers (6f UI, 6g recap, broker integration) drift into 4 parallel implementations.
+
+- [ ] **Step 1: Write failing tests**
+
+Create `tests/trading/test_audit_json.py`:
+
+```python
+# Layer: pure
+"""6b-T14a: audit_json.normalize_for_json shared util tests (lock 6b-L17)."""
+
+from __future__ import annotations
+
+import dataclasses
+from datetime import UTC, date, datetime, time
+from decimal import Decimal
+
+
+def test_normalize_decimal_to_str():
+    from marketpulse.trading.audit_json import normalize_for_json
+    assert normalize_for_json(Decimal("1.5")) == "1.5"
+    assert normalize_for_json(Decimal("-500.123456")) == "-500.123456"
+
+
+def test_normalize_datetime_to_isoformat():
+    from marketpulse.trading.audit_json import normalize_for_json
+    dt = datetime(2026, 5, 21, 14, 30, tzinfo=UTC)
+    assert normalize_for_json(dt) == dt.isoformat()
+
+
+def test_normalize_date_to_isoformat():
+    from marketpulse.trading.audit_json import normalize_for_json
+    assert normalize_for_json(date(2026, 5, 21)) == "2026-05-21"
+
+
+def test_normalize_time_to_isoformat():
+    from marketpulse.trading.audit_json import normalize_for_json
+    assert normalize_for_json(time(18, 0)) == "18:00:00"
+
+
+def test_normalize_dict_recursive():
+    from marketpulse.trading.audit_json import normalize_for_json
+    d = {"a": Decimal("1"), "b": {"c": Decimal("2")}}
+    assert normalize_for_json(d) == {"a": "1", "b": {"c": "2"}}
+
+
+def test_normalize_list_recursive():
+    from marketpulse.trading.audit_json import normalize_for_json
+    assert normalize_for_json([Decimal("1"), Decimal("2")]) == ["1", "2"]
+
+
+def test_normalize_tuple_to_list():
+    from marketpulse.trading.audit_json import normalize_for_json
+    assert normalize_for_json((Decimal("1"), Decimal("2"))) == ["1", "2"]
+
+
+def test_normalize_dataclass_to_dict():
+    from marketpulse.trading.audit_json import normalize_for_json
+
+    @dataclasses.dataclass(frozen=True)
+    class _X:
+        a: Decimal
+        b: date
+
+    x = _X(a=Decimal("3.14"), b=date(2026, 5, 21))
+    assert normalize_for_json(x) == {"a": "3.14", "b": "2026-05-21"}
+
+
+def test_normalize_mapping_proxy():
+    """MappingProxyType (lock 6b-L16) round-trips through normalize."""
+    from types import MappingProxyType
+
+    from marketpulse.trading.audit_json import normalize_for_json
+    proxy = MappingProxyType({"a": Decimal("1")})
+    assert normalize_for_json(proxy) == {"a": "1"}
+
+
+def test_normalize_passthrough_primitives():
+    from marketpulse.trading.audit_json import normalize_for_json
+    assert normalize_for_json("hello") == "hello"
+    assert normalize_for_json(42) == 42
+    assert normalize_for_json(3.14) == 3.14
+    assert normalize_for_json(True) is True
+    assert normalize_for_json(None) is None
+
+
+def test_normalize_result_is_json_dumpable():
+    import json
+
+    from marketpulse.trading.audit_json import normalize_for_json
+    raw = {
+        "decimal": Decimal("1.5"),
+        "datetime": datetime(2026, 5, 21, 14, 0, tzinfo=UTC),
+        "nested": {"date": date(2026, 5, 21), "list": [Decimal("2")]},
+    }
+    out = normalize_for_json(raw)
+    json.dumps(out)  # must not raise
+```
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `uv run pytest tests/trading/test_audit_json.py -v`
+Expected: 10 FAIL with `ModuleNotFoundError`.
+
+- [ ] **Step 3: Implement `audit_json.py`**
+
+Create `marketpulse/trading/audit_json.py`:
+
+```python
+"""Single canonical audit-JSON normalizer (lock 6b-L17).
+
+Every audit-writing code path (forward_engine._dump, CompositeRiskGate's
+per_gate emission, future 6f UI render, 6g recap jobs, Phase 7 broker
+audit) MUST route through `normalize_for_json`. No per-module
+normalizers, no inline `json.dumps(asdict(...))` — that path either
+crashes on Decimal or emits non-deterministic floats, both unacceptable
+for the append-only audit ledger.
+
+The function is intentionally narrow in scope: take any nested Python
+object, return a JSON-safe structure (str, int, float, bool, None, list,
+dict).
+"""
+
+from __future__ import annotations
+
+import dataclasses
+from collections.abc import Mapping
+from datetime import date, datetime, time
+from decimal import Decimal
+from typing import Any
+
+__all__ = ["normalize_for_json"]
+
+
+def normalize_for_json(value: Any) -> Any:
+    """Recursively convert a value into a JSON-safe representation.
+
+    Conversions:
+      - Decimal → str (exact precision preserved)
+      - datetime / date / time → .isoformat()
+      - dataclass instance → dict (with same recursion applied to fields)
+      - tuple → list (JSON has no tuples)
+      - Mapping (incl. MappingProxyType) → dict (recursing on values)
+      - list → list (recursing on elements)
+      - str / int / float / bool / None → unchanged
+
+    Non-trivial objects without a known conversion fall through unchanged.
+    json.dumps will raise on them — that's the right failure mode (better
+    than silent str() coercion that loses semantics).
+    """
+    if isinstance(value, Decimal):
+        return str(value)
+    # datetime IS a date subclass; check datetime first so we get the
+    # full ISO format including time + tz.
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat()
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {
+            f.name: normalize_for_json(getattr(value, f.name))
+            for f in dataclasses.fields(value)
+        }
+    if isinstance(value, Mapping):
+        return {k: normalize_for_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [normalize_for_json(v) for v in value]
+    return value
+```
+
+- [ ] **Step 4: Run to verify tests pass**
+
+Run: `uv run pytest tests/trading/test_audit_json.py -v`
+Expected: 10 PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add marketpulse/trading/audit_json.py tests/trading/test_audit_json.py
+git commit -m "$(cat <<'EOF'
+feat(phase-6b-T14a): audit_json.normalize_for_json shared util (lock 6b-L17)
+
+Single canonical JSON normalizer for all audit-writing code paths:
+Decimal→str, datetime/date/time→isoformat, dataclass→dict, tuple→list,
+Mapping→dict, recursive on nested values. T15 + T16 both delegate here
+so the codebase doesn't grow 4 parallel normalizers.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+EOF
+)"
+```
+
+---
+
+### Task T15: `CompositeRiskGate(gates=Sequence[RiskGate])` + `build_standard_composite` factory
 
 **Files:**
 - Create: `marketpulse/trading/risk_gates/composite.py`
+- Create: `marketpulse/trading/risk_gates/factory.py`
 - Modify: `marketpulse/trading/risk_gates/__init__.py`
 - Test: `tests/trading/risk_gates/test_composite.py` (new)
+- Test: `tests/trading/risk_gates/test_factory.py` (new)
 
 - [ ] **Step 1: Write failing tests**
 
@@ -3028,10 +3268,12 @@ class _ExplodingGate:
 
 
 def _make_composite(gates):
+    """Lock 6b-L15: composite now accepts gates: Sequence[RiskGate]
+    directly — tests construct via the public constructor, NOT
+    `__new__` + private attribute. Fakes inject behavior without
+    needing to fake deps."""
     from marketpulse.trading.risk_gates.composite import CompositeRiskGate
-    c = CompositeRiskGate.__new__(CompositeRiskGate)
-    c._gates = tuple(gates)
-    return c
+    return CompositeRiskGate(gates=tuple(gates))
 
 
 def test_composite_all_approve():
@@ -3147,34 +3389,28 @@ Create `marketpulse/trading/risk_gates/composite.py`:
 ```python
 """CompositeRiskGate — run-all + deny-if-any + exception=deny + audit-all.
 
-Lock 6b-L2 forbids fail-fast: every child gate runs even if an earlier
-one denied, so audit context lists ALL gate results.
+Lock 6b-L2 forbids fail-fast at runtime: every child gate runs even if an
+earlier one denied, so audit context lists ALL gate results.
 
-Lock 6b-L10: Decimal values in nested context dicts MUST be normalized
-to strings before persistence. The forward_engine audit writer json.dumps
-context — without normalization, Decimal serializes as a Python float
-(non-deterministic) or crashes outright.
+Lock 6b-L15: composite uses **dependency inversion**. `__init__` accepts
+`gates: Sequence[RiskGate]` and does no construction itself. The
+composition root (`paper_trading_tick.py`) owns the gate list; in
+production it calls `build_standard_composite(...)` (see factory.py) to
+materialize the canonical 4-gate composite. Tests construct directly with
+fakes for individual gates without needing to fake deeper deps.
 
-Construction model: callers do NOT pass pre-built gates. The composite
-builds its 4 children internally from the injected dependencies so the
-gate identity + order are locked. Tests substitute behavior via fakes for
-the underlying deps (FakeClock, in-memory repo, stub sector provider)."""
+Lock 6b-L17: per-gate result serialization for the audit ledger routes
+through `marketpulse.trading.audit_json.normalize_for_json`. No inline
+normalization — single source of truth across the codebase.
+"""
 
 from __future__ import annotations
 
-import dataclasses
-from collections.abc import Callable
-from decimal import Decimal
+from collections.abc import Sequence
 from typing import Any
 
-from marketpulse.trading.calendar import NYTradingCalendar
-from marketpulse.trading.clock import Clock
-from marketpulse.trading.risk_gate import RiskResult
-from marketpulse.trading.risk_gates.config_provider import RiskConfigProvider
-from marketpulse.trading.risk_gates.daily_loss import DailyLossGate
-from marketpulse.trading.risk_gates.market_hours import MarketHoursGate
-from marketpulse.trading.risk_gates.sector_exposure import SectorExposureGate
-from marketpulse.trading.risk_gates.strategy_size import StrategySizeGate
+from marketpulse.trading.audit_json import normalize_for_json
+from marketpulse.trading.risk_gate import RiskGate, RiskResult
 from marketpulse.trading.types import OrderRequest, RiskIntent
 
 __all__ = ["CompositeRiskGate"]
@@ -3183,30 +3419,11 @@ __all__ = ["CompositeRiskGate"]
 class CompositeRiskGate:
     name = "composite"
 
-    def __init__(
-        self,
-        *,
-        config_provider: RiskConfigProvider,
-        repository: Any,        # duck-typed: needs both today_realized_pnl + sector_exposure_notional
-        calendar: NYTradingCalendar,
-        clock: Clock,
-        sector_provider: Callable[[str], str | None],
-    ) -> None:
-        global_cfg = config_provider.global_config()
-        self._gates = (
-            MarketHoursGate(
-                cfg=global_cfg.market_hours, calendar=calendar, clock=clock,
-            ),
-            StrategySizeGate(provider=config_provider),
-            DailyLossGate(
-                cfg=global_cfg.daily_loss, repository=repository,
-            ),
-            SectorExposureGate(
-                cfg=global_cfg.sector_exposure,
-                repository=repository,
-                sector_provider=sector_provider,
-            ),
-        )
+    def __init__(self, *, gates: Sequence[RiskGate]) -> None:
+        # Defensive copy into a tuple — composition root owns the list,
+        # composite owns the runtime ordering. Tuple makes accidental
+        # in-place mutation impossible (helps with audit determinism).
+        self._gates: tuple[RiskGate, ...] = tuple(gates)
 
     def check_pre_trade(self, *, order_request: OrderRequest) -> RiskResult:
         # === Composite-level RiskIntent handling ===
@@ -3229,8 +3446,8 @@ class CompositeRiskGate:
             except Exception as e:  # noqa: BLE001 — fail-closed catches everything
                 r = RiskResult(
                     approved=False,
-                    reason=f"{gate.name}_error",
-                    gate_name=gate.name,
+                    reason=f"{getattr(gate, 'name', type(gate).__name__)}_error",
+                    gate_name=getattr(gate, "name", type(gate).__name__),
                     context={
                         "error_type": type(e).__name__,
                         "error": str(e),
@@ -3257,61 +3474,187 @@ class CompositeRiskGate:
 
 def _serialize_result(r: RiskResult) -> dict[str, Any]:
     """Serialize a RiskResult into a JSON-safe dict for audit storage
-    (lock 6b-L10). Normalizes Decimal values to strings recursively."""
-    d = dataclasses.asdict(r)
-    d["failed_gates"] = list(d.get("failed_gates", ()))
-    d["context"] = _normalize_context(d.get("context", {}))
-    return d
-
-
-def _normalize_context(value: Any) -> Any:
-    """Recursively normalize Decimal → str (lock 6b-L10). datetime/date
-    are already stringified by gates via .isoformat() before reaching
-    here; this function defends against future drift."""
-    if isinstance(value, Decimal):
-        return str(value)
-    if isinstance(value, dict):
-        return {k: _normalize_context(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_normalize_context(v) for v in value]
-    if hasattr(value, "isoformat"):  # datetime/date/time
-        return value.isoformat()
-    return value
+    (locks 6b-L10 + 6b-L17). Delegates all normalization to the shared
+    audit_json util — single source of truth."""
+    # normalize_for_json handles the RiskResult dataclass directly,
+    # producing a dict with normalized values (Decimal → str, etc.).
+    return normalize_for_json(r)
 ```
 
-- [ ] **Step 4: Re-export from `__init__.py`**
+- [ ] **Step 4: Run composite tests to verify they pass**
+
+Run: `uv run pytest tests/trading/risk_gates/test_composite.py -v`
+Expected: 7 PASS.
+
+- [ ] **Step 5: Write factory test**
+
+Create `tests/trading/risk_gates/test_factory.py`:
+
+```python
+# Layer: pure
+"""6b-T15: build_standard_composite factory tests (lock 6b-L15)."""
+
+from __future__ import annotations
+
+from datetime import time
+from decimal import Decimal
+
+
+class _StubProvider:
+    def global_config(self):
+        from marketpulse.trading.risk_gates.config_provider import (
+            DailyLossConfig,
+            MarketHoursConfig,
+            RiskGateConfig,
+            SectorExposureConfig,
+        )
+        return RiskGateConfig(
+            market_hours=MarketHoursConfig(
+                enabled=True, exchange="XNYS",
+                allow_regular_session=True, allow_post_close=True,
+                post_close_until=time(18, 0), allow_premarket=False,
+            ),
+            daily_loss=DailyLossConfig(enabled=True, daily_loss_limit=Decimal("500")),
+            sector_exposure=SectorExposureConfig(
+                enabled=True, max_sector_exposure_pct=0.35,
+                configured_max_capital_in_use=Decimal("10000"),
+            ),
+        )
+
+    def strategy_config(self, strategy):
+        return None  # not exercised by this test
+
+
+class _StubRepo:
+    def today_realized_pnl(self, *, tick_date):
+        return Decimal("0")
+
+    def sector_exposure_notional(self, *, sector_provider):
+        return {}
+
+
+class _FakeClock:
+    def now(self):
+        from datetime import UTC, datetime
+        return datetime(2026, 5, 21, 21, 30, tzinfo=UTC)
+
+
+def test_factory_builds_4_gates_in_canonical_order():
+    """Lock 6b-L15: factory is the single canonical builder. Order matters
+    for audit reproducibility — operators reading per_gate[*] entries
+    expect a stable order."""
+    from marketpulse.trading.calendar import NYTradingCalendar
+    from marketpulse.trading.risk_gates.factory import build_standard_composite
+
+    composite = build_standard_composite(
+        config_provider=_StubProvider(),
+        repository=_StubRepo(),
+        calendar=NYTradingCalendar(),
+        clock=_FakeClock(),
+        sector_provider=lambda t: "Technology",
+    )
+    names = [g.name for g in composite._gates]
+    assert names == [
+        "market_hours", "strategy_size", "daily_loss", "sector_exposure",
+    ]
+```
+
+- [ ] **Step 6: Implement `factory.py`**
+
+Create `marketpulse/trading/risk_gates/factory.py`:
+
+```python
+"""Phase 6b canonical composite factory (lock 6b-L15).
+
+`build_standard_composite` is the SINGLE blessed builder for the 4-gate
+production composite. The scheduler entrypoint (`paper_trading_tick.py`)
+calls this; tests are free to instantiate `CompositeRiskGate(gates=[...])`
+directly with whatever fakes they need.
+
+Order matters for audit reproducibility — per_gate[*] entries appear in
+this order in every ORDER_REJECTED row across the lifetime of the system.
+Changing the order requires a coordinated migration of any downstream
+consumer (6f UI, 6g recap). Keep it stable.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+
+from marketpulse.trading.calendar import NYTradingCalendar
+from marketpulse.trading.clock import Clock
+from marketpulse.trading.risk_gates.composite import CompositeRiskGate
+from marketpulse.trading.risk_gates.config_provider import RiskConfigProvider
+from marketpulse.trading.risk_gates.daily_loss import DailyLossGate
+from marketpulse.trading.risk_gates.market_hours import MarketHoursGate
+from marketpulse.trading.risk_gates.sector_exposure import SectorExposureGate
+from marketpulse.trading.risk_gates.strategy_size import StrategySizeGate
+
+__all__ = ["build_standard_composite"]
+
+
+def build_standard_composite(
+    *,
+    config_provider: RiskConfigProvider,
+    repository,
+    calendar: NYTradingCalendar,
+    clock: Clock,
+    sector_provider: Callable[[str], str | None],
+) -> CompositeRiskGate:
+    """Build the canonical 4-gate composite. Order: market_hours,
+    strategy_size, daily_loss, sector_exposure."""
+    global_cfg = config_provider.global_config()
+    return CompositeRiskGate(
+        gates=(
+            MarketHoursGate(
+                cfg=global_cfg.market_hours, calendar=calendar, clock=clock,
+            ),
+            StrategySizeGate(provider=config_provider),
+            DailyLossGate(
+                cfg=global_cfg.daily_loss, repository=repository,
+            ),
+            SectorExposureGate(
+                cfg=global_cfg.sector_exposure,
+                repository=repository,
+                sector_provider=sector_provider,
+            ),
+        ),
+    )
+```
+
+- [ ] **Step 7: Re-export from `__init__.py`**
 
 Add to `marketpulse/trading/risk_gates/__init__.py`:
 
 ```python
 from marketpulse.trading.risk_gates.composite import CompositeRiskGate
+from marketpulse.trading.risk_gates.factory import build_standard_composite
 ```
 
-Add `"CompositeRiskGate"` to `__all__`.
+Add `"CompositeRiskGate"` and `"build_standard_composite"` to `__all__`.
 
-- [ ] **Step 5: Run to verify tests pass**
-
-Run: `uv run pytest tests/trading/risk_gates/test_composite.py -v`
-Expected: 7 PASS.
-
-- [ ] **Step 6: Run full risk_gates suite**
+- [ ] **Step 8: Run factory + composite + full risk_gates suite**
 
 Run: `uv run pytest -q tests/trading/risk_gates/`
 Expected: ALL pass.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
-git add marketpulse/trading/risk_gates/composite.py marketpulse/trading/risk_gates/__init__.py tests/trading/risk_gates/test_composite.py
+git add marketpulse/trading/risk_gates/composite.py marketpulse/trading/risk_gates/factory.py marketpulse/trading/risk_gates/__init__.py tests/trading/risk_gates/test_composite.py tests/trading/risk_gates/test_factory.py
 git commit -m "$(cat <<'EOF'
-feat(phase-6b-T15): CompositeRiskGate + _normalize_context
+feat(phase-6b-T15): CompositeRiskGate (gates: Sequence) + factory (locks 6b-L15..6b-L17)
 
-Run-all + deny-if-any + exception=deny + audit-all (lock 6b-L2).
-CLOSE/REDUCE short-circuit before any child gate runs (lock 6b-L1).
-Decimal values in nested context normalized to strings (lock 6b-L10) so
-the audit writer can json.dumps without crashing or losing precision.
-Construction is internal — callers inject the deps, composite owns
-gate identities and order.
+Composite uses dependency inversion (lock 6b-L15): __init__ accepts a
+Sequence[RiskGate]; composition root lives at DI seam. Production builds
+via build_standard_composite(...); tests construct CompositeRiskGate with
+fake gates directly — no need to fake repo/clock/sector_provider per
+composite test.
+
+Audit-context serialization delegates to audit_json.normalize_for_json
+(lock 6b-L17) — single source of truth. RiskResult.context wrapped in
+MappingProxyType post-construction (lock 6b-L16) prevents top-level
+mutation.
 
 Co-Authored-By: Claude <noreply@anthropic.com>
 EOF
@@ -3422,7 +3765,25 @@ def test_forward_engine_propagates_failed_gates_into_audit_context(tmp_path):
 Run: `uv run pytest tests/trading/test_forward_engine.py::test_forward_engine_propagates_failed_gates_into_audit_context -v`
 Expected: FAIL with `KeyError: 'failed_gates'` (current audit context only includes `gate`).
 
-- [ ] **Step 3: Update `forward_engine.py` to thread the new fields**
+- [ ] **Step 3: Migrate `_dump` to delegate to `normalize_for_json` (lock 6b-L17)**
+
+In `marketpulse/trading/forward_engine.py`, replace the existing `_dump` helper (around lines 31-39) with:
+
+```python
+from marketpulse.trading.audit_json import normalize_for_json
+
+
+def _dump(order_request: OrderRequest) -> dict:
+    """Lock 6b-L17: delegate to the shared audit-JSON normalizer.
+    Kept as a thin wrapper for back-compat and to make grep-ability of
+    audit-writing sites obvious. New audit code should call
+    `normalize_for_json` directly."""
+    return normalize_for_json(order_request)
+```
+
+Add the `from marketpulse.trading.audit_json import normalize_for_json` to the imports block at the top of the file.
+
+- [ ] **Step 4: Update the `if not risk_result.approved:` block to thread the new fields**
 
 In `marketpulse/trading/forward_engine.py`, locate the `if not risk_result.approved:` block (around line 116). Replace it with:
 
@@ -3441,34 +3802,35 @@ In `marketpulse/trading/forward_engine.py`, locate the `if not risk_result.appro
                         # new audit event type; reuse ORDER_REJECTED with
                         # extended context). list() so JSON column accepts.
                         "failed_gates": list(risk_result.failed_gates),
-                        "per_gate": risk_result.context.get("per_gate", []),
+                        "per_gate": list(risk_result.context.get("per_gate", [])),
                     },
                     timestamp=self._clock.now(),
                 )
             raise OrderRejected(risk_result.reason)
 ```
 
-- [ ] **Step 4: Run to verify test passes**
+- [ ] **Step 5: Run to verify test passes**
 
 Run: `uv run pytest tests/trading/test_forward_engine.py::test_forward_engine_propagates_failed_gates_into_audit_context -v`
 Expected: PASS.
 
-- [ ] **Step 5: Run full forward_engine + risk_gates tests for regressions**
+- [ ] **Step 6: Run full forward_engine + risk_gates tests for regressions**
 
 Run: `uv run pytest -q tests/trading/test_forward_engine.py tests/trading/risk_gates/`
-Expected: ALL pass.
+Expected: ALL pass — the `_dump` delegate change is behavior-preserving (normalize_for_json produces the same output shape as the old shallow normalizer for OrderRequest's flat field set).
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add marketpulse/trading/forward_engine.py tests/trading/test_forward_engine.py
 git commit -m "$(cat <<'EOF'
-feat(phase-6b-T16): ORDER_REJECTED context carries failed_gates + per_gate
+feat(phase-6b-T16): ORDER_REJECTED context + _dump delegates to normalize_for_json
 
 Lock 6b-L6: reuse ORDER_REJECTED — no new audit event type, no migration.
-Composite's failed_gates tuple is JSONified as a list; per_gate list of
-per-child results is passed through verbatim (already normalized by
-CompositeRiskGate per lock 6b-L10).
+Lock 6b-L17: forward_engine._dump now delegates to the shared
+audit_json.normalize_for_json util. Composite's failed_gates tuple is
+JSONified as a list; per_gate list of per-child results is passed through
+verbatim (already normalized by CompositeRiskGate per lock 6b-L10/L17).
 
 Co-Authored-By: Claude <noreply@anthropic.com>
 EOF
@@ -3526,15 +3888,17 @@ def test_paper_trading_tick_uses_composite_risk_gate(monkeypatch, tmp_path):
 Run: `uv run pytest tests/trading/test_scheduler.py::test_paper_trading_tick_uses_composite_risk_gate -v`
 Expected: FAIL — current code wires `AlwaysApproveRiskGate`.
 
-- [ ] **Step 4: Update `paper_trading_tick.py`**
+- [ ] **Step 4: Update `paper_trading_tick.py` — composition root uses the factory**
 
 Replace `marketpulse/scheduler/paper_trading_tick.py` with:
 
 ```python
 """APScheduler entrypoint for the daily paper-trading tick (lock xxv).
 
-This module contains ZERO business logic. It resolves DI and calls
-daily_cycle.run.
+This module is the **composition root** for Phase 6b risk gates (lock
+6b-L15). It owns the canonical 4-gate composite by calling
+`build_standard_composite(...)` — no business logic, just DI wiring +
+delegation to daily_cycle.run.
 
 Phase 6b: AlwaysApproveRiskGate → CompositeRiskGate (4 production gates).
 RiskConfigProvider reads config/risk_gates.yaml + per-strategy `risk:`
@@ -3558,8 +3922,8 @@ from marketpulse.trading.kill_switch import KillSwitchState
 from marketpulse.trading.price_provider import StubPriceProvider
 from marketpulse.trading.repository import Repository
 from marketpulse.trading.risk_gates import (
-    CompositeRiskGate,
     RiskConfigProvider,
+    build_standard_composite,
     strict_sector,
 )
 
@@ -3579,7 +3943,9 @@ def paper_trading_tick_job() -> None:
         calendar = NYTradingCalendar()
         repository = Repository(session=session)
 
-        # Phase 6b: real composite gate replaces the 6a stub.
+        # Phase 6b: real composite gate replaces the 6a stub. The
+        # composition root (this file) owns the canonical gate list via
+        # the factory — see lock 6b-L15.
         risk_config_provider = RiskConfigProvider.from_yaml(
             global_path=_RISK_GATES_YAML,
             strategies_dir=_STRATEGIES_DIR,
@@ -3587,7 +3953,7 @@ def paper_trading_tick_job() -> None:
         kill_switch = KillSwitchState(
             env_var="MP_PAPER_KILL_SWITCH", repository=repository,
         )
-        risk_gate = CompositeRiskGate(
+        risk_gate = build_standard_composite(
             config_provider=risk_config_provider,
             repository=repository,
             calendar=calendar,
@@ -4021,7 +4387,10 @@ gh pr create --title "feat(phase-6b): risk gates" --body "$(cat <<'EOF'
 - Zero schema migration (reuses `ORDER_REJECTED` with extended context per lock 6b-L6).
 - `RiskIntent` canonical home in `types.py` (lock 6b-L12); `risk_gate.py` re-exports.
 - DST-safe NY-day window for `today_realized_pnl` (lock 6b-L13).
-- 14 locks total (6b-L1 .. 6b-L14).
+- CompositeRiskGate uses dependency-inversion (lock 6b-L15); composition root in `paper_trading_tick.py` via `build_standard_composite()` factory.
+- `RiskResult.context` wrapped in `MappingProxyType` post-construction (lock 6b-L16) prevents top-level mutation.
+- Single audit-JSON normalizer (`marketpulse.trading.audit_json.normalize_for_json`) used by composite + forward_engine (lock 6b-L17).
+- 17 locks total (6b-L1 .. 6b-L17).
 
 ## Test plan
 - [ ] `uv run pytest -q` — full suite green
@@ -4078,19 +4447,37 @@ Hand off to `superpowers:finishing-a-development-branch` to drive merge.
   - #19 → T11 `test_boundary_post_close_cutoff_edge`
   - #20 → T11 `test_boundary_all_disabled_denies_everywhere`
   - #21 → T8 `test_today_realized_pnl_dst_spring_forward_no_overlap`
-- Spec §7 locks 6b-L1..6b-L14 → exercised by listed tests (every lock has at least one direct guard test).
+- Spec §7 locks 6b-L1..6b-L17 → exercised by listed tests:
+  - 6b-L1 (block risk-increasing only) → CLOSE/REDUCE bypass tests in T11/T12/T13/T14 + T15 composite short-circuit.
+  - 6b-L2 (run-all + audit-all) → T15 `test_composite_multi_deny_lists_all_failed`.
+  - 6b-L3, 6b-L14 (config-split scope discipline) → T5/T6/T7 config provider tests.
+  - 6b-L4 (sector denominator fixed) → T14 `test_sector_exposure_denominator_fixed_not_live_cash`.
+  - 6b-L5 (repository extension only) → T8/T9 repository tests + architecture lock-iii guard runs in T9 step 5.
+  - 6b-L6 (no new audit event type) → T16 audit-context test.
+  - 6b-L7 (stale allocation_date) → T11 stale-date test.
+  - 6b-L8 (sector fail-closed) → T14 `test_sector_exposure_unknown_sector_denies_fail_closed`.
+  - 6b-L9 (strategy size fail-closed) → T12 missing-config tests.
+  - 6b-L10 (Decimal-in-context normalization) → T15 `test_composite_normalizes_decimal_in_context_to_str`.
+  - 6b-L11 (preflight checklist) → T18 `scripts/preflight_phase6b_sector_check.py`.
+  - 6b-L12 (RiskIntent canonical home in types.py) → T1 + T2 re-export test.
+  - 6b-L13 (DST-safe NY window) → T8 `test_today_realized_pnl_dst_spring_forward_no_overlap`.
+  - 6b-L15 (CompositeRiskGate dependency inversion) → T15 `test_factory_builds_4_gates_in_canonical_order` + `_make_composite` test helper exercises the public `gates=` constructor.
+  - 6b-L16 (RiskResult.context immutability) → T2 `test_risk_result_context_is_immutable_mapping`.
+  - 6b-L17 (single audit-JSON normalizer) → T14a `test_audit_json.py` (10 tests) + T16 forward_engine `_dump` delegation.
 - Spec §8 forward-warnings → no code in this plan (deferred to 6c/6f/6g).
-- Spec §9 deliverables summary → T17 wires composite; T7 ships strategy YAML risk: blocks; new test files match the summary's list.
+- Spec §9 deliverables summary → T17 wires composite via factory; T7 ships strategy YAML risk: blocks; new test files match the summary's list.
 
 **Placeholder scan:** None. All code blocks are concrete; all commands have expected outputs; "TBD/TODO" are absent (the only `TODO(6b/6c)` line carried over verbatim from existing scheduler code is fine — it's an in-source forward-warning to future plans, not a plan placeholder).
 
 **Type consistency:**
 - `RiskIntent` always referenced as `marketpulse.trading.types.RiskIntent` (canonical) or via `marketpulse.trading.risk_gate.RiskIntent` (re-export) — both resolve to same object (T2 test guard).
-- `RiskResult` signature consistent: `(approved, reason, gate_name="", failed_gates=(), context={})` from T2 onward.
+- `RiskResult` signature consistent: `(approved, reason, gate_name="", failed_gates=(), context=MappingProxyType({}))` from T2 onward; `context` typed as `Mapping[str, Any]` post-T2.
 - `RiskConfigProvider.strategy_config(strategy)` → `StrategyRiskConfig | None` consistent across T4, T6, T12.
 - Gate `name` attribute consistent: every gate exposes `name = "<snake_case>"`, composite uses it for `failed_gates`.
 - Repository helpers consistent: `today_realized_pnl(*, tick_date)` → `Decimal`, `sector_exposure_notional(*, sector_provider)` → `dict[str, Decimal]`, used uniformly in T13 (`DailyLossGate`) and T14 (`SectorExposureGate`).
 - `strict_sector` is used everywhere a `Callable[[str], str | None]` is required (T17 DI, T14 default).
+- `CompositeRiskGate.__init__(*, gates: Sequence[RiskGate])` consistent across T15 implementation + tests + T17 (which constructs via `build_standard_composite` factory).
+- `normalize_for_json(value: Any) -> Any` signature consistent across T14a util, T15 composite, T16 forward_engine delegate.
 
 ---
 
