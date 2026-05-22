@@ -14,11 +14,15 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from marketpulse.alerts.notifier import Notifier, get_notifier_from_settings
 from marketpulse.backtest.allocation import allocate_for_day
 from marketpulse.backtest.sector import get_sector
+from marketpulse.config import get_settings
 from marketpulse.data.yfinance_client import YFinanceClient
 from marketpulse.db.base import session_scope
+from marketpulse.observability.paper_tick_notifier import notify_paper_tick_events
 from marketpulse.trading import daily_cycle
+from marketpulse.trading import risk_gates as rg
 from marketpulse.trading.bid_aggregator import BidAggregator
 from marketpulse.trading.calendar import NYTradingCalendar
 from marketpulse.trading.clock import WallClock
@@ -26,11 +30,6 @@ from marketpulse.trading.forward_engine import ForwardExecutionEngine
 from marketpulse.trading.kill_switch import KillSwitchState
 from marketpulse.trading.price_provider import YFinancePriceProvider
 from marketpulse.trading.repository import Repository
-from marketpulse.trading.risk_gates import (
-    RiskConfigProvider,
-    build_standard_composite,
-    strict_sector,
-)
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +39,11 @@ _RISK_GATES_YAML = _REPO_ROOT / "config" / "risk_gates.yaml"
 _STRATEGIES_DIR = _REPO_ROOT / "marketpulse" / "strategies" / "definitions"
 
 
-def paper_trading_tick_job() -> None:
+def paper_trading_tick_job(*, notifier: Notifier | None = None) -> None:
+    settings = get_settings()
+    if notifier is None:
+        notifier = get_notifier_from_settings(settings)
+
     gen = session_scope()
     session = next(gen)
     try:
@@ -51,19 +54,19 @@ def paper_trading_tick_job() -> None:
         # Phase 6b: real composite gate replaces the 6a stub. The
         # composition root (this file) owns the canonical gate list via
         # the factory — see lock 6b-L15.
-        risk_config_provider = RiskConfigProvider.from_yaml(
+        risk_config_provider = rg.RiskConfigProvider.from_yaml(
             global_path=_RISK_GATES_YAML,
             strategies_dir=_STRATEGIES_DIR,
         )
         kill_switch = KillSwitchState(
             env_var="MP_PAPER_KILL_SWITCH", repository=repository,
         )
-        risk_gate = build_standard_composite(
+        risk_gate = rg.build_standard_composite(
             config_provider=risk_config_provider,
             repository=repository,
             calendar=calendar,
             clock=clock,
-            sector_provider=strict_sector,
+            sector_provider=rg.strict_sector,
         )
         # 6b+T9: production paper-trading uses real yfinance closes for
         # exit P&L. Provider is injected into the engine (lock 6b+L2), NOT
@@ -76,6 +79,7 @@ def paper_trading_tick_job() -> None:
         )
         bid_aggregator = BidAggregator(session=session, calendar=calendar)
 
+        tick_started_at = clock.now()
         result = daily_cycle.run(
             clock=clock, engine=engine, repository=repository,
             bid_aggregator=bid_aggregator, allocator=allocate_for_day,
@@ -94,5 +98,15 @@ def paper_trading_tick_job() -> None:
             result.tick_date, result.orders_placed, result.exits_materialized,
             result.entries_materialized, len(result.tick_errors),
         )
+        try:
+            notify_paper_tick_events(
+                since=tick_started_at,
+                tick_date=result.tick_date,
+                repository=repository,
+                notifier=notifier,
+                clock=clock,
+            )
+        except Exception as exc:  # pragma: no cover - belt-and-braces guard
+            log.warning("paper_tick_notify_failed: %s", exc)
     finally:
         session.close()
