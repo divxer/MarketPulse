@@ -39,7 +39,7 @@
 
 ## File Structure
 
-**New files (4 production + 7 tests):**
+**New files (5 production + 9 tests):**
 
 ```
 marketpulse/observability/__init__.py
@@ -1627,7 +1627,7 @@ def summarize_tick(
     cash_balance_end: Decimal,
     active_positions_with_pu_attempts: list[tuple[str, int]],
     active_positions_count: int,
-) -> tuple[TickSummary, "NotificationFailure | None"]:
+) -> tuple[TickSummary, tuple["NotificationFailure", ...]]:
     """Pure aggregation for the routine summary push (lock 6g-L21).
 
     Field-sourcing rules:
@@ -2930,11 +2930,15 @@ def test_notifier_returning_false_is_recorded_and_proceeds(session, monkeypatch)
         repository=repo, notifier=notifier,
         clock=_clock(since + timedelta(minutes=10)),
     )
-    # Critical was *attempted* (so it's in critical_pushed) — but failed.
-    # Implementation choice: critical_pushed records what was attempted;
-    # failures records the False return.
+    # `critical_pushed` records only SUCCESSFUL dispatches (gated by
+    # `if sent_ok` in the entrypoint). A FailingNotifier returns False
+    # for every call, so critical_pushed stays empty AND every attempt
+    # produces a NotificationFailure(error="send_returned_false").
+    pushed_event_types = [p.event_type for p in result.critical_pushed]
+    assert "KILL_SWITCH_FLIPPED" not in pushed_event_types, (
+        "send returned False → must NOT appear in critical_pushed"
+    )
     assert len(result.failures) >= 1
-    # At least one failure with send_returned_false on the critical OR summary
     errors = {f.error for f in result.failures}
     assert "send_returned_false" in errors
 
@@ -4260,14 +4264,35 @@ Expected: argparse help; mentions `--date YYYY-MM-DD`.
 
 - [ ] **Step 6: Forward-invariant grep (port from 6b+T8 pattern)**
 
-Run:
+Run (`grep --quiet` returns 0 on match, 1 on no-match; we want no-match so we use `! grep -q`):
+
 ```bash
-grep -rn "write_audit_event" marketpulse/observability/ && echo "FAIL: observability writes audit"
-grep -rn "session.add\|session.commit" marketpulse/observability/ && echo "FAIL: observability mutates DB"
-grep -rn "from marketpulse.observability" marketpulse/alerts/ && echo "FAIL: alerts depends on observability (6g-L13 violation)"
-echo "Forward-invariant grep PASS if no FAIL lines above."
+set -e
+status=0
+if grep -rq "write_audit_event" marketpulse/observability/; then
+    echo "FAIL: observability writes audit (6g-L1 violation)"
+    grep -rn "write_audit_event" marketpulse/observability/
+    status=1
+fi
+if grep -rqE "session\.add|session\.commit" marketpulse/observability/; then
+    echo "FAIL: observability mutates DB (6g-L1 violation)"
+    grep -rnE "session\.add|session\.commit" marketpulse/observability/
+    status=1
+fi
+if grep -rq "from marketpulse.observability" marketpulse/alerts/; then
+    echo "FAIL: alerts depends on observability (6g-L13 reverse-direction violation)"
+    grep -rn "from marketpulse.observability" marketpulse/alerts/
+    status=1
+fi
+if [ "$status" -eq 0 ]; then
+    echo "Forward-invariant grep: PASS"
+fi
+exit "$status"
 ```
-Expected: only the "PASS" line printed.
+
+Expected: `Forward-invariant grep: PASS` and exit code 0.
+
+Why this shape (not `grep ... && echo FAIL`): bare `grep && echo` returns nonzero from `grep` on no-match, and under `set -e` (or strict CI shells) that exits the script before the failure-check completes — masking the absence of violations as a failure. The `if grep -q` form inverts cleanly: match → enter the failure branch; no-match → fall through.
 
 This enforces:
 - Lock 6g-L1: `observability/` is consumer; never writes audit rows.
@@ -4398,7 +4423,7 @@ Expected: empty.
 
 - `NotificationFailure` declared once in T3, imported by T6/T8.
 - `select_critical_events(*, new_audit_rows, kill_switch_cycle_skipped_in_period, positions_with_prior_pu, threshold=3)` — T3 declares, T6 imports + calls with these exact kwarg names.
-- `summarize_tick(*, new_audit_rows, tick_date, cash_balance_end, active_positions_with_pu_attempts, active_positions_count) -> tuple[TickSummary, NotificationFailure | None]` — T4 declares, T6 calls.
+- `summarize_tick(*, new_audit_rows, tick_date, cash_balance_end, active_positions_with_pu_attempts, active_positions_count) -> tuple[TickSummary, tuple[NotificationFailure, ...]]` — T4 declares, T6 calls. (The failure tuple is empty when both `_resolve_cycle_status` and all `_safe_decimal` coercions succeed; non-empty when missing TICK_COMPLETED or malformed numeric fields surface.)
 - `render_critical_event(event: CriticalEvent) -> tuple[str, str]` and `render_tick_summary(summary: TickSummary) -> tuple[str, str]` — T5 declares, T6 imports.
 - `notify_paper_tick_events(*, since, tick_date, repository, notifier, clock, price_unavailable_threshold=3) -> NotificationResult` — T6 declares, T7 (scheduler hook) + T8 (CLI) call.
 - `get_notifier_from_settings(settings) -> Notifier` — T1 declares, T7 + T8 call.
