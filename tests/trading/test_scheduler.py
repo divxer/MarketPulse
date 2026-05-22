@@ -75,3 +75,47 @@ def test_paper_trading_tick_uses_composite_risk_gate(monkeypatch, tmp_path):
         db_base.reset_engine()
 
     assert isinstance(captured["risk_gate"], CompositeRiskGate)
+
+
+def test_paper_trading_tick_injects_yfinance_price_provider(monkeypatch, tmp_path):
+    """T9 DI swap: paper_trading_tick_job must wire YFinancePriceProvider
+    into the engine."""
+    import marketpulse.scheduler.paper_trading_tick as m
+    from marketpulse.trading.price_provider import YFinancePriceProvider
+
+    captured = {}
+
+    real_engine_cls = m.ForwardExecutionEngine
+
+    class _SpyEngine(real_engine_cls):
+        def __init__(self, *args, **kwargs):
+            captured["price_provider"] = kwargs.get("price_provider")
+            super().__init__(*args, **kwargs)
+
+        def tick(self, *, as_of):
+            from marketpulse.trading.types import TickResult
+            return TickResult(
+                as_of=as_of, entries_materialized=0,
+                exits_materialized=0, errors=(),
+            )
+
+        def last_price_unavailable_count(self) -> int:
+            return 0
+
+    monkeypatch.setattr(m, "ForwardExecutionEngine", _SpyEngine)
+
+    # The scheduler job uses session_scope which needs Base.metadata.create_all
+    from sqlalchemy import create_engine
+
+    from marketpulse.db import base as db_base
+    from marketpulse.db.base import Base
+    test_engine = create_engine(f"sqlite:///{tmp_path / 'sch.db'}")
+    Base.metadata.create_all(test_engine)
+    original_engine = db_base._engine
+    db_base._engine = test_engine
+    try:
+        m.paper_trading_tick_job()
+    finally:
+        db_base._engine = original_engine
+
+    assert isinstance(captured["price_provider"], YFinancePriceProvider)
