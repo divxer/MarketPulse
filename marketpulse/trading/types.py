@@ -26,6 +26,22 @@ PositionStatus = Literal["OPEN", "CLOSED"]
 FillSide = Literal["ENTRY", "EXIT"]
 
 
+# === Risk intent (Phase 6b — lock 6b-L12) ===
+# Lives here, NOT in risk_gate.py, because OrderRequest carries
+# risk_intent: RiskIntent as a field. Placing the enum in risk_gate.py
+# would invert the 6a-established dependency layer (types is a leaf —
+# nothing above it should import down). risk_gate.py re-exports for
+# back-compat but the canonical import is:
+#     from marketpulse.trading.types import RiskIntent
+
+class RiskIntent(StrEnum):
+    OPEN = "open"        # NEW position; gates run
+    ADD = "add"          # increase existing position; gates run
+    CLOSE = "close"      # full exit; gates bypassed
+    REDUCE = "reduce"    # partial exit; gates bypassed
+    FLIP = "flip"        # 6b denies; Phase 7 wires properly
+
+
 # === Audit event types — 12 in 6a (6b/6g extend) ===
 
 class AuditEventType(StrEnum):
@@ -89,6 +105,13 @@ class OrderRequest:
     rewarded_for_negative_corr: bool
     would_change_rank: bool
     size_clamped_by_override: bool
+
+    # Phase 6b — RiskIntent classification (lock 6b-L1).
+    # Defaulted to OPEN: Phase 6 production paths only emit OPEN
+    # (Phase 4-5 pattern: enter at event, exit at horizon). Field exists
+    # for forward-compat; 6b operational test #2 exercises CLOSE/REDUCE
+    # bypass via tests that synthesize OrderRequests directly.
+    risk_intent: RiskIntent = RiskIntent.OPEN
 
 
 @dataclass(frozen=True)
