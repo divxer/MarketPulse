@@ -332,11 +332,48 @@ def tick(self, *, as_of: date) -> TickResult:
     )
 ```
 
-`price_unavailable_count` is passed back to `daily_cycle.run` via a private internal channel (in-process attribute on engine, OR engine.tick returns an extended internal tuple — implementation choice for T7b). It lands in `TICK_COMPLETED.context["price_unavailable_count"]`.
+`price_unavailable_count` is exposed via a read-only method on the engine (lock 6b+L11, see below):
+
+```python
+class ForwardExecutionEngine:
+    def __init__(self, ...) -> None:
+        self._last_price_unavailable_count: int = 0
+        ...
+
+    def tick(self, *, as_of: date) -> TickResult:
+        self._last_price_unavailable_count = 0   # reset per tick
+        ...
+        for position in self._repo.find_positions_for_exit(as_of=as_of):
+            closed = self._materialize_exit(position, exit_date=as_of)
+            if closed:
+                exits_materialized += 1
+            else:
+                self._last_price_unavailable_count += 1
+        ...
+        return TickResult(...)   # public surface UNCHANGED
+
+    def last_price_unavailable_count(self) -> int:
+        """Returns the count of PRICE_UNAVAILABLE outcomes from the
+        most recent tick() call. Reset at the start of every tick.
+        Used by daily_cycle to surface the count in TICK_COMPLETED audit
+        context without polluting the TickResult public surface."""
+        return self._last_price_unavailable_count
+```
+
+`daily_cycle.run` reads this after `engine.tick(...)` and includes it in `TICK_COMPLETED.context["price_unavailable_count"]`. This is the **only** plumbing path; no internal tuples, no return-shape extensions.
 
 ### TickResult invariant (lock 6b+L7)
 
 **`tick_result.errors` MUST be `()` even when many positions hit `PRICE_UNAVAILABLE`.** The errors tuple is reserved for `InvariantError` events. Data-gap retries are not errors — they are normal flow.
+
+### `TICK_COMPLETED.status` invariant (lock 6b+L12)
+
+**`cycle_status` is `completed_with_errors` if AND ONLY IF `TickResult.errors` is non-empty OR allocator failed.** PRICE_UNAVAILABLE alone (even many positions) leaves status as `completed` — it's not a degraded run, it's "some positions waiting for data, will retry next tick." This is critical so that:
+
+- Gap detection (`SCHEDULER_GAP_DETECTED`) and `last_processed_tick_date` logic correctly treat the day as "processed."
+- `/lab/paper-trading` (Phase 6f) doesn't render the run as failing when it's actually fine.
+
+`TICK_COMPLETED.context["price_unavailable_count"]` is the **only** observable signal for the per-tick count; `cycle_status` does not change.
 
 ---
 
@@ -410,8 +447,13 @@ def upgrade() -> None:
             CONSTRAINT ck_paper_audit_event_type CHECK ({new_check})
         )
     """)
+    # Explicit column list (lock 6b+L13) — never SELECT * because column
+    # order in the new schema must not depend on iteration order.
     op.execute("""
-        INSERT INTO paper_audit_event_new SELECT * FROM paper_audit_event
+        INSERT INTO paper_audit_event_new
+            (id, timestamp, event_type, order_id, strategy, reason, context)
+        SELECT id, timestamp, event_type, order_id, strategy, reason, context
+        FROM paper_audit_event
     """)
     op.execute("DROP TABLE paper_audit_event")
     op.execute("ALTER TABLE paper_audit_event_new RENAME TO paper_audit_event")
@@ -444,7 +486,12 @@ def downgrade() -> None:
             CONSTRAINT ck_paper_audit_event_type CHECK ({old_check})
         )
     """)
-    op.execute("INSERT INTO paper_audit_event_new SELECT * FROM paper_audit_event")
+    op.execute("""
+        INSERT INTO paper_audit_event_new
+            (id, timestamp, event_type, order_id, strategy, reason, context)
+        SELECT id, timestamp, event_type, order_id, strategy, reason, context
+        FROM paper_audit_event
+    """)
     op.execute("DROP TABLE paper_audit_event")
     op.execute("ALTER TABLE paper_audit_event_new RENAME TO paper_audit_event")
     # Recreate 4 indexes (same as upgrade).
@@ -480,7 +527,7 @@ The first PRICE_UNAVAILABLE row makes #2 hard, so prefer #1 if anything goes wro
 | **T1** | `AuditEventType.PRICE_UNAVAILABLE` added | `marketpulse/trading/types.py` | Enum value check |
 | **T2** | Alembic 0011 migration | `alembic/versions/0011_*.py`, `tests/migration/test_0011_*.py` | Upgrade succeeds + inserts PRICE_UNAVAILABLE; downgrade refuses if rows exist; index names per lock 6b+L10 |
 | **T3** | `PriceProvider` Protocol + `ClosePrice` dataclass + `StubPriceProvider` rewrite (no default, source/lookback_days properties) | `marketpulse/trading/price_provider.py`, `tests/trading/test_price_provider.py` | StubPriceProvider rejects default kwarg; map-only lookup; ClosePrice frozen |
-| **T4** | `YFinanceClient.fetch_close_on_date(ticker, on_date, lookback_days=10) -> Bar \| None` | `marketpulse/data/yfinance_client.py`, `tests/data/test_yfinance_close_on_date.py` | end=on_date+1 (lock 6b+L5); roll-back returns prior session bar; window-empty returns None |
+| **T4** | `YFinanceClient.fetch_close_on_date(ticker, on_date, lookback_days=10) -> Bar \| None`. Tests **MUST mock** `yf.Ticker(...).history(...)` — no real network calls. Verify (1) `start = on_date - lookback_days`, (2) `end = on_date + 1 day` (lock 6b+L5), (3) returns the `Bar` with max `bar.date <= on_date`, (4) returns `None` if no bar in window. | `marketpulse/data/yfinance_client.py`, `tests/data/test_yfinance_close_on_date.py` | All 4 assertions above, all via mock |
 | **T5** | `YFinancePriceProvider` with `source="yfinance"` + `lookback_days` property + `close_on_date` impl | `marketpulse/trading/price_provider.py`, `tests/trading/test_yfinance_price_provider.py` | Bar → ClosePrice translation; source/lookback_days propagate |
 | **T6** | `Repository.count_price_unavailable_attempts(*, position_id)` using `json_extract(context, '$.position_id')` per lock 6b+L9 | `marketpulse/trading/repository.py`, `tests/trading/test_repository_price_unavailable.py` | Returns 0 initially; 1, 2, 3 after consecutive failures (op-test #4) |
 | **T7a** | `ForwardExecutionEngine.__init__(price_provider=...)` required kwarg added (lock 6b+L2). Existing tests updated to pass `StubPriceProvider(map={...})`. **No** semantic changes to `_materialize_exit` yet. | `marketpulse/trading/forward_engine.py`, `tests/trading/test_forward_engine.py` | Constructor TypeError on missing price_provider; existing 6a tests pass with new arg |
@@ -506,6 +553,9 @@ The first PRICE_UNAVAILABLE row makes #2 hard, so prefer #1 if anything goes wro
 | **6b+L8** | **`PriceProvider` Protocol exposes `source: str` and `lookback_days: int` properties.** `_materialize_exit` reads `self._price_provider.source` and `self._price_provider.lookback_days` when writing PRICE_UNAVAILABLE audit. NEVER hardcoded. Op-tests #14, #15 verify provenance correctness when provider swapped. |
 | **6b+L9** | **`Repository.count_price_unavailable_attempts(*, position_id)` matches via `json_extract(context, '$.position_id') = ?`** (Phase 7-safe — doesn't rely on `order ↔ position 1:1`). External code NEVER writes inline `json_extract` for this. Wrapper-only. Op-test #4 enforces attempt_count progression (1, 2, 3). |
 | **6b+L10** | **Alembic 0011 table rebuild MUST preserve `paper_audit_event` column definitions, defaults, and index names (`ix_paper_audit_ts` / `ix_paper_audit_type_ts` / `ix_paper_audit_order` / `ix_paper_audit_strategy_ts`) EXACTLY from 0010.** Only the CHECK constraint changes. Alembic env owns the transaction — no manual `BEGIN`/`COMMIT`. `downgrade()` is executable: count PRICE_UNAVAILABLE rows > 0 → raise; else rebuild back to 0010 CHECK. |
+| **6b+L11** | **`price_unavailable_count` flows via `ForwardExecutionEngine.last_price_unavailable_count() -> int`** — a read-only method exposing the count from the most recent `tick()` call. Engine resets the internal counter at the start of every `tick()`. `daily_cycle.run` reads it after `engine.tick(...)` and writes it into `TICK_COMPLETED.context["price_unavailable_count"]`. **NO other plumbing** (no `TickResult` field, no internal tuple). |
+| **6b+L12** | **`TICK_COMPLETED.cycle_status` is `"completed_with_errors"` if AND ONLY IF `TickResult.errors` is non-empty OR allocator raised.** PRICE_UNAVAILABLE alone (any count) leaves `cycle_status="completed"` — the day is fully processed, some positions are just waiting for data. This keeps `last_processed_tick_date` semantics + gap detection unaffected. Op-test #3 enforces. |
+| **6b+L13** | **Alembic 0011 INSERT-SELECT MUST use explicit column lists** (`INSERT INTO ... (id, timestamp, event_type, order_id, strategy, reason, context) SELECT id, timestamp, event_type, order_id, strategy, reason, context FROM ...`). NEVER `SELECT *` — even if the new schema is "identical," iteration order is fragile. Applies to BOTH `upgrade()` and `downgrade()`. |
 
 ---
 
@@ -515,7 +565,7 @@ The first PRICE_UNAVAILABLE row makes #2 hard, so prefer #1 if anything goes wro
 |---|---|---|
 | 1 | Happy path exact-match: horizon = session day, yfinance has it → POSITION_CLOSED, `roll_policy="exact_match"`, `actual_price_date == requested_horizon_date` | — |
 | 2 | Roll-back: horizon = Saturday or US holiday → `actual_price_date < requested_horizon_date`, `roll_policy="previous_available_close"` | — |
-| 3 | Single PRICE_UNAVAILABLE: `close_on_date` returns None → audit written, position stays OPEN, `tick.exits_materialized == 0`, `tick.errors == ()` | 6b+L4, 6b+L7 |
+| 3 | Single PRICE_UNAVAILABLE: `close_on_date` returns None → audit written, position stays OPEN, `tick.exits_materialized == 0`, `tick.errors == ()`, AND `TICK_COMPLETED.cycle_status == "completed"` (NOT `completed_with_errors`), AND `TICK_COMPLETED.context["price_unavailable_count"] == 1` | 6b+L4, 6b+L7, 6b+L11, 6b+L12 |
 | 4 | Attempt progression: 3 consecutive ticks all fail → 3 audit rows with `attempt_count` = 1, 2, 3 | 6b+L9 |
 | 5 | Retry success: tick 1 PRICE_UNAVAILABLE, tick 2 succeeds → 1 PRICE_UNAVAILABLE + 1 POSITION_CLOSED, position CLOSED at tick 2 | 6b+L7 |
 | 6 | Lookback boundary: query window `[on_date - 10 calendar days, on_date]` has no bar → None → PRICE_UNAVAILABLE | 6b+L5 |
@@ -532,6 +582,10 @@ The first PRICE_UNAVAILABLE row makes #2 hard, so prefer #1 if anything goes wro
 | 17 | Alembic 0011 downgrade: with 0 PRICE_UNAVAILABLE rows, downgrade succeeds; with ≥1 row, raises RuntimeError | 6b+L10 |
 | 18 | `paper_order.horizon_price` NOT used for P&L: construct order with `paper_order.horizon_price=Decimal("0")` (legacy/test fixture) but provider returns `close.price=Decimal("155")` → `paper_fill.price == 155`, `realized_pnl = (155 - entry_price) * qty` | 6b+L1 |
 | 19 | PRICE_UNAVAILABLE doesn't mutate state: after 3 consecutive PRICE_UNAVAILABLE for the same position, assert `position.status == "OPEN"`, no EXIT fill rows exist for that order, `cash_balance` unchanged from pre-tick | 6b+L7 |
+| 20 | `last_price_unavailable_count()` resets per tick: tick 1 has 3 unavailable → reports 3; tick 2 has 0 unavailable → reports 0 (NOT stale 3) | 6b+L11 |
+| 21 | `TICK_COMPLETED.cycle_status` invariant: mixed tick with 2 PRICE_UNAVAILABLE + 1 InvariantError → `cycle_status="completed_with_errors"`; mixed tick with 5 PRICE_UNAVAILABLE + 0 InvariantError → `cycle_status="completed"` | 6b+L12 |
+| 22 | T4 mock contract: `fetch_close_on_date` mocked test asserts `yf.Ticker(...).history(start=on_date - lookback_days, end=on_date + timedelta(days=1))` exact call; no real network | 6b+L5 |
+| 23 | Migration 0011 explicit columns: parse the SQL emitted by `upgrade()` and assert the INSERT statement lists `(id, timestamp, event_type, order_id, strategy, reason, context)` explicitly, NOT `SELECT *` | 6b+L13 |
 
 ---
 
@@ -567,12 +621,13 @@ The first PRICE_UNAVAILABLE row makes #2 hard, so prefer #1 if anything goes wro
 
 Single PR `feat(phase-6b-plus): paper P&L realization`. Branch `plan/phase-6b-plus-paper-pnl-realization` off `main`. Estimated ~10-12 commits (12 sub-tasks; T7 splits into T7a/T7b).
 
-**New files (2 + 1 migration):**
-- `alembic/versions/0011_audit_check_price_unavailable.py`
-- `tests/trading/test_yfinance_price_provider.py`
-- `tests/data/test_yfinance_close_on_date.py`
-- `tests/trading/test_repository_price_unavailable.py`
-- `tests/migration/test_0011_audit_check.py`
+**New files (5 test files + 1 migration):**
+- `alembic/versions/0011_audit_check_price_unavailable.py` — migration
+- `tests/trading/test_yfinance_price_provider.py` — provider impl tests
+- `tests/data/test_yfinance_close_on_date.py` — YFinanceClient method tests (mocked, no network)
+- `tests/trading/test_repository_price_unavailable.py` — count_price_unavailable_attempts tests
+- `tests/migration/test_0011_audit_check.py` — migration up/down tests
+- `tests/trading/test_price_provider.py` — ClosePrice + Protocol + StubPriceProvider tests (note: may extend an existing file if one exists)
 
 **Modified files (8):**
 - `marketpulse/trading/types.py` — adds `PRICE_UNAVAILABLE` to `AuditEventType`
