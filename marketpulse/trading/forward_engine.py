@@ -124,7 +124,15 @@ class ForwardExecutionEngine:
                         # new audit event type; reuse ORDER_REJECTED with
                         # extended context). list() so JSON column accepts.
                         "failed_gates": list(risk_result.failed_gates),
-                        "per_gate": list(risk_result.context.get("per_gate", [])),
+                        # Defensive normalize (lock 6b-L17): CompositeRiskGate
+                        # already routes per_gate through normalize_for_json,
+                        # but make it explicit at the audit-write boundary so
+                        # any future non-composite producer (direct DI in
+                        # tests, broker integration, etc.) can't leak raw
+                        # Decimals into the ledger and crash json.dumps.
+                        "per_gate": normalize_for_json(
+                            risk_result.context.get("per_gate", []),
+                        ),
                     },
                     timestamp=self._clock.now(),
                 )
