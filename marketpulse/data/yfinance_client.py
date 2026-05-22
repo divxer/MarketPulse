@@ -1,5 +1,6 @@
 import contextlib
-from datetime import UTC, date, datetime
+import math
+from datetime import UTC, date, datetime, timedelta
 
 import yfinance as yf
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
@@ -78,6 +79,55 @@ class YFinanceClient:
                 )
             )
         return bars
+
+    @_retry
+    def fetch_close_on_date(
+        self,
+        ticker: str,
+        on_date: date,
+        *,
+        lookback_days: int = 10,
+    ) -> Bar | None:
+        """Return the most recent daily Bar with bar.date <= on_date,
+        searching the window [on_date - lookback_days, on_date].
+
+        Lock 6b+L5: yfinance.Ticker.history's `end` is EXCLUSIVE, so we
+        pass `end=on_date + 1 day` to include on_date itself. Without
+        the +1 day, querying for today's close would miss today's bar.
+
+        NaN-safe: yfinance can return Close=NaN on certain edge days
+        (delisted, corporate-action gaps). Skip those rows; never
+        produce Decimal('nan') downstream.
+
+        Returns None if no bar with a finite Close exists in the window.
+        """
+        start = on_date - timedelta(days=lookback_days)
+        end = on_date + timedelta(days=1)    # exclusive
+        hist = yf.Ticker(ticker).history(
+            start=start, end=end, interval="1d",
+        )
+        if hist.empty:
+            return None
+        candidates: list[Bar] = []
+        for idx, row in hist.iterrows():
+            bar_date = idx.date() if hasattr(idx, "date") else idx
+            if bar_date > on_date:
+                continue    # defensive — end=on_date+1 should prevent this
+            close = float(row["Close"])
+            if math.isnan(close):
+                continue    # lock 6b+L5 NaN-safe — skip NaN rows
+            candidates.append(Bar(
+                date=bar_date,
+                open=float(row["Open"]),
+                high=float(row["High"]),
+                low=float(row["Low"]),
+                close=close,
+                volume=int(row["Volume"]) if not math.isnan(float(row["Volume"])) else 0,
+            ))
+        if not candidates:
+            return None
+        # Return the bar with the latest date <= on_date.
+        return max(candidates, key=lambda b: b.date)
 
     @_retry
     def fetch_history_range(
