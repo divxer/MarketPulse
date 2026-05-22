@@ -246,6 +246,7 @@ CLI behavior:
 - **(6g-L7)** `notify_paper_tick_events(since=tick_started_at, ...)` only emits notifications for audit rows written during the current tick execution window. Reprocessing a historical tick does NOT replay prior notifications automatically.
   - **Acknowledged delay:** Kill-switch flips and clears written *between* ticks (e.g., manual operator action at noon) are picked up by the *next* tick's notification window via the extended kill-switch window (lock 6g-L20), not in real-time. This is acceptable for paper trading where ticks are daily; if real-time flip notification becomes required, lock 6g-L1 needs revisiting.
 - **(6g-L20)** KILL_SWITCH_FLIPPED rows are scanned in the **extended between-tick window** `[latest_tick_completed_at, notify_started_at]` (where `latest_tick_completed_at = repository.latest_tick_completed_timestamp(before=since)`, falling back to epoch if no prior TICK_COMPLETED exists). This honors lock 6g-L7's "next-tick pickup" promise for externally-triggered flips. All other event types use the narrower `[since=tick_started_at, notify_started_at]` window. KILL_SWITCH_FLIPPED is the only event type with an asymmetric window because it's the only one that can be written externally between ticks.
+  - **Toggle semantics:** every KILL_SWITCH_FLIPPED row in the extended window is pushed independently (one push per row), in audit-id ascending order. If the kill-switch is toggled twice between ticks (`flip true → clear false → flip true → clear false`), the operator receives 4 pushes on the next tick. **No deduplication on "latest state only"** — the operator should see the full toggle history because each toggle is operationally meaningful (someone or something acted). If toggle noise becomes a problem in practice, defer to a future enhancement; explicit-per-row matches the rest of 6g's no-coalescing stance (§3.1).
 - **(6g-L8)** Replay / recovery notifications are operator-triggered only, via explicit CLI (`republish_tick_notifications --date YYYY-MM-DD`). No automatic replay fan-out.
 - **(6g-L18)** `republish_cli` refuses to run when `MP_PAPER_NOTIFICATIONS_ENABLED=false`; exit code 1.
 
@@ -335,14 +336,19 @@ def notify_paper_tick_events(
     **Audit row filter:** rows are first filtered by
     `since <= timestamp <= notify_started_at`. The `tick_date` parameter
     is applied **conditionally**:
-      - Rows whose `context` carries a `"tick_date"` key (e.g.,
-        TICK_COMPLETED, TICK_REPROCESSED_COMPLETED, KILL_SWITCH_CYCLE_SKIPPED,
-        ENGINE_INVARIANT_ERROR) MUST match `context["tick_date"] ==
-        tick_date.isoformat()` — guards against picking up rows from a
-        prior tick that bled into the time window.
-      - Rows whose context does NOT carry `tick_date` (e.g., ORDER_PLACED,
-        ORDER_ENTRY_FILLED, POSITION_CLOSED, PRICE_UNAVAILABLE,
-        KILL_SWITCH_FLIPPED) are accepted on the time window alone.
+      - Rows whose `context` carries a `"tick_date"` key (TICK_COMPLETED,
+        TICK_REPROCESSED_COMPLETED, KILL_SWITCH_CYCLE_SKIPPED) MUST
+        match `context["tick_date"] == tick_date.isoformat()` — guards
+        against picking up rows from a prior tick that bled into the
+        time window.
+      - All other event types (ORDER_PLACED, ORDER_ENTRY_FILLED,
+        POSITION_CLOSED, PRICE_UNAVAILABLE, KILL_SWITCH_FLIPPED,
+        ORDER_REJECTED, ORDER_CANCELLED, ORDER_PLACED_DUPLICATE,
+        SCHEDULER_GAP_DETECTED, **ENGINE_INVARIANT_ERROR**) are
+        accepted on the time window alone. (ENGINE_INVARIANT_ERROR's
+        6a context carries `phase / order_id / position_id / error /
+        as_of` — no `tick_date` key — so applying the filter would
+        silently drop these rows.)
     This is per **lock 6g-L19** (below).
 
     **Stateless dedup queries:** the entrypoint additionally fetches:
@@ -609,7 +615,7 @@ Reused env vars (no changes):
 |---|---|---|---|
 | L1 projection | `tests/observability/test_audit_projection.py` | Build synthetic `PaperAuditEvent` lists → assert `CriticalEvent[]` / `TickSummary` return values. Cover each lock (6g-L3 daily_loss filter, 6g-L4 attempt-3 threshold + recovery detection, 6g-L5 kill-switch dedup decision). | ms |
 | L2 templates | `tests/observability/test_templates.py` | `CriticalEvent`/`TickSummary` → string. Assert emoji prefix, label, money formatting (sign + 2 decimals), empty-section skipping. | ms |
-| L3 notifier entrypoint | `tests/observability/test_paper_tick_notifier.py` | Real SQLite DB seeded with audit rows + `CapturingNotifier`. Assert `NotificationResult` matches expected + `.sent` list. Cover `MP_PAPER_NOTIFICATIONS_ENABLED=false` early-return + translator exception isolation (lock 6g-L14). | tens of ms |
+| L3 notifier entrypoint | `tests/observability/test_paper_tick_notifier.py` | Real SQLite DB seeded with audit rows + `CapturingNotifier`. Assert `NotificationResult` matches expected + `.sent` list. **Disabled-path test (REQUIRED):** with `MP_PAPER_NOTIFICATIONS_ENABLED=false`, seed audit rows that WOULD trigger critical pushes (e.g., KILL_SWITCH_FLIPPED + several routine events), call the entrypoint, assert `critical_pushed == ()`, `summary_pushed == False`, `notifier.sent == []`, and `failures == (NotificationFailure(event_type="config", title="", error="disabled_by_config"),)` — confirms both critical and summary are suppressed and the disabled state is detectable. Also cover translator exception isolation (lock 6g-L14). | tens of ms |
 | E2E scheduler | `tests/trading/test_paper_tick_notifies_after_run.py` | Full `paper_trading_tick_job` with `CapturingNotifier`. One happy-path test verifying audit → notification chain end-to-end. | ~100ms |
 | Repository | `tests/trading/test_repository_observability_helpers.py` | Unit tests for `positions_with_prior_price_unavailable` + `kill_switch_cycle_skipped_in_active_period`. | tens of ms |
 | Architecture guard | `tests/architecture/test_repository_boundary.py` | Existing test; new helpers must pass read-only-select check. | ms |
