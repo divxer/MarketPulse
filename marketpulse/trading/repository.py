@@ -10,7 +10,7 @@ bid_aggregator (layered dependency rule)."""
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Literal
 
@@ -24,6 +24,7 @@ from marketpulse.db.models import (
     PaperOrder,
     PaperPosition,
 )
+from marketpulse.trading.calendar import NY
 from marketpulse.trading.types import AuditEventType, InvariantError, OrderRequest
 
 # Allowed status transitions (6a-L6)
@@ -520,3 +521,29 @@ class Repository:
         if row is None:
             return False
         return bool(row.context.get("to_state", False))
+
+    # === Phase 6b risk-gate read helpers (lock 6b-L5: extension only) ===
+
+    def today_realized_pnl(self, *, tick_date: date) -> Decimal:
+        """Sum of paper_fill.realized_pnl where side='EXIT' and the fill's
+        NY-day equals tick_date. Returns Decimal(0) if no rows.
+
+        DST-safe NY-day window (lock 6b-L13): build both bounds as NY-local
+        midnight, then convert each to UTC independently. The naïve
+        `ny_start + timedelta(days=1)` adds 24 wall-clock UTC hours, which
+        is off-by-1h on DST transition days — using two NY-local midnights
+        and converting each to UTC guarantees a true 23/24/25-hour NY day.
+        """
+        from marketpulse.db.models import PaperFill
+
+        ny_start = datetime.combine(tick_date, time.min, tzinfo=NY)
+        ny_end = datetime.combine(tick_date + timedelta(days=1), time.min, tzinfo=NY)
+        utc_start = ny_start.astimezone(UTC)
+        utc_end = ny_end.astimezone(UTC)
+        total = self._session.execute(
+            select(func.coalesce(func.sum(PaperFill.realized_pnl), Decimal("0")))
+            .where(PaperFill.side == "EXIT")
+            .where(PaperFill.filled_at >= utc_start)
+            .where(PaperFill.filled_at < utc_end)
+        ).scalar()
+        return Decimal(total or 0)
