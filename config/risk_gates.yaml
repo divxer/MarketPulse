@@ -1,0 +1,22 @@
+# Phase 6b portfolio-level governance. Strategy-local knobs live in
+# marketpulse/strategies/definitions/*.yaml under the `risk:` block
+# (lock 6b-L3 hybrid split).
+
+market_hours:
+  enabled: true
+  exchange: XNYS
+  allow_regular_session: true     # 09:30-16:00 NY (inclusive)
+  allow_post_close: true          # 16:00-post_close_until NY (open-left)
+  post_close_until: "18:00"       # placement window cutoff (NY tz, inclusive)
+  allow_premarket: false          # 04:00-09:30 NY
+
+daily_loss:
+  enabled: true
+  daily_loss_limit: 500           # absolute USD; deny when
+                                  # today_realized_pnl <= -daily_loss_limit
+
+sector_exposure:
+  enabled: true
+  max_sector_exposure_pct: 0.35   # fraction of configured_max_capital_in_use
+  configured_max_capital_in_use: 10000   # FIXED denominator (lock 6b-L4) —
+                                         # NOT live cash/equity
