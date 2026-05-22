@@ -78,7 +78,10 @@ def paper_trading_tick_job() -> None:
             clock=clock, engine=engine, repository=repository,
             bid_aggregator=bid_aggregator, allocator=allocate_for_day,
             calendar=calendar, kill_switch=kill_switch,
-            price_provider=price_provider,
+            # T8 / lock 6b+L1: price_provider is owned by the engine, NOT
+            # threaded through daily_cycle anymore. `price_provider` above
+            # is bound only because we pass it to the ForwardExecutionEngine
+            # ctor.
             daily_curves={},
             daily_strategy_contribution_returns={},
             daily_pool_returns=[],

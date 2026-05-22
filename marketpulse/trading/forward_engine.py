@@ -323,7 +323,8 @@ class ForwardExecutionEngine:
 
     def _materialize_exit(self, position, *, exit_date: date) -> bool:
         """Lock 6b+L1: exit_price comes from PriceProvider at this point
-        in time (NOT from order.horizon_price; the shim is sealed).
+        in time (NOT from the order's pre-filled horizon column; the shim
+        is sealed).
 
         Lock 6b+L7: returns True when the position CLOSED, False when the
         provider returned None (PRICE_UNAVAILABLE). On False the position
