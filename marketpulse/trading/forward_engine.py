@@ -4,10 +4,10 @@ Per spec § 6 + locks ix, xxvii, xxx, xxiv, 6a-L2, 6a-L3, 6a-L4."""
 
 from __future__ import annotations
 
-import dataclasses
 from datetime import date
 from decimal import Decimal
 
+from marketpulse.trading.audit_json import normalize_for_json
 from marketpulse.trading.clock import Clock
 from marketpulse.trading.idempotency import compute_idempotency_key
 from marketpulse.trading.kill_switch import KillSwitchState
@@ -29,14 +29,11 @@ VERSION = EXECUTION_ENGINE_VERSION  # back-compat alias for any introspection
 
 
 def _dump(order_request: OrderRequest) -> dict:
-    d = dataclasses.asdict(order_request)
-    # Make Decimal / datetime / date JSON-friendly
-    for k, v in list(d.items()):
-        if isinstance(v, Decimal):
-            d[k] = str(v)
-        elif hasattr(v, "isoformat"):
-            d[k] = v.isoformat()
-    return d
+    """Lock 6b-L17: delegate to the shared audit-JSON normalizer.
+    Kept as a thin wrapper for back-compat and to make grep-ability of
+    audit-writing sites obvious. New audit code should call
+    `normalize_for_json` directly."""
+    return normalize_for_json(order_request)
 
 
 class ForwardExecutionEngine:
@@ -123,6 +120,11 @@ class ForwardExecutionEngine:
                     context={
                         "order_request": _dump(order_request),
                         "gate": risk_result.gate_name,
+                        # Phase 6b: composite extensions (lock 6b-L6 — no
+                        # new audit event type; reuse ORDER_REJECTED with
+                        # extended context). list() so JSON column accepts.
+                        "failed_gates": list(risk_result.failed_gates),
+                        "per_gate": list(risk_result.context.get("per_gate", [])),
                     },
                     timestamp=self._clock.now(),
                 )

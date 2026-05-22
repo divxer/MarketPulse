@@ -350,3 +350,89 @@ def test_tick_invariant_error_writes_audit_and_continues(session):
         ),
     ).scalars().all()
     assert len(audits) == 1
+
+
+def test_forward_engine_propagates_failed_gates_into_audit_context(tmp_path):
+    """6b-T16: when CompositeRiskGate denies, ORDER_REJECTED audit row's
+    context.failed_gates and context.per_gate carry the composite's
+    extended fields (lock 6b-L6 — reuse ORDER_REJECTED, no new event)."""
+    from datetime import UTC, date, datetime
+    from decimal import Decimal
+
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import Session
+
+    from marketpulse.db.base import Base
+    from marketpulse.db.models import PaperAuditEvent
+    from marketpulse.trading.clock import FakeClock
+    from marketpulse.trading.forward_engine import ForwardExecutionEngine
+    from marketpulse.trading.kill_switch import KillSwitchState
+    from marketpulse.trading.repository import Repository
+    from marketpulse.trading.risk_gate import RiskResult
+    from marketpulse.trading.types import AllocationRunId, OrderRejected, OrderRequest
+
+    class _ExtendedDenyGate:
+        def check_pre_trade(self, *, order_request):
+            return RiskResult(
+                approved=False,
+                reason="daily_loss_limit_exceeded; sector_cap_exceeded",
+                gate_name="daily_loss",
+                failed_gates=("daily_loss", "sector_exposure"),
+                context={
+                    "per_gate": [
+                        {"gate_name": "market_hours", "approved": True},
+                        {"gate_name": "strategy_size", "approved": True},
+                        {"gate_name": "daily_loss", "approved": False,
+                         "reason": "daily_loss_limit_exceeded",
+                         "context": {"today_realized_pnl": "-500"}},
+                        {"gate_name": "sector_exposure", "approved": False,
+                         "reason": "sector_cap_exceeded",
+                         "context": {"projected": "4000", "cap": "3500"}},
+                    ],
+                },
+            )
+
+    eng_db = tmp_path / "fe.db"
+    db_engine = create_engine(f"sqlite:///{eng_db}")
+    Base.metadata.create_all(db_engine)
+    with Session(db_engine) as s:
+        repo = Repository(session=s)
+        clock = FakeClock(now=datetime(2026, 5, 21, 21, 30, tzinfo=UTC))
+        repo.ensure_initial_deposit(amount=Decimal("10000"), timestamp=clock.now())
+        ks = KillSwitchState(env_var="MP_NEVER", repository=repo)
+        engine = ForwardExecutionEngine(
+            repository=repo, clock=clock, kill_switch=ks,
+            risk_gate=_ExtendedDenyGate(),
+        )
+        req = OrderRequest(
+            strategy="momentum_breakout", ticker="AAPL", quantity=10,
+            event_time=datetime(2026, 5, 21, 14, 0, tzinfo=UTC),
+            allocation_date=date(2026, 5, 21),
+            event_price=Decimal("150"),
+            horizon_date=date(2026, 5, 28),
+            horizon_price=Decimal("155"),
+            allocation_run_id=AllocationRunId("paper-2026-05-21"),
+            strategy_version="v1",
+            allocator_version="phase6a-v1",
+            execution_engine_version="phase6a-v1",
+            weight=1.0, raw_bid_weight=1.0, pool_corr=0.1,
+            contribution_multiplier=1.0, adjusted_bid_weight=1.0,
+            effective_corr_window=60,
+            rewarded_for_negative_corr=False,
+            would_change_rank=False,
+            size_clamped_by_override=False,
+        )
+        import pytest
+        with pytest.raises(OrderRejected):
+            engine.place_order(order_request=req)
+
+        rejects = s.execute(
+            select(PaperAuditEvent)
+            .where(PaperAuditEvent.event_type == "ORDER_REJECTED")
+        ).scalars().all()
+        assert len(rejects) == 1
+        ctx = rejects[0].context
+        assert ctx["gate"] == "daily_loss"            # 6a-compat
+        assert ctx["failed_gates"] == ["daily_loss", "sector_exposure"]
+        assert len(ctx["per_gate"]) == 4
+        assert ctx["per_gate"][2]["reason"] == "daily_loss_limit_exceeded"
