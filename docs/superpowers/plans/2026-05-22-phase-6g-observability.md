@@ -582,32 +582,51 @@ In `marketpulse/trading/repository.py`, after the existing `count_price_unavaila
     def kill_switch_cycle_skipped_in_active_period(
         self, *, before: datetime,
     ) -> bool:
-        """Lock 6g-L5: True iff a KILL_SWITCH_CYCLE_SKIPPED audit row exists
-        with timestamp strictly between the most recent
-        KILL_SWITCH_FLIPPED(active=true) timestamp and `before`.
+        """Lock 6g-L5: True iff (a) the most-recent KILL_SWITCH_FLIPPED
+        row before `before` has `to_state=true` (i.e. we ARE currently
+        in an active kill-switch period) AND (b) there's at least one
+        KILL_SWITCH_CYCLE_SKIPPED row strictly between that flip's
+        timestamp and `before`.
 
-        Boundary: if no KILL_SWITCH_FLIPPED(active=true) exists in history
-        (orphan SKIPPED case), returns False — let the entrypoint emit
-        the push because an orphan skip is itself anomalous and operator-
-        worthy. Pure audit projection; no extra state."""
+        Edge case the round-3 reviewer caught: looking only at the
+        latest *active=true* flip is unsafe. Sequence
+            flip(true) → skip → flip(false) → skip(orphan bug)
+        has a latest flip(active=true) before the orphan skip — old
+        impl would incorrectly suppress the orphan because a prior
+        skip exists in that window. Fix: inspect the latest flip
+        REGARDLESS of state; if it cleared (to_state=false), we are
+        NOT in an active period, so don't dedup — emit the push.
+
+        Boundary: if no KILL_SWITCH_FLIPPED row exists at all (orphan
+        skip without any prior flip), returns False — let the
+        entrypoint emit the push because the skip itself is anomalous
+        and operator-worthy. Pure audit projection; no extra state."""
         from marketpulse.db.models import PaperAuditEvent
 
-        latest_flip_active = self._session.execute(
-            select(PaperAuditEvent.timestamp)
-            .where(PaperAuditEvent.event_type == "KILL_SWITCH_FLIPPED")
-            .where(
-                func.json_extract(PaperAuditEvent.context, "$.to_state") == 1
+        latest_flip = self._session.execute(
+            select(
+                PaperAuditEvent.timestamp,
+                func.json_extract(PaperAuditEvent.context, "$.to_state"),
             )
+            .where(PaperAuditEvent.event_type == "KILL_SWITCH_FLIPPED")
             .where(PaperAuditEvent.timestamp < before)
             .order_by(desc(PaperAuditEvent.timestamp))
             .limit(1)
-        ).scalar()
-        if latest_flip_active is None:
+        ).first()
+        if latest_flip is None:
+            # No flip in history at all → orphan skip → emit (don't dedup).
             return False
+        flip_ts, flip_to_state = latest_flip
+        if flip_to_state != 1:
+            # Latest flip cleared the switch → not in an active period.
+            # Any skip after that is itself anomalous → emit (don't dedup).
+            return False
+        # We're inside an active period started at flip_ts. Dedup iff a
+        # prior KILL_SWITCH_CYCLE_SKIPPED already exists in this period.
         skip_exists = self._session.execute(
             select(func.count(PaperAuditEvent.id))
             .where(PaperAuditEvent.event_type == "KILL_SWITCH_CYCLE_SKIPPED")
-            .where(PaperAuditEvent.timestamp > latest_flip_active)
+            .where(PaperAuditEvent.timestamp > flip_ts)
             .where(PaperAuditEvent.timestamp < before)
         ).scalar() or 0
         return skip_exists > 0
@@ -1183,12 +1202,50 @@ def _is_pu_third_attempt(context: dict, threshold: int) -> bool:
     return context.get("attempt_count") == threshold
 
 
+def _check_pu_monotonic(
+    new_audit_rows,
+    failures: "list[NotificationFailure]",
+) -> None:
+    """Lock 6g-L4c runtime check: PRICE_UNAVAILABLE.context["attempt_count"]
+    must be per-position monotonic non-decreasing (enforced by 6b+T6/T7
+    `prior_attempts + 1` semantics + append-only audit). If a future
+    audit-writer bug breaks the invariant (e.g., resets to 1 mid-stream
+    or goes backwards), we record a NotificationFailure so the operator
+    sees the schema regression — but we DO NOT raise, because 6g is a
+    strict consumer.
+
+    Pure projection: walks new_audit_rows in source order, tracks
+    per-position max attempt_count seen, appends a failure for any
+    decrease."""
+    seen_max: dict[int, int] = {}
+    for row in new_audit_rows:
+        if row.event_type != "PRICE_UNAVAILABLE":
+            continue
+        ctx = row.context or {}
+        pos_id = ctx.get("position_id")
+        attempt = ctx.get("attempt_count")
+        if not isinstance(pos_id, int) or not isinstance(attempt, int):
+            continue
+        prior = seen_max.get(pos_id, 0)
+        if attempt < prior:
+            failures.append(NotificationFailure(
+                event_type="PRICE_UNAVAILABLE",
+                title=f"position_id={pos_id}",
+                error=(
+                    f"monotonic_invariant_violation:attempt_count "
+                    f"{prior}->{attempt} (lock 6g-L4c)"
+                ),
+            ))
+        seen_max[pos_id] = max(prior, attempt)
+
+
 def select_critical_events(
     *,
     new_audit_rows,
     kill_switch_cycle_skipped_in_period: bool,
     positions_with_prior_pu: set[int],
     threshold: int = 3,
+    failures: "list[NotificationFailure] | None" = None,
 ) -> list[CriticalEvent]:
     """Stateless decision: which rows in `new_audit_rows` warrant a
     standalone push? See spec § 3.1 for the per-event rules.
@@ -1203,10 +1260,17 @@ def select_critical_events(
       positions_with_prior_pu: lock 6g-L4b recovery dedup set. POSITION_CLOSED
         rows for these position_ids emit recovery push.
       threshold: lock 6g-L4a attempt_count gate (default 3).
+      failures: optional list to append `NotificationFailure` records to
+        when an invariant violation is detected. When None, invariant
+        checks still run but their findings are silently discarded —
+        only the L3 tests / L4 tests need to pass `failures` to assert.
 
     Returns CriticalEvent[] in the same order as `new_audit_rows`. Pure;
     no DB / notifier / clock.
     """
+    if failures is not None:
+        _check_pu_monotonic(new_audit_rows, failures)
+
     out: list[CriticalEvent] = []
     for row in new_audit_rows:
         ctx = row.context or {}
@@ -1596,28 +1660,32 @@ def _first_failed_gate(context: dict) -> str:
 
 def _resolve_cycle_status(
     rows, tick_date: date,
-) -> tuple[str, "NotificationFailure | None"]:
+) -> tuple[str, tuple["NotificationFailure", ...]]:
     """Lock 6g-L21: priority chain TICK_COMPLETED → KILL_SWITCH_CYCLE_SKIPPED
-    → ('unknown', failure)."""
+    → ('unknown', failure).
+
+    Returns `tuple[str, tuple[NotificationFailure, ...]]` — empty tuple
+    when the status was resolved from a TICK_COMPLETED or
+    KILL_SWITCH_CYCLE_SKIPPED row; single-failure tuple in the fallback
+    "unknown" branch. The uniform tuple shape means the caller in
+    `summarize_tick` just extends its own `failures` list with this
+    return value, no `if failure is not None` branching."""
     iso = tick_date.isoformat()
     for row in rows:
         if row.event_type == "TICK_COMPLETED" and (
             (row.context or {}).get("tick_date") == iso
         ):
-            return str((row.context or {}).get("status", "completed")), None
+            return str((row.context or {}).get("status", "completed")), ()
     for row in rows:
         if row.event_type == "KILL_SWITCH_CYCLE_SKIPPED" and (
             (row.context or {}).get("tick_date") == iso
         ):
-            return (
-                str((row.context or {}).get("status", "skipped")),
-                None,
-            )
-    return "unknown", NotificationFailure(
+            return str((row.context or {}).get("status", "skipped")), ()
+    return "unknown", (NotificationFailure(
         event_type="tick_summary",
         title="",
         error="missing_tick_completed_row",
-    )
+    ),)
 
 
 def summarize_tick(
@@ -1646,13 +1714,15 @@ def summarize_tick(
     returned (not raised) so the caller appends it to
     NotificationResult.failures while still emitting the summary push
     (heartbeat discipline)."""
-    cycle_status, failure = _resolve_cycle_status(new_audit_rows, tick_date)
+    cycle_status, cycle_failures = _resolve_cycle_status(
+        new_audit_rows, tick_date,
+    )
 
-    # Auxiliary failures collected during numeric coercion (lock 6g-L21
-    # heartbeat discipline: summary always emits; malformed audit fields
-    # are recorded as supplementary NotificationFailure entries so the
-    # operator can tell the heartbeat went through with stub defaults).
-    aux_failures: list[NotificationFailure] = []
+    # Unified failure list (lock 6g-L21 heartbeat discipline): summary
+    # always emits; cycle-status and numeric-coercion failures both
+    # accumulate here for the caller to extend its NotificationResult
+    # with.
+    failures: list[NotificationFailure] = list(cycle_failures)
 
     orders_placed_detail: list[PlacedOrderDetail] = []
     orders_rejected_breakdown: list[tuple[str, str]] = []
@@ -1685,17 +1755,17 @@ def summarize_tick(
                 str(ctx.get("ticker", "?")),
                 _safe_decimal(ctx.get("fill_price"),
                               field_name="fill_price",
-                              failures=aux_failures),
+                              failures=failures),
             ))
         elif et == "POSITION_CLOSED":
             pnl = _safe_decimal(ctx.get("realized_pnl"),
                                 field_name="realized_pnl",
-                                failures=aux_failures)
+                                failures=failures)
             positions_closed.append((
                 str(ctx.get("ticker", "?")),
                 _safe_decimal(ctx.get("exit_price"),
                               field_name="exit_price",
-                              failures=aux_failures),
+                              failures=failures),
                 pnl,
             ))
             total_realized += pnl
@@ -1716,19 +1786,22 @@ def summarize_tick(
         active_positions_count=active_positions_count,
         active_positions_with_pu=list(active_positions_with_pu_attempts),
     )
-    # Combine cycle_status failure (if any) + numeric-coercion failures.
+    # The unified `failures` list already contains:
+    #   - any cycle_status fallback failure (from _resolve_cycle_status)
+    #   - all malformed_numeric failures (from _safe_decimal call sites)
     # Caller (paper_tick_notifier.py) extends NotificationResult.failures
-    # with this tuple — the heartbeat summary still ships.
-    all_failures = tuple(([failure] if failure is not None else []) + aux_failures)
-    return summary, all_failures
+    # with this tuple — the heartbeat summary always ships.
+    return summary, tuple(failures)
 ```
 
-> **Return-shape note:** `summarize_tick` now returns
-> `tuple[TickSummary, tuple[NotificationFailure, ...]]` (was `tuple[
-> TickSummary, NotificationFailure | None]`). The caller in T6 must
-> iterate the tuple rather than checking `is not None`. Spec 6g-L21
-> phrasing remains compatible — "optional" was always "0..N failures"
-> in spirit; the type just makes it explicit.
+> **Unified failure model (lock 6g-L21 + reviewer round 3):** every
+> piece of the summarization pipeline (`_resolve_cycle_status` and
+> every `_safe_decimal` call) appends into a single
+> `failures: list[NotificationFailure]`. The function returns
+> `tuple[TickSummary, tuple[NotificationFailure, ...]]` with a possibly-
+> empty tuple. No `None` sentinel anywhere — the caller never branches
+> on `is not None`, it just extends its own list with the returned
+> tuple. CLI / notifier / tests / telemetry all see the same shape.
 
 - [ ] **Step 4: Run to verify tests pass**
 
@@ -2499,8 +2572,8 @@ def test_disabled_path_emits_no_notifications(session, monkeypatch):
         clock=_clock(since + timedelta(minutes=30)),
     )
     assert isinstance(result, NotificationResult)
-    assert result.critical_pushed == ()
-    assert result.summary_pushed is False
+    assert result.critical_sent == ()
+    assert result.summary_sent is False
     assert notifier.sent == []
     assert len(result.failures) == 1
     assert result.failures[0].event_type == "config"
@@ -2537,8 +2610,8 @@ def test_heartbeat_emits_summary_when_no_audit_rows(session, monkeypatch):
         notifier=notifier,
         clock=_clock(since + timedelta(minutes=5)),
     )
-    assert result.critical_pushed == ()
-    assert result.summary_pushed is True
+    assert result.critical_sent == ()
+    assert result.summary_sent is True
     assert len(notifier.sent) == 1
     title, body, url = notifier.sent[0]
     assert title.startswith("📊 Paper Tick")
@@ -2585,8 +2658,8 @@ def test_happy_path_routine_events_summary_only(session, monkeypatch):
         repository=repo, notifier=notifier,
         clock=_clock(since + timedelta(minutes=15)),
     )
-    assert result.critical_pushed == ()
-    assert result.summary_pushed is True
+    assert result.critical_sent == ()
+    assert result.summary_sent is True
     assert len(notifier.sent) == 1
     _, body, _ = notifier.sent[0]
     assert "AAPL × 10 (momentum)" in body
@@ -2631,9 +2704,9 @@ def test_price_unavailable_attempt_3_critical_plus_summary(session, monkeypatch)
         repository=repo, notifier=notifier,
         clock=_clock(since + timedelta(minutes=10)),
     )
-    assert len(result.critical_pushed) == 1
-    assert result.critical_pushed[0].event_type == "PRICE_UNAVAILABLE"
-    assert result.summary_pushed is True
+    assert len(result.critical_sent) == 1
+    assert result.critical_sent[0].event_type == "PRICE_UNAVAILABLE"
+    assert result.summary_sent is True
     assert len(notifier.sent) == 2
     # Critical first, then summary
     assert notifier.sent[0][0] == "⚠️ Position Stuck — AAPL"
@@ -2676,8 +2749,8 @@ def test_price_unavailable_attempt_4_suppressed(session, monkeypatch):
         repository=repo, notifier=notifier,
         clock=_clock(since + timedelta(minutes=10)),
     )
-    assert result.critical_pushed == ()
-    assert result.summary_pushed is True
+    assert result.critical_sent == ()
+    assert result.summary_sent is True
     assert len(notifier.sent) == 1
     assert notifier.sent[0][0].startswith("📊 Paper Tick")
 
@@ -2728,9 +2801,9 @@ def test_position_closed_with_prior_pu_recovery_critical(session, monkeypatch):
         repository=repo, notifier=notifier,
         clock=_clock(since + timedelta(minutes=10)),
     )
-    assert len(result.critical_pushed) == 1
-    assert result.critical_pushed[0].event_type == "POSITION_CLOSED"
-    assert result.summary_pushed is True
+    assert len(result.critical_sent) == 1
+    assert result.critical_sent[0].event_type == "POSITION_CLOSED"
+    assert result.summary_sent is True
     assert notifier.sent[0][0] == "✅ Position Recovered — AAPL"
 
 
@@ -2779,7 +2852,7 @@ def test_kill_switch_flipped_between_ticks_picked_up(session, monkeypatch):
         repository=repo, notifier=notifier,
         clock=_clock(since + timedelta(minutes=10)),
     )
-    pushed_event_types = [p.event_type for p in result.critical_pushed]
+    pushed_event_types = [p.event_type for p in result.critical_sent]
     assert "KILL_SWITCH_FLIPPED" in pushed_event_types
     titles = [s[0] for s in notifier.sent]
     assert "🛑 Kill Switch FLIPPED" in titles
@@ -2826,7 +2899,7 @@ def test_kill_switch_cycle_skipped_dedup(session, monkeypatch):
         repository=repo, notifier=notifier_d,
         clock=_clock(since_d + timedelta(minutes=5)),
     )
-    assert "KILL_SWITCH_CYCLE_SKIPPED" in result_d.critical_pushed
+    assert "KILL_SWITCH_CYCLE_SKIPPED" in result_d.critical_sent
 
     # === Tick D+1 (subsequent skip): dedup kicks in
     since_d1 = datetime(2026, 5, 23, 21, 0, tzinfo=UTC)
@@ -2842,8 +2915,8 @@ def test_kill_switch_cycle_skipped_dedup(session, monkeypatch):
         clock=_clock(since_d1 + timedelta(minutes=5)),
     )
     # Critical SKIP suppressed; only summary
-    assert "KILL_SWITCH_CYCLE_SKIPPED" not in result_d1.critical_pushed
-    assert result_d1.summary_pushed is True
+    assert "KILL_SWITCH_CYCLE_SKIPPED" not in result_d1.critical_sent
+    assert result_d1.summary_sent is True
 
 
 # === 9. ENGINE_INVARIANT_ERROR (lock 6g-L19 regression) ===
@@ -2887,7 +2960,7 @@ def test_engine_invariant_error_admitted_without_tick_date(session, monkeypatch)
         repository=repo, notifier=notifier,
         clock=_clock(since + timedelta(minutes=10)),
     )
-    pushed_event_types = [p.event_type for p in result.critical_pushed]
+    pushed_event_types = [p.event_type for p in result.critical_sent]
     assert "ENGINE_INVARIANT_ERROR" in pushed_event_types
     titles = [s[0] for s in notifier.sent]
     assert "🛑 Engine Invariant Error" in titles
@@ -2930,13 +3003,13 @@ def test_notifier_returning_false_is_recorded_and_proceeds(session, monkeypatch)
         repository=repo, notifier=notifier,
         clock=_clock(since + timedelta(minutes=10)),
     )
-    # `critical_pushed` records only SUCCESSFUL dispatches (gated by
+    # `critical_sent` records only SUCCESSFUL dispatches (gated by
     # `if sent_ok` in the entrypoint). A FailingNotifier returns False
-    # for every call, so critical_pushed stays empty AND every attempt
+    # for every call, so critical_sent stays empty AND every attempt
     # produces a NotificationFailure(error="send_returned_false").
-    pushed_event_types = [p.event_type for p in result.critical_pushed]
+    pushed_event_types = [p.event_type for p in result.critical_sent]
     assert "KILL_SWITCH_FLIPPED" not in pushed_event_types, (
-        "send returned False → must NOT appear in critical_pushed"
+        "send returned False → must NOT appear in critical_sent"
     )
     assert len(result.failures) >= 1
     errors = {f.error for f in result.failures}
@@ -3001,7 +3074,7 @@ def test_audit_row_at_exact_since_is_included(session, monkeypatch):
         repository=repo, notifier=notifier,
         clock=_clock(since + timedelta(seconds=10)),
     )
-    pushed_event_types = [p.event_type for p in result.critical_pushed]
+    pushed_event_types = [p.event_type for p in result.critical_sent]
     assert "PRICE_UNAVAILABLE" in pushed_event_types, (
         "row at timestamp == since should be included (closed lower bound)"
     )
@@ -3029,7 +3102,7 @@ def test_audit_row_at_exact_notify_started_at_is_included(session, monkeypatch):
         repository=repo, notifier=notifier,
         clock=_clock(notify_at),    # clock.now() returns notify_at exactly
     )
-    pushed_event_types = [p.event_type for p in result.critical_pushed]
+    pushed_event_types = [p.event_type for p in result.critical_sent]
     assert "PRICE_UNAVAILABLE" in pushed_event_types, (
         "row at timestamp == notify_started_at must be included "
         "(closed upper bound)"
@@ -3057,7 +3130,7 @@ def test_audit_row_one_microsecond_before_since_is_excluded(session, monkeypatch
         repository=repo, notifier=notifier,
         clock=_clock(since + timedelta(seconds=10)),
     )
-    assert result.critical_pushed == ()
+    assert result.critical_sent == ()
 
 
 def test_prior_run_audit_rows_filtered_out(session, monkeypatch):
@@ -3104,8 +3177,8 @@ def test_prior_run_audit_rows_filtered_out(session, monkeypatch):
     )
     # Only the reprocessed-completed should be critical; the prior
     # invariant error is filtered out by `since`.
-    assert "TICK_REPROCESSED_COMPLETED" in result.critical_pushed
-    assert "ENGINE_INVARIANT_ERROR" not in result.critical_pushed
+    assert "TICK_REPROCESSED_COMPLETED" in result.critical_sent
+    assert "ENGINE_INVARIANT_ERROR" not in result.critical_sent
 ```
 
 - [ ] **Step 2: Run to verify failure**
@@ -3175,7 +3248,7 @@ class CriticalPush:
     Note: the per-event audit_id disambiguates multiple same-event-type
     rows in one tick (e.g., three ENGINE_INVARIANT_ERROR rows produce
     three CriticalPush entries with distinct audit_id values — the
-    `critical_pushed` tuple of bare event_type strings would not).
+    `critical_sent` tuple of bare event_type strings would not).
     """
     event_type: str
     audit_id: int
@@ -3186,12 +3259,12 @@ class CriticalPush:
 class NotificationResult:
     """Returned for testability + republish_cli output (spec § 5.2).
 
-    `critical_pushed` is a tuple of `CriticalPush` records (NOT bare
+    `critical_sent` is a tuple of `CriticalPush` records (NOT bare
     event_type strings) so the operator can distinguish multiple
     same-event-type pushes within one tick — see CriticalPush docstring.
     """
-    critical_pushed: tuple[CriticalPush, ...]
-    summary_pushed: bool
+    critical_sent: tuple[CriticalPush, ...]
+    summary_sent: bool
     failures: tuple[NotificationFailure, ...]
     summary_title: str | None = None
     summary_body: str | None = None
@@ -3370,7 +3443,7 @@ def notify_paper_tick_events(
             event_type="config", title="", error="disabled_by_config",
         ))
         return NotificationResult(
-            critical_pushed=(), summary_pushed=False,
+            critical_sent=(), summary_sent=False,
             failures=tuple(failures),
         )
 
@@ -3437,13 +3510,16 @@ def notify_paper_tick_events(
     else:
         positions_with_prior_pu = set()
 
-    # Pure projection.
+    # Pure projection. The `failures` list is threaded in so the L4c
+    # monotonic-invariant runtime check inside select_critical_events
+    # can record violations without raising.
     try:
         criticals: list[CriticalEvent] = select_critical_events(
             new_audit_rows=rows,
             kill_switch_cycle_skipped_in_period=kscs_in_period,
             positions_with_prior_pu=positions_with_prior_pu,
             threshold=price_unavailable_threshold,
+            failures=failures,
         )
     except Exception as exc:  # noqa: BLE001
         failures.append(NotificationFailure(
@@ -3456,7 +3532,7 @@ def notify_paper_tick_events(
     # Dispatch critical pushes (one per event; lock 6g-L14 isolation).
     # Each successful dispatch produces a CriticalPush record so the
     # operator can disambiguate multiple same-event-type rows in one tick.
-    critical_pushed: list[CriticalPush] = []
+    critical_sent: list[CriticalPush] = []
     for ev in criticals:
         rendered = _safe_render_critical(ev, failures)
         if rendered is None:
@@ -3468,7 +3544,7 @@ def notify_paper_tick_events(
             event_type=ev.event_type, failures=failures,
         )
         if sent_ok:
-            critical_pushed.append(CriticalPush(
+            critical_sent.append(CriticalPush(
                 event_type=ev.event_type, audit_id=ev.audit_id, title=title,
             ))
 
@@ -3499,8 +3575,8 @@ def notify_paper_tick_events(
         log.warning("paper_tick_notify_summary_projection_failed",
                     error=str(exc))
         return NotificationResult(
-            critical_pushed=tuple(critical_pushed),
-            summary_pushed=False,
+            critical_sent=tuple(critical_sent),
+            summary_sent=False,
             failures=tuple(failures),
         )
     # summary_failures is a tuple of 0..N NotificationFailure (lock 6g-L21
@@ -3508,20 +3584,20 @@ def notify_paper_tick_events(
     failures.extend(summary_failures)
 
     rendered_summary = _safe_render_summary(summary, failures)
-    summary_pushed = False
+    summary_sent = False
     summary_title: str | None = None
     summary_body: str | None = None
     if rendered_summary is not None:
         summary_title, summary_body = rendered_summary
-        summary_pushed = _safe_send(
+        summary_sent = _safe_send(
             notifier,
             title=summary_title, body=summary_body, url=None,
             event_type="tick_summary", failures=failures,
         )
 
     return NotificationResult(
-        critical_pushed=tuple(critical_pushed),
-        summary_pushed=summary_pushed,
+        critical_sent=tuple(critical_sent),
+        summary_sent=summary_sent,
         failures=tuple(failures),
         summary_title=summary_title,
         summary_body=summary_body,
@@ -4032,7 +4108,7 @@ is false (exit 1) to avoid the failure mode "operator thinks they republished
 but the disabled flag swallowed all sends".
 
 Stdout format per spec §5.2 in this exact order:
-  1. `critical_pushed`: one `pushed: <EVENT_TYPE>` line per event_type
+  1. `critical_sent`: one `pushed: <EVENT_TYPE>` line per event_type
   2. `summary_title` + 200-char-truncated `summary_body` preview
   3. `failures`: one `failure: <event_type> :: <title> :: <error>` line per
      NotificationFailure
@@ -4069,18 +4145,18 @@ def _format_body_preview(body: str | None) -> str:
 
 def _print_result(result: NotificationResult) -> None:
     """Format NotificationResult to stdout per spec §5.2."""
-    # 1. critical_pushed — each entry is a CriticalPush record
-    if result.critical_pushed:
-        for push in result.critical_pushed:
+    # 1. critical_sent — each entry is a CriticalPush record
+    if result.critical_sent:
+        for push in result.critical_sent:
             print(f"pushed: {push.event_type} (audit_id={push.audit_id}) :: {push.title}")
     else:
         print("pushed: (none)")
 
     # 2. summary_title + body preview
-    if result.summary_pushed and result.summary_title:
+    if result.summary_sent and result.summary_title:
         print(f"summary_title: {result.summary_title}")
         print(f"summary_body_preview: {_format_body_preview(result.summary_body)}")
-    elif not result.summary_pushed:
+    elif not result.summary_sent:
         print("summary: (not emitted)")
 
     # 3. failures
@@ -4337,7 +4413,7 @@ Wires the existing `paper_audit_event` stream into operator push notifications v
 - **KILL_SWITCH_CYCLE_SKIPPED dedup** per active period (lock 6g-L5). KILL_SWITCH_FLIPPED uses asymmetric extended window `[latest_tick_completed_at, notify_started_at]` so externally-triggered between-tick flips are picked up (lock 6g-L20).
 - **Conditional tick_date filter** (lock 6g-L19): TICK_COMPLETED / TICK_REPROCESSED_COMPLETED / KILL_SWITCH_CYCLE_SKIPPED MUST match `context["tick_date"]`; all other events admitted on time window alone.
 - **No coalescing** within a single tick (§3.1): three ENGINE_INVARIANT_ERROR rows → three pushes.
-- **Disabled path** (lock 6g-L15): `MP_PAPER_NOTIFICATIONS_ENABLED=false` → no sends, `critical_pushed=()`, `summary_pushed=False`, single `NotificationFailure(error="disabled_by_config")`.
+- **Disabled path** (lock 6g-L15): `MP_PAPER_NOTIFICATIONS_ENABLED=false` → no sends, `critical_sent=()`, `summary_sent=False`, single `NotificationFailure(error="disabled_by_config")`.
 - **Disaster recovery** via explicit CLI (lock 6g-L8): `python -m marketpulse.observability.republish_cli --date YYYY-MM-DD`. Refuses to run when feature flag is false (lock 6g-L18).
 
 ## Architecture
@@ -4422,7 +4498,7 @@ Expected: empty.
 ### Type consistency
 
 - `NotificationFailure` declared once in T3, imported by T6/T8.
-- `select_critical_events(*, new_audit_rows, kill_switch_cycle_skipped_in_period, positions_with_prior_pu, threshold=3)` — T3 declares, T6 imports + calls with these exact kwarg names.
+- `select_critical_events(*, new_audit_rows, kill_switch_cycle_skipped_in_period, positions_with_prior_pu, threshold=3, failures=None)` — T3 declares, T6 imports + calls with these exact kwarg names. The optional `failures` kwarg lets T6 receive lock-6g-L4c monotonic-invariant violation records.
 - `summarize_tick(*, new_audit_rows, tick_date, cash_balance_end, active_positions_with_pu_attempts, active_positions_count) -> tuple[TickSummary, tuple[NotificationFailure, ...]]` — T4 declares, T6 calls. (The failure tuple is empty when both `_resolve_cycle_status` and all `_safe_decimal` coercions succeed; non-empty when missing TICK_COMPLETED or malformed numeric fields surface.)
 - `render_critical_event(event: CriticalEvent) -> tuple[str, str]` and `render_tick_summary(summary: TickSummary) -> tuple[str, str]` — T5 declares, T6 imports.
 - `notify_paper_tick_events(*, since, tick_date, repository, notifier, clock, price_unavailable_threshold=3) -> NotificationResult` — T6 declares, T7 (scheduler hook) + T8 (CLI) call.
