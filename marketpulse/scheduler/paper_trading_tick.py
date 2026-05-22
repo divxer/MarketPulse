@@ -12,7 +12,6 @@ blocks from marketpulse/strategies/definitions/*.yaml."""
 from __future__ import annotations
 
 import logging
-from decimal import Decimal
 from pathlib import Path
 
 from marketpulse.backtest.allocation import allocate_for_day
@@ -65,14 +64,15 @@ def paper_trading_tick_job() -> None:
             clock=clock,
             sector_provider=strict_sector,
         )
+        # TODO(6b+T9): replace StubPriceProvider with YFinancePriceProvider.
+        # T3 shim: map-only stub (no `default` kwarg per lock 6b+L3).
+        price_provider = StubPriceProvider(map={})
         engine = ForwardExecutionEngine(
             repository=repository, clock=clock,
             kill_switch=kill_switch, risk_gate=risk_gate,
+            price_provider=price_provider,
         )
         bid_aggregator = BidAggregator(session=session, calendar=calendar)
-        # TODO(6b/6c): replace StubPriceProvider with a real provider
-        # (yfinance-backed or broker quote API). See price_provider.py.
-        price_provider = StubPriceProvider(default=Decimal("0"))
 
         result = daily_cycle.run(
             clock=clock, engine=engine, repository=repository,

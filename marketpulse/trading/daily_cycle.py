@@ -69,13 +69,14 @@ def _make_order_request(
     price_provider: PriceProvider,
 ) -> OrderRequest:
     """Quantization site: float → Decimal at the OrderRequest boundary
-    (lock xxii). Also fills horizon_price via the injected PriceProvider
-    if the winner left it None (lock R6-15)."""
-    horizon_price = winner.horizon_price
-    if horizon_price is None:
-        horizon_price = price_provider.horizon_price(
-            ticker=winner.ticker, horizon_date=winner.horizon_date,
-        )
+    (lock xxii).
+
+    T3 shim (lock 6b+L1): forward mode ALWAYS leaves horizon_price=None.
+    Even if a winner arrives with a pre-filled horizon_price (Phase 5
+    backtest convention leaking through the forward path — which
+    shouldn't happen but defend against drift), we ignore it. T8 will
+    delete this whole shim and the price_provider kwarg."""
+    horizon_price = None
     return OrderRequest(
         strategy=winner.strategy,
         ticker=winner.ticker,
