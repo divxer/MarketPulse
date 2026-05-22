@@ -92,3 +92,73 @@ def test_risk_gate_module_reexports_risk_intent():
     from marketpulse.trading.risk_gate import RiskIntent as RI1
     from marketpulse.trading.types import RiskIntent as RI2
     assert RI1 is RI2
+
+
+def test_market_hours_config_construction():
+    from datetime import time
+
+    from marketpulse.trading.risk_gates.config_provider import MarketHoursConfig
+    c = MarketHoursConfig(
+        enabled=True, exchange="XNYS",
+        allow_regular_session=True, allow_post_close=True,
+        post_close_until=time(18, 0), allow_premarket=False,
+    )
+    assert c.enabled is True
+    assert c.post_close_until == time(18, 0)
+
+
+def test_daily_loss_config_construction():
+    from decimal import Decimal
+
+    from marketpulse.trading.risk_gates.config_provider import DailyLossConfig
+    c = DailyLossConfig(enabled=True, daily_loss_limit=Decimal("500"))
+    assert c.daily_loss_limit == Decimal("500")
+
+
+def test_sector_exposure_config_construction():
+    from decimal import Decimal
+
+    from marketpulse.trading.risk_gates.config_provider import SectorExposureConfig
+    c = SectorExposureConfig(
+        enabled=True, max_sector_exposure_pct=0.35,
+        configured_max_capital_in_use=Decimal("10000"),
+    )
+    assert c.max_sector_exposure_pct == 0.35
+
+
+def test_risk_gate_config_aggregates_three():
+    from datetime import time
+    from decimal import Decimal
+
+    from marketpulse.trading.risk_gates.config_provider import (
+        DailyLossConfig,
+        MarketHoursConfig,
+        RiskGateConfig,
+        SectorExposureConfig,
+    )
+    cfg = RiskGateConfig(
+        market_hours=MarketHoursConfig(
+            enabled=True, exchange="XNYS",
+            allow_regular_session=True, allow_post_close=True,
+            post_close_until=time(18, 0), allow_premarket=False,
+        ),
+        daily_loss=DailyLossConfig(
+            enabled=True, daily_loss_limit=Decimal("500"),
+        ),
+        sector_exposure=SectorExposureConfig(
+            enabled=True, max_sector_exposure_pct=0.35,
+            configured_max_capital_in_use=Decimal("10000"),
+        ),
+    )
+    assert cfg.market_hours.enabled is True
+    assert cfg.daily_loss.daily_loss_limit == Decimal("500")
+
+
+def test_strategy_risk_config_optional_limit():
+    from decimal import Decimal
+
+    from marketpulse.trading.risk_gates.config_provider import StrategyRiskConfig
+    c = StrategyRiskConfig(max_position_notional=Decimal("25000"))
+    assert c.max_position_notional == Decimal("25000")
+    c2 = StrategyRiskConfig(max_position_notional=None)
+    assert c2.max_position_notional is None
