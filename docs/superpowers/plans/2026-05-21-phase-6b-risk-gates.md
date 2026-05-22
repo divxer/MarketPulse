@@ -353,8 +353,14 @@ gate's run-all + audit-all contract. The 6a contract (approved, reason,
 gate_name) stays intact via default values.
 
 Lock 6b-L16: `context` is wrapped in MappingProxyType post-construction
-so top-level mutation raises TypeError. Gate authors pass plain dicts
-for ergonomics — the dataclass freezes them.
+so top-level mutation (`result.context["x"] = y`) raises TypeError.
+**This is a top-level guarantee only — NOT a deep freeze.** Nested
+mutables (e.g., `result.context["per_gate"][0]["context"]["k"] = "v"`)
+remain mutable in memory. Deep immutability is owned by lock 6b-L17:
+`audit_json.normalize_for_json` materializes fresh deep copies at every
+audit-write boundary, so the persisted audit ledger is the authoritative
+immutable snapshot. The two locks pair deliberately: 6b-L16 = in-memory
+top-level; 6b-L17 = on-disk deep.
 
 Re-exports `RiskIntent` from types.py for back-compat (canonical home is
 types.py per lock 6b-L12)."""
@@ -4003,12 +4009,13 @@ Expected: ALL pass.
 ```bash
 git add marketpulse/scheduler/paper_trading_tick.py tests/trading/test_scheduler.py
 git commit -m "$(cat <<'EOF'
-feat(phase-6b-T17): paper_trading_tick DI swap to CompositeRiskGate
+feat(phase-6b-T17): paper_trading_tick DI swap via build_standard_composite
 
-AlwaysApproveRiskGate → CompositeRiskGate(config_provider, repository,
-calendar, clock, sector_provider=strict_sector). RiskConfigProvider reads
-config/risk_gates.yaml + per-strategy risk: blocks at job start; values
-are deployment-static so the per-tick parse cost is negligible.
+AlwaysApproveRiskGate → build_standard_composite(config_provider=...,
+repository=..., calendar=..., clock=..., sector_provider=strict_sector).
+Composition root lives in this file (lock 6b-L15). RiskConfigProvider
+reads config/risk_gates.yaml + per-strategy risk: blocks at job start;
+values are deployment-static so the per-tick parse cost is negligible.
 
 Co-Authored-By: Claude <noreply@anthropic.com>
 EOF
@@ -4055,8 +4062,8 @@ def test_e2e_phase6b_17_30_ny_happy_path(tmp_path, monkeypatch):
     from marketpulse.trading.price_provider import StubPriceProvider
     from marketpulse.trading.repository import Repository
     from marketpulse.trading.risk_gates import (
-        CompositeRiskGate,
         RiskConfigProvider,
+        build_standard_composite,
     )
 
     eng = create_engine(f"sqlite:///{tmp_path / 'e2e.db'}")
@@ -4073,7 +4080,9 @@ def test_e2e_phase6b_17_30_ny_happy_path(tmp_path, monkeypatch):
             global_path=repo_root / "config" / "risk_gates.yaml",
             strategies_dir=repo_root / "marketpulse" / "strategies" / "definitions",
         )
-        risk_gate = CompositeRiskGate(
+        # E2E uses the production factory (lock 6b-L15) — this is also
+        # the path the scheduler entrypoint runs in production.
+        risk_gate = build_standard_composite(
             config_provider=provider, repository=repo,
             calendar=calendar, clock=clock,
             sector_provider=lambda t: "Technology" if t == "AAPL" else None,
@@ -4141,8 +4150,8 @@ def test_e2e_phase6b_sector_cap_denial_writes_per_gate_audit(tmp_path):
     from marketpulse.trading.price_provider import StubPriceProvider
     from marketpulse.trading.repository import Repository
     from marketpulse.trading.risk_gates import (
-        CompositeRiskGate,
         RiskConfigProvider,
+        build_standard_composite,
     )
 
     eng = create_engine(f"sqlite:///{tmp_path / 'e2e2.db'}")
@@ -4157,7 +4166,8 @@ def test_e2e_phase6b_sector_cap_denial_writes_per_gate_audit(tmp_path):
             global_path=repo_root / "config" / "risk_gates.yaml",
             strategies_dir=repo_root / "marketpulse" / "strategies" / "definitions",
         )
-        risk_gate = CompositeRiskGate(
+        # E2E uses the production factory (lock 6b-L15).
+        risk_gate = build_standard_composite(
             config_provider=provider, repository=repo,
             calendar=NYTradingCalendar(), clock=clock,
             sector_provider=lambda t: "Technology",
@@ -4360,14 +4370,15 @@ Run:
 uv run python -c "
 from marketpulse.trading.risk_gates import (
     CompositeRiskGate, RiskConfigProvider, MarketHoursGate, StrategySizeGate,
-    DailyLossGate, SectorExposureGate, strict_sector,
+    DailyLossGate, SectorExposureGate, strict_sector, build_standard_composite,
 )
 from marketpulse.trading.types import RiskIntent
 from marketpulse.trading.risk_gate import RiskResult
-print('OK', RiskIntent.OPEN, RiskResult(approved=True, reason=''))
+r = RiskResult(approved=True, reason='')
+print('OK', RiskIntent.OPEN, type(r.context).__name__, dict(r.context))
 "
 ```
-Expected: `OK open RiskResult(approved=True, reason='', gate_name='', failed_gates=(), context={})`.
+Expected: `OK open mappingproxy {}` — confirms `RiskResult.context` is now wrapped in `MappingProxyType` (lock 6b-L16) and the package's public surface (including `build_standard_composite`) imports cleanly.
 
 - [ ] **Step 6: Confirm working tree clean (or only unrelated carryover)**
 
