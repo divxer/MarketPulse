@@ -66,13 +66,17 @@ marketpulse/trading/risk_gates/                (NEW package)
                                                 StrategyRiskConfig)
 
 marketpulse/trading/risk_gate.py               (MODIFIED — backward compat)
-                                               Adds RiskIntent enum.
                                                Extends RiskResult with
                                                failed_gates + context.
                                                Re-exports symbols from
-                                               risk_gates/ package.
+                                               risk_gates/ package and
+                                               re-exports RiskIntent from
+                                               types.py (back-compat alias).
 
 marketpulse/trading/types.py                   (MODIFIED)
+                                               Adds RiskIntent enum (canonical
+                                               home — keeps OrderRequest's type
+                                               dep upward, never sideways).
                                                OrderRequest gains
                                                risk_intent: RiskIntent = OPEN
 
@@ -101,7 +105,7 @@ config/strategies/*.yaml                       (MODIFIED) add risk: block
 ### `RiskIntent` semantics
 
 ```python
-# marketpulse/trading/risk_gate.py
+# marketpulse/trading/types.py  (canonical home — see lock 6b-L12)
 from enum import StrEnum
 
 class RiskIntent(StrEnum):
@@ -111,6 +115,8 @@ class RiskIntent(StrEnum):
     REDUCE = "reduce"    # partial exit; gates bypassed
     FLIP = "flip"        # 6b denies; Phase 7 wires properly
 ```
+
+`RiskIntent` lives in `types.py` (NOT in `risk_gate.py`) because `OrderRequest` (defined in `types.py`) carries `risk_intent: RiskIntent` as a field. If `RiskIntent` lived in `risk_gate.py`, `types.py` would have to import from `risk_gate.py`, inverting the dependency layer that 6a established (types is a leaf module — nothing above it should import down into it). `risk_gate.py` re-exports `RiskIntent` for back-compat callers but the canonical home is `types.py` (lock 6b-L12).
 
 Phase 6 paper trading currently emits only `OPEN` (Phase 4-5 pattern: enter at event, exit at horizon). Field exists for forward-compat; only OPEN exercised by 6b production paths.
 
@@ -216,7 +222,7 @@ engine = ForwardExecutionEngine(
 
 **`CompositeRiskGate.__init__` construction model:** the composite builds its 4 child gates *internally* from the injected dependencies (config_provider, repository, calendar, clock, sector_provider). Callers do not pass pre-built gates — that's an over-flexibility trap; the gate identities + order are locked by 6b-L2. Tests substitute behavior by injecting fakes for the underlying dependencies (FakeClock, in-memory Repository, stub sector_provider) rather than overriding child gates.
 
-**Kill-switch ordering (clarification):** `ForwardExecutionEngine.place_order` checks the kill switch BEFORE invoking `CompositeRiskGate`. This means an active kill switch denies ALL orders, including `CLOSE`/`REDUCE` intents that would otherwise bypass the gates. This is intentional — operators flip the kill switch when they want a complete halt; reducing positions during a halt requires lifting the kill switch first. If a use case for "kill switch active but allow forced flatten" emerges, it lands in Phase 7 broker work, not 6b.
+**Kill-switch is OUTSIDE the RiskGate principle scope (clarification):** the core principle "Never block risk-reducing actions" applies *within* the `CompositeRiskGate` layer only. `KillSwitch` is a separate emergency global halt that lives in `marketpulse/trading/kill_switch.py`, NOT inside the `risk_gates/` package, and intentionally falls outside this principle. `ForwardExecutionEngine.place_order` checks the kill switch BEFORE invoking `CompositeRiskGate` (6a-L8 defense-in-depth) — so an active kill switch denies ALL orders, including `CLOSE`/`REDUCE` intents that the RiskGate layer would otherwise bypass. This is intentional catastrophic safety: operators flip the kill switch when they want a complete halt; reducing positions during a halt requires lifting the kill switch first. If a use case for "kill switch active but allow forced flatten" emerges, it lands in Phase 7 broker work, not 6b.
 
 Tests continue using `AlwaysApproveRiskGate` where the composite isn't the unit-under-test (existing 6a test fixtures unchanged).
 
@@ -377,14 +383,23 @@ def check_pre_trade(self, *, order_request):
 
 def today_realized_pnl(self, *, tick_date: date) -> Decimal:
     """Sum of paper_fill.realized_pnl where side='EXIT' and the fill's
-    NY-day equals tick_date. Returns Decimal(0) if no rows."""
-    ny_start = datetime.combine(tick_date, time.min, tzinfo=NY).astimezone(UTC)
-    ny_end = ny_start + timedelta(days=1)
+    NY-day equals tick_date. Returns Decimal(0) if no rows.
+
+    DST-safe NY-day window (lock 6b-L13): build both bounds as NY-local
+    midnight and convert each to UTC independently. The naïve approach
+    `ny_start + timedelta(days=1)` adds 24 wall-clock hours in UTC, which
+    is off by 1 hour on the DST transition days (spring/fall). Building
+    both bounds in NY-local time first guarantees a true 23/24/25-hour
+    NY-day window."""
+    ny_start = datetime.combine(tick_date, time.min, tzinfo=NY)
+    ny_end = datetime.combine(tick_date + timedelta(days=1), time.min, tzinfo=NY)
+    utc_start = ny_start.astimezone(UTC)
+    utc_end = ny_end.astimezone(UTC)
     total = self._session.execute(
         select(func.coalesce(func.sum(PaperFill.realized_pnl), Decimal("0")))
         .where(PaperFill.side == "EXIT")
-        .where(PaperFill.filled_at >= ny_start)
-        .where(PaperFill.filled_at < ny_end)
+        .where(PaperFill.filled_at >= utc_start)
+        .where(PaperFill.filled_at < utc_end)
     ).scalar()
     return Decimal(total or 0)
 
@@ -537,6 +552,11 @@ class RiskConfigProvider:
 | 14 | 17:30 NY happy path | Phase 6a default tick fires at 17:30 NY → `MarketHoursGate` passes (post_close_until=18:00) | (Section 4 fix) |
 | 15 | Audit reuse | `ORDER_REJECTED` event_type, `context.failed_gates` populated, `context.per_gate` lists all 4 results | 6b-L6 |
 | 16 | Integration smoke | E2E with all 4 gates active; happy-path order; denied (sector cap exceeded); fresh-session assertion that audit was committed before raise | end-to-end |
+| 17 | MarketHours boundary — premarket close edge | premarket disabled, 09:29:59 NY → deny `outside_placement_window`; 09:30:00 NY (regular session inclusive left) → approve | `_window_check` algorithm |
+| 18 | MarketHours boundary — regular session close edge | 16:00:00 NY (regular session inclusive right) → approve; 16:00:01 NY (post-close inclusive left-open) → approve when `allow_post_close=true` | `_window_check` algorithm |
+| 19 | MarketHours boundary — post-close cutoff edge | `post_close_until=18:00`, 18:00:00 NY → approve (inclusive right); 18:00:01 NY → deny `outside_placement_window` | `_window_check` algorithm |
+| 20 | MarketHours boundary — all-disabled | all 3 flags false → every wall-time denies `outside_placement_window` | `_window_check` returns False |
+| 21 | DailyLoss DST window | `tick_date` straddles a US DST transition (spring forward / fall back) — `today_realized_pnl` window covers exactly the right NY-day fills, not a fixed 24h UTC slice | 6b-L13 |
 
 ---
 
@@ -554,7 +574,10 @@ class RiskConfigProvider:
 | **6b-L8** | **`SectorExposureGate` fail-closed on `proposed_sector is None`.** Never bucket to UNKNOWN-and-allow. `sector_exposure_notional()` also excludes unknown-sector OPEN positions from the buckets (they don't anchor a sector). |
 | **6b-L9** | **`StrategySizeGate` fail-closed on missing strategy risk config.** When `RiskConfigProvider.strategy_config(s)` is None OR `max_position_notional` is None, deny `missing_strategy_risk_config`. No infinite-cap default. |
 | **6b-L10** | **Decimal values in audit context MUST be string-normalized** before persistence (matches 6a's `_dump` pattern). Applies to nested `context.per_gate[*].context` as well. Prevents non-deterministic float serialization and Postgres-migration drift. |
-| **6b-L11** | **Pre-existing OPEN positions with unknown sector are excluded from sector-cap accounting.** Operators MUST run sector mapping backfill (populate `config/sector_overrides.yaml`) before 6b production deploy, OR accept that pre-6b OPENs don't count toward the cap. 6b-L8 fail-closed prevents NEW unknown-sector positions from being placed; this lock covers the deployment transition. |
+| **6b-L11** | **Pre-existing OPEN positions with unknown sector are excluded from sector-cap accounting.** Operators MUST run sector mapping backfill (populate `config/sector_overrides.yaml`) before 6b production deploy, OR accept that pre-6b OPENs don't count toward the cap. 6b-L8 fail-closed prevents NEW unknown-sector positions from being placed; this lock covers the deployment transition. The implementation plan ships a **preflight deploy checklist** that enumerates every distinct ticker in `paper_position WHERE status='OPEN'`, runs `get_sector(t)` on each, and lists tickers with `None` result. Operators must add YAML overrides for that list (or explicitly accept) before flipping the DI seam. |
+| **6b-L12** | **`RiskIntent` lives in `marketpulse/trading/types.py`** (NOT in `risk_gate.py`). `OrderRequest` carries `risk_intent: RiskIntent` as a field; placing the enum in `risk_gate.py` would invert the 6a-established dependency hierarchy (types is a leaf). `risk_gate.py` re-exports for back-compat callers but `from marketpulse.trading.types import RiskIntent` is the canonical import. |
+| **6b-L13** | **DST-safe NY-day window** for `today_realized_pnl`. Both bounds are constructed as NY-local midnight (one for `tick_date`, one for `tick_date + 1`) and converted to UTC independently. The naïve `ny_start + timedelta(days=1)` adds 24 wall-clock UTC hours and is off-by-one-hour on DST transition days. Operational test #21 enforces. |
+| **6b-L14** | **`RiskConfigProvider` scope discipline.** The provider parses ONLY the `risk:` block from each strategy YAML — never `signals:`, `sizing:`, or other strategy-execution blocks (those remain owned by `marketpulse/strategies/loader.py`). The strategy lookup key is the **YAML filename stem** (e.g., `momentum.yaml` → `"momentum"`), matching the Phase 3-T2 / Phase 3-T3 loader's identifier convention. Mismatch with the Phase 3 loader's naming = silent fail-closed for every order in the affected strategy — verify naming alignment in the implementation plan's 6b-0 acceptance tests. |
 
 ---
 
@@ -607,8 +630,8 @@ Single PR `feat(phase-6b): risk gates`. Branches from main → `plan/phase-6b-ri
 - `config/risk_gates.yaml`
 
 **Modified files (5):**
-- `marketpulse/trading/risk_gate.py` — adds `RiskIntent`, extends `RiskResult`, re-exports new package
-- `marketpulse/trading/types.py` — `OrderRequest.risk_intent: RiskIntent = OPEN`
+- `marketpulse/trading/risk_gate.py` — extends `RiskResult` (adds `failed_gates`, `context`), re-exports `CompositeRiskGate` + child gates from the new package, and re-exports `RiskIntent` from `types.py` for back-compat callers
+- `marketpulse/trading/types.py` — adds `RiskIntent` enum (canonical home — see lock 6b-L12); `OrderRequest.risk_intent: RiskIntent = OPEN`
 - `marketpulse/trading/repository.py` — appends 2 read helpers
 - `marketpulse/scheduler/paper_trading_tick.py` — wires `CompositeRiskGate`
 - `config/strategies/*.yaml` — adds `risk:` block per strategy. Phase 3-T2 created 6 strategy files (`momentum.yaml`, `meanrev.yaml`, etc.); each needs a `risk: { max_position_notional: <N> }` block. Any strategy YAML shipped WITHOUT a `risk:` block will trigger `StrategySizeGate` fail-closed deny `missing_strategy_risk_config` (6b-L9) for all orders in that strategy — verify all 6 are updated before 6b deploy.
