@@ -351,3 +351,190 @@ def test_tick_on_memorial_day_resolves_to_previous_friday(session):
         "Memorial Day replay should not emit SCHEDULER_GAP_DETECTED "
         "(sessions_after(Fri 22, Fri 22) == 0)"
     )
+
+
+# === Phase 6b — composite gate E2E (op-tests #14, #16) ===
+
+def test_e2e_phase6b_17_30_ny_happy_path(tmp_path, monkeypatch):
+    """Op-test #14: Phase 6a default tick fires at 17:30 NY post-close;
+    CompositeRiskGate's MarketHoursGate (post_close_until=18:00) must
+    pass. This is the lock-iv compatibility check: 6b must not break the
+    6a default scheduler cadence."""
+    from datetime import UTC, date, datetime
+    from decimal import Decimal
+    from pathlib import Path
+
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import Session
+
+    from marketpulse.backtest.allocation import AllocationResult, AllocationWinner
+    from marketpulse.db.base import Base
+    from marketpulse.db.models import PaperOrder
+    from marketpulse.trading import daily_cycle
+    from marketpulse.trading.bid_aggregator import BidAggregator
+    from marketpulse.trading.calendar import NYTradingCalendar
+    from marketpulse.trading.clock import FakeClock
+    from marketpulse.trading.forward_engine import ForwardExecutionEngine
+    from marketpulse.trading.kill_switch import KillSwitchState
+    from marketpulse.trading.price_provider import StubPriceProvider
+    from marketpulse.trading.repository import Repository
+    from marketpulse.trading.risk_gates import (
+        RiskConfigProvider,
+        build_standard_composite,
+    )
+
+    eng = create_engine(f"sqlite:///{tmp_path / 'e2e.db'}")
+    Base.metadata.create_all(eng)
+    with Session(eng) as s:
+        repo = Repository(session=s)
+        # 17:30 NY = 21:30 UTC on a Thursday (2026-05-21).
+        clock = FakeClock(now=datetime(2026, 5, 21, 21, 30, tzinfo=UTC))
+        calendar = NYTradingCalendar()
+        repo.ensure_initial_deposit(amount=Decimal("10000"), timestamp=clock.now())
+        ks = KillSwitchState(env_var="MP_NEVER", repository=repo)
+        repo_root = Path(__file__).resolve().parents[2]
+        provider = RiskConfigProvider.from_yaml(
+            global_path=repo_root / "config" / "risk_gates.yaml",
+            strategies_dir=repo_root / "marketpulse" / "strategies" / "definitions",
+        )
+        # E2E uses the production factory (lock 6b-L15) — this is also
+        # the path the scheduler entrypoint runs in production.
+        risk_gate = build_standard_composite(
+            config_provider=provider, repository=repo,
+            calendar=calendar, clock=clock,
+            sector_provider=lambda t: "Technology" if t == "AAPL" else None,
+        )
+        engine = ForwardExecutionEngine(
+            repository=repo, clock=clock, kill_switch=ks, risk_gate=risk_gate,
+        )
+
+        def alloc(**kw):
+            return AllocationResult(
+                winners=(
+                    AllocationWinner(
+                        strategy="momentum_breakout", ticker="AAPL",
+                        event_time=datetime(2026, 5, 21, 14, 0, tzinfo=UTC),
+                        event_price=150.0,
+                        horizon_date=date(2026, 5, 28),
+                        horizon_price=155.0,
+                        quantity=10,
+                        weight=1.0, raw_bid_weight=1.0, pool_corr=0.1,
+                        contribution_multiplier=1.0, adjusted_bid_weight=1.0,
+                        effective_corr_window=60,
+                        rewarded_for_negative_corr=False,
+                        would_change_rank=False,
+                        size_clamped_by_override=False,
+                        strategy_version="v1",
+                    ),
+                ),
+                blocked=(), cash_used=1500.0, cash_remaining=8500.0,
+                timeline=(),
+            )
+        alloc.__version__ = "v1"
+
+        result = daily_cycle.run(
+            clock=clock, engine=engine, repository=repo,
+            bid_aggregator=BidAggregator(session=s, calendar=calendar),
+            allocator=alloc, calendar=calendar, kill_switch=ks,
+            price_provider=StubPriceProvider(default=Decimal("0")),
+        )
+        assert result.orders_placed == 1
+        assert result.cycle_status == "completed"
+
+        orders = s.execute(select(PaperOrder)).scalars().all()
+        assert len(orders) == 1
+
+
+def test_e2e_phase6b_sector_cap_denial_writes_per_gate_audit(tmp_path):
+    """Op-test #16: E2E denial with all 4 gates active. Verifies the audit
+    row carries failed_gates + per_gate."""
+    from datetime import UTC, date, datetime
+    from decimal import Decimal
+    from pathlib import Path
+
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import Session
+
+    from marketpulse.backtest.allocation import AllocationResult, AllocationWinner
+    from marketpulse.db.base import Base
+    from marketpulse.db.models import PaperAuditEvent
+    from marketpulse.trading import daily_cycle
+    from marketpulse.trading.bid_aggregator import BidAggregator
+    from marketpulse.trading.calendar import NYTradingCalendar
+    from marketpulse.trading.clock import FakeClock
+    from marketpulse.trading.forward_engine import ForwardExecutionEngine
+    from marketpulse.trading.kill_switch import KillSwitchState
+    from marketpulse.trading.price_provider import StubPriceProvider
+    from marketpulse.trading.repository import Repository
+    from marketpulse.trading.risk_gates import (
+        RiskConfigProvider,
+        build_standard_composite,
+    )
+
+    eng = create_engine(f"sqlite:///{tmp_path / 'e2e2.db'}")
+    Base.metadata.create_all(eng)
+    with Session(eng) as s:
+        repo = Repository(session=s)
+        clock = FakeClock(now=datetime(2026, 5, 21, 21, 30, tzinfo=UTC))
+        repo.ensure_initial_deposit(amount=Decimal("10000"), timestamp=clock.now())
+        ks = KillSwitchState(env_var="MP_NEVER", repository=repo)
+        repo_root = Path(__file__).resolve().parents[2]
+        provider = RiskConfigProvider.from_yaml(
+            global_path=repo_root / "config" / "risk_gates.yaml",
+            strategies_dir=repo_root / "marketpulse" / "strategies" / "definitions",
+        )
+        # E2E uses the production factory (lock 6b-L15).
+        risk_gate = build_standard_composite(
+            config_provider=provider, repository=repo,
+            calendar=NYTradingCalendar(), clock=clock,
+            sector_provider=lambda t: "Technology",
+        )
+        engine = ForwardExecutionEngine(
+            repository=repo, clock=clock, kill_switch=ks, risk_gate=risk_gate,
+        )
+
+        def alloc(**kw):
+            return AllocationResult(
+                winners=(
+                    # event_price * quantity = 200 * 100 = 20_000, well over
+                    # 0.35 * 10_000 = 3_500 cap → sector_exposure denies.
+                    AllocationWinner(
+                        strategy="momentum_breakout", ticker="AAPL",
+                        event_time=datetime(2026, 5, 21, 14, 0, tzinfo=UTC),
+                        event_price=200.0,
+                        horizon_date=date(2026, 5, 28),
+                        horizon_price=210.0,
+                        quantity=100,
+                        weight=1.0, raw_bid_weight=1.0, pool_corr=0.1,
+                        contribution_multiplier=1.0, adjusted_bid_weight=1.0,
+                        effective_corr_window=60,
+                        rewarded_for_negative_corr=False,
+                        would_change_rank=False,
+                        size_clamped_by_override=False,
+                        strategy_version="v1",
+                    ),
+                ),
+                blocked=(), cash_used=0.0, cash_remaining=10000.0,
+                timeline=(),
+            )
+        alloc.__version__ = "v1"
+
+        result = daily_cycle.run(
+            clock=clock, engine=engine, repository=repo,
+            bid_aggregator=BidAggregator(session=s, calendar=NYTradingCalendar()),
+            allocator=alloc, calendar=NYTradingCalendar(), kill_switch=ks,
+            price_provider=StubPriceProvider(default=Decimal("0")),
+        )
+        assert result.orders_placed == 0
+        assert result.orders_rejected == 1
+
+        rejects = s.execute(
+            select(PaperAuditEvent)
+            .where(PaperAuditEvent.event_type == "ORDER_REJECTED")
+        ).scalars().all()
+        assert len(rejects) == 1
+        ctx = rejects[0].context
+        # strategy_size also denies (20_000 > 25_000? actually 20_000 < 25_000
+        # so strategy_size approves; only sector_exposure denies).
+        assert "sector_exposure" in ctx["failed_gates"]
+        assert len(ctx["per_gate"]) == 4
