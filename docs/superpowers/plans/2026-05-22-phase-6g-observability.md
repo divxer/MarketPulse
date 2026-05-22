@@ -26,7 +26,7 @@
 
 - **T0** — Preflight: branch + baseline (pytest, ruff, alembic head 0011).
 - **T1** — Settings flag `MP_PAPER_NOTIFICATIONS_ENABLED` + `get_notifier_from_settings` wrapper (6g-L13, 6g-L15).
-- **T2** — Repository 3 new read-only helpers: `positions_with_prior_price_unavailable`, `kill_switch_cycle_skipped_in_active_period`, `latest_tick_completed_timestamp` (6g-L5, 6g-L17, 6g-L20).
+- **T2** — Repository 4 new read-only helpers: `positions_with_prior_price_unavailable`, `kill_switch_cycle_skipped_in_active_period`, `latest_tick_completed_timestamp`, `latest_price_unavailable_attempt_counts` (6g-L5, 6g-L17, 6g-L20, 6g-L4c global).
 - **T3** — Pure projection dataclasses (`NotificationFailure`, `CriticalEvent`, `PlacedOrderDetail`, `TickSummary`) + `select_critical_events` (6g-L3, 6g-L4a, 6g-L4b, 6g-L4c, 6g-L5, 6g-L9).
 - **T4** — Pure `summarize_tick` with fallback semantics (6g-L21).
 - **T5** — `templates.py` renderers: critical + summary, money formatting, empty-section skipping, `4+` cap (6g-L10, 6g-L11, 6g-L12).
@@ -631,6 +631,56 @@ In `marketpulse/trading/repository.py`, after the existing `count_price_unavaila
         ).scalar() or 0
         return skip_exists > 0
 
+    def latest_price_unavailable_attempt_counts(
+        self, *, position_ids: list[int], before: datetime,
+    ) -> dict[int, int]:
+        """Lock 6g-L4c **global** monotonic invariant support: returns
+        a mapping `{position_id: max(attempt_count)}` over PRICE_UNAVAILABLE
+        audit rows with `timestamp < before` for the given position_ids.
+
+        The 6g translator (T6 entrypoint) uses this to seed the L4c
+        check WITHOUT the "same-batch local ordering" limitation —
+        comparing the new tick's attempt_count values against
+        per-position max from ALL prior history makes a regression
+        like `tick1: attempt=5 → tick2: attempt=2` actually detectable.
+
+        Missing position_ids in the result (no prior PRICE_UNAVAILABLE
+        rows for them) are simply absent from the dict; the caller
+        treats absence as `prior_max = 0`.
+
+        Read-only `select()` — passes the architecture boundary guard."""
+        from marketpulse.db.models import PaperAuditEvent
+
+        if not position_ids:
+            return {}
+        rows = self._session.execute(
+            select(
+                func.json_extract(
+                    PaperAuditEvent.context, "$.position_id",
+                ).label("pid"),
+                func.max(
+                    func.json_extract(
+                        PaperAuditEvent.context, "$.attempt_count",
+                    ),
+                ).label("max_attempt"),
+            )
+            .where(PaperAuditEvent.event_type == "PRICE_UNAVAILABLE")
+            .where(PaperAuditEvent.timestamp < before)
+            .where(
+                func.json_extract(
+                    PaperAuditEvent.context, "$.position_id",
+                ).in_(position_ids)
+            )
+            .group_by("pid")
+        ).all()
+        # Filter Nones (defensive: rows without position_id in context)
+        # and coerce to int (SQLite returns json_extract as varying types).
+        return {
+            int(r.pid): int(r.max_attempt)
+            for r in rows
+            if r.pid is not None and r.max_attempt is not None
+        }
+
     def latest_tick_completed_timestamp(
         self, *, before: datetime,
     ) -> datetime | None:
@@ -1134,15 +1184,35 @@ class CriticalEvent:
     Carries the projection's view of the audit row — templates.py is
     pure rendering and should NOT need to reach back into raw context
     keys for canonical fields (timestamp / strategy / reason).
+
+    Field-level contracts:
+      reason: `None` when the audit row's `reason` column was unset.
+        Distinct from `""` (intentionally blank). Renderers branching
+        on truthiness see both as "no reason", but downstream telemetry
+        / CLI can match `is None` to flag "missing reason on an event
+        type that should have one".
+      context: a read-only `Mapping[str, object]` view (built via
+        `MappingProxyType` in `_freeze_context`). Without the proxy,
+        `@dataclass(frozen=True)` only freezes the slot bindings — a
+        renderer doing `ctx["x"] = ...` would silently corrupt the
+        projection between renders.
     """
-    event_type: str        # AuditEventType value (str)
-    audit_id: int          # for logging / republish CLI output
-    timestamp: datetime    # row's timestamp (UTC) — used in body "Time:" line
-    strategy: str | None   # PaperAuditEvent.strategy column (may be None)
-    reason: str            # PaperAuditEvent.reason column (may be "")
-    context: dict          # raw audit row context (passed to templates for
-                           # event-type-specific fields: ticker, gate_name,
-                           # attempt_count, etc.)
+    event_type: str             # AuditEventType value (str)
+    audit_id: int               # for logging / republish CLI output
+    timestamp: datetime         # row's timestamp (UTC)
+    strategy: str | None        # PaperAuditEvent.strategy column (may be None)
+    reason: str | None          # None = unset; "" = explicit blank
+    context: "Mapping[str, object]"   # immutable view — see _freeze_context
+
+
+def _freeze_context(raw) -> "Mapping[str, object]":
+    """Helper: convert raw audit row context dict (or None) → immutable
+    Mapping for CriticalEvent. `None` becomes an empty proxy. Callers
+    in `select_critical_events` and projection tests use this so that
+    renderer-side mutations are impossible (item 2 from round 4
+    review)."""
+    from types import MappingProxyType
+    return MappingProxyType(dict(raw or {}))
 
 
 @dataclass(frozen=True)
@@ -1178,13 +1248,54 @@ class TickSummary:
 
 # === select_critical_events ===
 
-# Event types that always produce a critical push (no extra filter).
+# Critical-event decision rules (item 5 of round-4 review: move from
+# scattered elif-chain to a small dispatch table for future
+# extensibility — adding 6h / 6i / 7a event types only requires adding
+# a row here).
+#
+# Each rule is a callable `(context: Mapping, dedup_facts) -> bool`.
+# `dedup_facts` is a small bag passed by select_critical_events with
+# the lock 6g-L4b / L5 dedup state. Rules that always fire ignore
+# both args.
+_ALWAYS = lambda ctx, facts: True  # noqa: E731 — short rule
 _ALWAYS_CRITICAL = frozenset({
     "ENGINE_INVARIANT_ERROR",
     "SCHEDULER_GAP_DETECTED",
     "TICK_REPROCESSED_COMPLETED",
     "KILL_SWITCH_FLIPPED",
 })
+
+
+def _is_kscs_first_in_period(ctx, facts) -> bool:
+    return not facts.kill_switch_cycle_skipped_in_period
+
+
+def _is_position_recovered(ctx, facts) -> bool:
+    pos_id = ctx.get("position_id")
+    return pos_id is not None and pos_id in facts.positions_with_prior_pu
+
+
+# Conditional-rule table. Iteration order is irrelevant (no event type
+# can match two rules — guarded by the `et in _ALWAYS_CRITICAL` short
+# circuit + mutually-exclusive event_type keys). Future phases that
+# introduce new event types add one row here.
+_CONDITIONAL_RULES: dict[str, "callable"] = {
+    "KILL_SWITCH_CYCLE_SKIPPED": _is_kscs_first_in_period,
+    "ORDER_REJECTED": lambda ctx, facts: _is_daily_loss_reject(ctx),
+    "PRICE_UNAVAILABLE": lambda ctx, facts: _is_pu_third_attempt(
+        ctx, facts.threshold,
+    ),
+    "POSITION_CLOSED": _is_position_recovered,
+}
+
+
+@dataclass(frozen=True)
+class _DedupFacts:
+    """Bag-of-facts threaded into _CONDITIONAL_RULES lambdas. Kept as a
+    tiny internal record so we don't pass 5+ positional args around."""
+    kill_switch_cycle_skipped_in_period: bool
+    positions_with_prior_pu: set[int]
+    threshold: int
 
 
 def _is_daily_loss_reject(context: dict) -> bool:
@@ -1205,19 +1316,35 @@ def _is_pu_third_attempt(context: dict, threshold: int) -> bool:
 def _check_pu_monotonic(
     new_audit_rows,
     failures: "list[NotificationFailure]",
+    *,
+    prior_attempts_by_position: dict[int, int],
 ) -> None:
-    """Lock 6g-L4c runtime check: PRICE_UNAVAILABLE.context["attempt_count"]
-    must be per-position monotonic non-decreasing (enforced by 6b+T6/T7
-    `prior_attempts + 1` semantics + append-only audit). If a future
-    audit-writer bug breaks the invariant (e.g., resets to 1 mid-stream
-    or goes backwards), we record a NotificationFailure so the operator
-    sees the schema regression — but we DO NOT raise, because 6g is a
-    strict consumer.
+    """Lock 6g-L4c **global** runtime check: PRICE_UNAVAILABLE.context[
+    "attempt_count"] must be per-position monotonic non-decreasing
+    across ALL audit history (enforced by 6b+T6/T7 `prior_attempts + 1`
+    semantics + append-only audit). If a future audit-writer bug breaks
+    the invariant (e.g., resets to 1 mid-stream, goes backwards within
+    a tick, OR regresses ACROSS ticks like tick1=5 → tick2=2), we
+    record a NotificationFailure so the operator sees the schema
+    regression — but we DO NOT raise, because 6g is a strict consumer.
 
-    Pure projection: walks new_audit_rows in source order, tracks
-    per-position max attempt_count seen, appends a failure for any
-    decrease."""
-    seen_max: dict[int, int] = {}
+    `prior_attempts_by_position` carries the cross-tick history: it
+    maps `{position_id → max(attempt_count) from audit rows BEFORE the
+    current window}`. The caller (T6 entrypoint) supplies this via
+    `repository.latest_price_unavailable_attempt_counts(...)`. Positions
+    with no prior history are absent from the dict and treated as
+    `prior_max = 0`. This closes the same-batch-only gap the round-4
+    reviewer caught: tick1=5 → tick2=2 IS now detectable.
+
+    Pure projection: walks new_audit_rows in source order, threads
+    per-position max forward from the prior global state, appends a
+    failure for any decrease. Per item 3 below, total failures
+    appended by this check are capped at MAX_INVARIANT_FAILURES (10)
+    so a wholesale audit-schema bug can't fan out into hundreds of
+    NotificationFailures."""
+    MAX_INVARIANT_FAILURES = 10
+    appended = 0
+    seen_max: dict[int, int] = dict(prior_attempts_by_position)
     for row in new_audit_rows:
         if row.event_type != "PRICE_UNAVAILABLE":
             continue
@@ -1227,7 +1354,7 @@ def _check_pu_monotonic(
         if not isinstance(pos_id, int) or not isinstance(attempt, int):
             continue
         prior = seen_max.get(pos_id, 0)
-        if attempt < prior:
+        if attempt < prior and appended < MAX_INVARIANT_FAILURES:
             failures.append(NotificationFailure(
                 event_type="PRICE_UNAVAILABLE",
                 title=f"position_id={pos_id}",
@@ -1236,7 +1363,17 @@ def _check_pu_monotonic(
                     f"{prior}->{attempt} (lock 6g-L4c)"
                 ),
             ))
+            appended += 1
         seen_max[pos_id] = max(prior, attempt)
+    if appended >= MAX_INVARIANT_FAILURES:
+        failures.append(NotificationFailure(
+            event_type="PRICE_UNAVAILABLE",
+            title="invariant_failures_capped",
+            error=(
+                f"more than {MAX_INVARIANT_FAILURES} monotonic violations "
+                f"in this tick — further entries suppressed (lock 6g-L4c)"
+            ),
+        ))
 
 
 def select_critical_events(
@@ -1246,6 +1383,7 @@ def select_critical_events(
     positions_with_prior_pu: set[int],
     threshold: int = 3,
     failures: "list[NotificationFailure] | None" = None,
+    prior_attempts_by_position: "dict[int, int] | None" = None,
 ) -> list[CriticalEvent]:
     """Stateless decision: which rows in `new_audit_rows` warrant a
     standalone push? See spec § 3.1 for the per-event rules.
@@ -1261,16 +1399,30 @@ def select_critical_events(
         rows for these position_ids emit recovery push.
       threshold: lock 6g-L4a attempt_count gate (default 3).
       failures: optional list to append `NotificationFailure` records to
-        when an invariant violation is detected. When None, invariant
-        checks still run but their findings are silently discarded —
-        only the L3 tests / L4 tests need to pass `failures` to assert.
+        when an invariant violation is detected.
+      prior_attempts_by_position: cross-tick per-position max(attempt_count)
+        from history BEFORE this batch — typically supplied by
+        `repository.latest_price_unavailable_attempt_counts(...)`. Used
+        by the lock-6g-L4c monotonic invariant check to detect
+        regressions that span ticks (tick1=5 → tick2=2). Defaults to
+        `{}` when omitted; the check then degrades to within-batch
+        ordering only (acceptable for pure-function unit tests where
+        the caller doesn't want to wire a Repository).
 
     Returns CriticalEvent[] in the same order as `new_audit_rows`. Pure;
     no DB / notifier / clock.
     """
     if failures is not None:
-        _check_pu_monotonic(new_audit_rows, failures)
+        _check_pu_monotonic(
+            new_audit_rows, failures,
+            prior_attempts_by_position=prior_attempts_by_position or {},
+        )
 
+    facts = _DedupFacts(
+        kill_switch_cycle_skipped_in_period=kill_switch_cycle_skipped_in_period,
+        positions_with_prior_pu=positions_with_prior_pu,
+        threshold=threshold,
+    )
     out: list[CriticalEvent] = []
     for row in new_audit_rows:
         ctx = row.context or {}
@@ -1279,15 +1431,10 @@ def select_critical_events(
 
         if et in _ALWAYS_CRITICAL:
             keep = True
-        elif et == "KILL_SWITCH_CYCLE_SKIPPED":
-            keep = not kill_switch_cycle_skipped_in_period
-        elif et == "ORDER_REJECTED":
-            keep = _is_daily_loss_reject(ctx)
-        elif et == "PRICE_UNAVAILABLE":
-            keep = _is_pu_third_attempt(ctx, threshold)
-        elif et == "POSITION_CLOSED":
-            pos_id = ctx.get("position_id")
-            keep = pos_id is not None and pos_id in positions_with_prior_pu
+        else:
+            rule = _CONDITIONAL_RULES.get(et)
+            if rule is not None:
+                keep = rule(ctx, facts)
 
         if keep:
             out.append(CriticalEvent(
@@ -1295,8 +1442,16 @@ def select_critical_events(
                 audit_id=row.id,
                 timestamp=row.timestamp,
                 strategy=row.strategy,
-                reason=row.reason,
-                context=ctx,
+                # reason: pass through None vs "" distinction (item 4
+                # of round-4 review). Renderers treat both as "no
+                # reason"; CLI / telemetry can match `is None`.
+                reason=row.reason if row.reason else (
+                    None if row.reason is None else ""
+                ),
+                # context: freeze into an immutable Mapping so the
+                # downstream renderer cannot mutate it (item 2 of
+                # round-4 review).
+                context=_freeze_context(ctx),
             ))
     return out
 ```
@@ -1619,6 +1774,16 @@ Append to `marketpulse/observability/audit_projection.py`:
 
 # === summarize_tick (lock 6g-L21) ===
 
+MAX_NUMERIC_FAILURES_PER_TICK = 10
+"""Item 3 of round-4 review: cap _safe_decimal NotificationFailure
+fan-out so a wholesale audit-schema bug (100 malformed rows) can't
+flood CLI / logs / summary / telemetry with hundreds of failure
+records. After this many entries, further malformed values are still
+quantized to the default but the FAILURE is suppressed; a single
+sentinel `malformed_numeric_capped` entry is appended at the end so
+the operator can see the cap kicked in."""
+
+
 def _safe_decimal(
     value, default: str = "0", *,
     field_name: str | None = None,
@@ -1635,6 +1800,13 @@ def _safe_decimal(
     operator can tell the heartbeat went through with a stub default
     instead of real data. None values are treated as "missing" and do
     NOT generate a failure (the audit row simply didn't carry the key).
+
+    Cap behavior (item 3 of round-4 review): once `failures` already
+    contains MAX_NUMERIC_FAILURES_PER_TICK entries whose error starts
+    with `malformed_numeric:`, further entries are suppressed AND a
+    single `malformed_numeric_capped` sentinel is added (only once)
+    so the cap is itself observable. The quantize still falls back to
+    `default`, so summary computation is unaffected.
     """
     if value is None:
         return Decimal(default)
@@ -1642,11 +1814,25 @@ def _safe_decimal(
         return Decimal(str(value))
     except Exception as exc:
         if field_name is not None and failures is not None:
-            failures.append(NotificationFailure(
-                event_type="tick_summary",
-                title="",
-                error=f"malformed_numeric:{field_name}:{type(exc).__name__}",
-            ))
+            existing = sum(
+                1 for f in failures
+                if f.error.startswith("malformed_numeric:")
+                and f.error != "malformed_numeric_capped"
+            )
+            if existing < MAX_NUMERIC_FAILURES_PER_TICK:
+                failures.append(NotificationFailure(
+                    event_type="tick_summary",
+                    title="",
+                    error=f"malformed_numeric:{field_name}:{type(exc).__name__}",
+                ))
+            elif not any(
+                f.error == "malformed_numeric_capped" for f in failures
+            ):
+                failures.append(NotificationFailure(
+                    event_type="tick_summary",
+                    title="",
+                    error="malformed_numeric_capped",
+                ))
         return Decimal(default)
 
 
@@ -2223,7 +2409,10 @@ def _render_kill_switch_flipped(ev: CriticalEvent) -> tuple[str, str]:
     `to_state=True` means the switch is now ACTIVE (flipped to stop).
     `to_state=False` means it just CLEARED."""
     to_state = bool(ev.context.get("to_state"))
-    reason = ev.reason or ""   # reason is a column, not context field
+    # reason: ev.reason is `None` when the audit row's reason column was
+    # unset, `""` when explicitly blank, otherwise a real string. For
+    # rendering, all three collapse to "no reason" or the actual text.
+    reason = ev.reason or ""
     if to_state:
         title = "🛑 Kill Switch FLIPPED"
     else:
@@ -3510,9 +3699,35 @@ def notify_paper_tick_events(
     else:
         positions_with_prior_pu = set()
 
-    # Pure projection. The `failures` list is threaded in so the L4c
-    # monotonic-invariant runtime check inside select_critical_events
-    # can record violations without raising.
+    # Lock 6g-L4c GLOBAL monotonic invariant: pull per-position prior
+    # max(attempt_count) from history BEFORE this window so the
+    # projection's check can detect cross-tick regressions, not just
+    # within-batch ordering.
+    pu_position_ids_in_window = sorted({
+        int((r.context or {}).get("position_id"))
+        for r in rows
+        if r.event_type == "PRICE_UNAVAILABLE"
+        and isinstance((r.context or {}).get("position_id"), int)
+    })
+    if pu_position_ids_in_window:
+        try:
+            prior_attempts_by_position = (
+                repository.latest_price_unavailable_attempt_counts(
+                    position_ids=pu_position_ids_in_window,
+                    before=since,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("paper_tick_notify_lpac_query_failed",
+                        error=str(exc))
+            prior_attempts_by_position = {}
+    else:
+        prior_attempts_by_position = {}
+
+    # Pure projection. The `failures` list + prior_attempts dict are
+    # threaded in so the L4c monotonic-invariant runtime check inside
+    # select_critical_events can detect cross-tick regressions without
+    # raising.
     try:
         criticals: list[CriticalEvent] = select_critical_events(
             new_audit_rows=rows,
@@ -3520,6 +3735,7 @@ def notify_paper_tick_events(
             positions_with_prior_pu=positions_with_prior_pu,
             threshold=price_unavailable_threshold,
             failures=failures,
+            prior_attempts_by_position=prior_attempts_by_position,
         )
     except Exception as exc:  # noqa: BLE001
         failures.append(NotificationFailure(
