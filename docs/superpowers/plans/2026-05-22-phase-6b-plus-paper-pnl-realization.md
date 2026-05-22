@@ -59,13 +59,12 @@ tests/trading/test_scheduler.py                                # T9 DI swap test
 - **T0** — Preflight: branch verification + 6b baseline green
 - **T1** — `AuditEventType.PRICE_UNAVAILABLE` enum value
 - **T2** — Alembic 0011 migration (rebuild paper_audit_event CHECK) + up/down tests
-- **T3** — `PriceProvider` Protocol rewrite + `ClosePrice` dataclass + `StubPriceProvider` rewrite (no default)
-- **T4** — `YFinanceClient.fetch_close_on_date(ticker, on_date, lookback_days=10) -> Bar | None` (mocked)
+- **T3** — *Atomic refactor (lock 6b+L15):* `PriceProvider` Protocol rewrite + `ClosePrice` + `StubPriceProvider` (no default) + `ForwardExecutionEngine.__init__(price_provider=...)` required kwarg + ALL in-tree call-site updates. Single commit, full suite stays green.
+- **T4** — `YFinanceClient.fetch_close_on_date(ticker, on_date, lookback_days=10) -> Bar | None` (mocked; NaN-safe per lock 6b+L5)
 - **T5** — `YFinancePriceProvider` with `source`/`lookback_days` properties + Decimal quantization (lock 6b+L14)
 - **T6** — `Repository.count_price_unavailable_attempts(*, position_id)`
-- **T7a** — `ForwardExecutionEngine.__init__(price_provider=...)` required kwarg (no semantic changes yet; just constructor + 6a regression updates)
-- **T7b** — `_materialize_exit -> bool` rewrite + PRICE_UNAVAILABLE audit + POSITION_CLOSED provenance + `tick()` counts via bool + `last_price_unavailable_count()`
-- **T8** — `daily_cycle.run(price_provider=...)` kwarg removed + `OrderRequest.horizon_price=None` forward invariant + TICK_COMPLETED.context["price_unavailable_count"]
+- **T7** — `_materialize_exit -> bool` rewrite + PRICE_UNAVAILABLE audit + POSITION_CLOSED provenance + `tick()` counts via bool + `last_price_unavailable_count()`
+- **T8** — `daily_cycle.run(price_provider=...)` kwarg removed + `OrderRequest.horizon_price=None` forward invariant + `TICK_COMPLETED.context["price_unavailable_count"]` + grep-invariant test (lock 6b+L16)
 - **T9** — `paper_trading_tick.py` DI rewire to `YFinancePriceProvider`
 - **T10** — E2E tests: roll-back, retry-and-succeed, attempt_count progression, P&L correctness
 - **T11** — Final integration: full suite + ruff + alembic heads (expect 0011) + manual smoke + PR
@@ -340,7 +339,31 @@ def test_0011_downgrade_with_price_unavailable_rows_raises(alembic_cfg):
 Run: `uv run pytest tests/migration/test_0011_audit_check.py -v`
 Expected: 5 FAIL with `Can't locate revision identified by '0011'` (migration doesn't exist yet).
 
-- [ ] **Step 3: Create migration file**
+- [ ] **Step 3: Read 0010 FIRST to confirm exact schema (lock 6b+L10)**
+
+Before writing 0011, open `alembic/versions/0010_*.py` and locate the `paper_audit_event` `op.create_table` block. Confirm the exact column definitions you'll be replicating:
+
+```python
+op.create_table(
+    "paper_audit_event",
+    sa.Column("id", sa.Integer(), primary_key=True),
+    sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("event_type", sa.String(48), nullable=False),
+    sa.Column("order_id", sa.Integer(), nullable=True),
+    sa.Column("strategy", sa.String(64), nullable=True),
+    sa.Column("reason", sa.Text(), nullable=False, server_default=""),
+    sa.Column("context", sa.JSON(), nullable=False, server_default="{}"),
+    sa.CheckConstraint("event_type IN (...)", name="ck_paper_audit_event_type"),
+)
+op.create_index("ix_paper_audit_ts", ...)
+op.create_index("ix_paper_audit_type_ts", ...)
+op.create_index("ix_paper_audit_order", ...)
+op.create_index("ix_paper_audit_strategy_ts", ...)
+```
+
+New table SQL types: `INTEGER PRIMARY KEY`, `DATETIME NOT NULL` (tz-aware), `VARCHAR(48) NOT NULL`, `INTEGER NULL`, `VARCHAR(64) NULL`, `TEXT NOT NULL DEFAULT ''`, `JSON NOT NULL DEFAULT '{}'`. **If 0010 differs from above, FOLLOW 0010** — the actual file is the source of truth, not this plan paragraph.
+
+- [ ] **Step 4: Create migration file**
 
 Create `alembic/versions/0011_audit_check_price_unavailable.py`:
 
@@ -447,19 +470,19 @@ def downgrade() -> None:
     _rebuild(_check_clause(_TYPES_6A))
 ```
 
-- [ ] **Step 4: Run to verify tests pass**
+- [ ] **Step 5: Run to verify tests pass**
 
 Run: `uv run pytest tests/migration/test_0011_audit_check.py -v`
 Expected: 5 PASS.
 
-- [ ] **Step 5: Smoke alembic CLI**
+- [ ] **Step 6: Smoke alembic CLI**
 
 Run: `uv run alembic heads`
 Expected: `0011 (head)`.
 
 Run (against the dev DB to dry-test the schema): `uv run alembic upgrade head` then `uv run alembic heads` again — head should be 0011.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add alembic/versions/0011_audit_check_price_unavailable.py tests/migration/test_0011_audit_check.py
@@ -479,11 +502,19 @@ EOF
 
 ---
 
-### Task T3: `PriceProvider` Protocol + `ClosePrice` + `StubPriceProvider` rewrite
+### Task T3: Atomic Protocol rewrite + engine constructor + call-site updates (lock 6b+L15)
+
+**Lock 6b+L15: SINGLE atomic commit.** This task touches many files but MUST commit as one unit. After commit, `uv run pytest -q tests/trading/` returns ALL pass. Bisecting onto this commit produces working code.
+
+**Why merged:** the new `PriceProvider` Protocol drops `horizon_price()` and adds `close_on_date()`. The new `StubPriceProvider` drops the `default` kwarg. `ForwardExecutionEngine` needs `price_provider` as a required kwarg. Every existing 6a/6b test that constructs an engine or a stub uses the old signatures. Splitting into "rewrite types" then "fix call sites" leaves an intentionally-broken commit between them — forbidden by 6b+L15.
 
 **Files:**
-- Modify: `marketpulse/trading/price_provider.py` (rewrite)
-- Create: `tests/trading/test_price_provider.py` (new — separate from any existing 6a-era test)
+- Modify: `marketpulse/trading/price_provider.py` (REWRITE — old `horizon_price` method removed)
+- Modify: `marketpulse/trading/forward_engine.py` (add `price_provider` REQUIRED kwarg to `__init__`; add `last_price_unavailable_count()` method scaffolding for T7)
+- Create: `tests/trading/test_price_provider.py`
+- Modify ALL files matching `grep -rln "StubPriceProvider\|ForwardExecutionEngine(" tests/` — update call sites to use new signatures
+
+Do NOT semantically change `_materialize_exit` in this task — T7 does that. T3 just adds the constructor kwarg + counter scaffold.
 
 - [ ] **Step 1: Write failing tests**
 
@@ -694,32 +725,185 @@ class StubPriceProvider:
 Run: `uv run pytest tests/trading/test_price_provider.py -v`
 Expected: 5 PASS.
 
-- [ ] **Step 5: Run full trading suite — expect SOME failures**
+- [ ] **Step 5: Update `ForwardExecutionEngine.__init__` to require `price_provider` (constructor change ONLY)**
+
+In `marketpulse/trading/forward_engine.py`, locate `ForwardExecutionEngine.__init__` (around line 45). Update the signature + body. Do NOT touch `_materialize_exit` semantics — T7 does that.
+
+```python
+    def __init__(
+        self,
+        *,
+        repository: Repository,
+        clock: Clock,
+        kill_switch: KillSwitchState,
+        risk_gate: RiskGate,
+        price_provider,    # PriceProvider — duck-typed to avoid circular
+                           # import (lock 6b+L2: REQUIRED, no default)
+    ) -> None:
+        self._repo = repository
+        self._clock = clock
+        self._kill_switch = kill_switch
+        self._risk_gate = risk_gate
+        self._price_provider = price_provider
+        self._last_price_unavailable_count: int = 0    # lock 6b+L11; T7 uses
+
+    def last_price_unavailable_count(self) -> int:
+        """Lock 6b+L11: read-only diagnostic from most recent tick().
+        Reset to 0 at the start of every tick() (T7 will implement reset)."""
+        return self._last_price_unavailable_count
+```
+
+- [ ] **Step 6: Add a regression test for the required kwarg**
+
+In `tests/trading/test_forward_engine.py`, append (the test file already exists; just add a new test function):
+
+```python
+def test_forward_engine_requires_price_provider_kwarg(tmp_path):
+    """Lock 6b+L2: missing price_provider → TypeError."""
+    from datetime import UTC, datetime
+    from decimal import Decimal
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from marketpulse.db.base import Base
+    from marketpulse.trading.clock import FakeClock
+    from marketpulse.trading.forward_engine import ForwardExecutionEngine
+    from marketpulse.trading.kill_switch import KillSwitchState
+    from marketpulse.trading.repository import Repository
+    from marketpulse.trading.risk_gate import AlwaysApproveRiskGate
+
+    eng_db = tmp_path / "fe.db"
+    db_engine = create_engine(f"sqlite:///{eng_db}")
+    Base.metadata.create_all(db_engine)
+    with Session(db_engine) as s:
+        repo = Repository(session=s)
+        clock = FakeClock(now=datetime(2026, 5, 22, 21, 30, tzinfo=UTC))
+        repo.ensure_initial_deposit(amount=Decimal("10000"), timestamp=clock.now())
+        ks = KillSwitchState(env_var="MP_NEVER", repository=repo)
+        import pytest
+        with pytest.raises(TypeError):
+            ForwardExecutionEngine(
+                repository=repo, clock=clock, kill_switch=ks,
+                risk_gate=AlwaysApproveRiskGate(),
+                # price_provider omitted intentionally
+            )
+```
+
+- [ ] **Step 7: Update ALL in-tree call sites to use new signatures**
+
+This step is the heart of lock 6b+L15. We're touching multiple test files and the scheduler entrypoint. The full suite must pass after this step.
+
+(a) Find every call site:
+
+Run: `grep -rln "StubPriceProvider(default=" tests/ marketpulse/`
+Run: `grep -rln "ForwardExecutionEngine(" tests/ marketpulse/`
+
+Expected affected files (verify and update each):
+- `tests/trading/test_forward_engine.py` — every `ForwardExecutionEngine(...)` gets `price_provider=StubPriceProvider(map={})`
+- `tests/trading/test_forward_engine_price_provider.py` — (will be created by T7; skip for now if doesn't exist)
+- `tests/trading/test_daily_cycle.py` — engine constructions get `price_provider=StubPriceProvider(map={})`
+- `tests/trading/test_e2e_stateful.py` — engine constructions get `price_provider=StubPriceProvider(map={})`
+- `tests/trading/test_scheduler.py` — `_SpyEngine` superclass call passes through `price_provider`
+- `marketpulse/scheduler/paper_trading_tick.py` — TEMPORARILY change `StubPriceProvider(default=Decimal("0"))` → `StubPriceProvider(map={})` and ALSO pass to `ForwardExecutionEngine`. T9 will swap to `YFinancePriceProvider`.
+
+(b) `daily_cycle.run` STILL passes `price_provider` in this task (T8 removes that kwarg). For tests that call `daily_cycle.run(price_provider=...)`, leave them passing the stub for now.
+
+(c) Pattern to apply at every engine site:
+
+```python
+# Before
+engine = ForwardExecutionEngine(
+    repository=repo, clock=clock,
+    kill_switch=ks, risk_gate=...,
+)
+
+# After
+engine = ForwardExecutionEngine(
+    repository=repo, clock=clock,
+    kill_switch=ks, risk_gate=...,
+    price_provider=StubPriceProvider(map={}),
+)
+```
+
+(d) Pattern at every `StubPriceProvider(default=...)` site:
+
+```python
+# Before
+StubPriceProvider(default=Decimal("0"))
+# After
+StubPriceProvider(map={})
+```
+
+(e) `daily_cycle.run` still takes a `price_provider` kwarg (will be removed in T8). For sites that pass it explicitly, swap to `StubPriceProvider(map={})` too. NOTE: the OLD Protocol's `horizon_price(...)` method is gone from `StubPriceProvider`. `daily_cycle._make_order_request` currently calls `price_provider.horizon_price(...)`. We need a TEMPORARY shim until T8 removes that call: in `daily_cycle._make_order_request`, change:
+
+```python
+# Before T3
+horizon_price = winner.horizon_price
+if horizon_price is None:
+    horizon_price = price_provider.horizon_price(
+        ticker=winner.ticker, horizon_date=winner.horizon_date,
+    )
+```
+
+to:
+
+```python
+# T3 shim: forward mode horizon_price stays None — T8 will delete this
+# whole block and the price_provider kwarg.
+horizon_price = winner.horizon_price    # None in forward; backtest set
+```
+
+This single-line shim keeps daily_cycle running while we still accept the `price_provider` kwarg for backward compat. T8 will remove the entire kwarg + this block.
+
+- [ ] **Step 8: Run full trading suite — expect ALL PASS**
 
 Run: `uv run pytest -q tests/trading/ --tb=no | tail -3`
-Expected: Many failures (existing 6a tests / 6b tests use `StubPriceProvider(default=Decimal("0"))` and `horizon_price` Protocol method — these will break). That's intentional; the breakage points are the call sites we need to fix in T7a/T8/T9.
+Expected: ALL pass. Number should match T0 baseline + new T3 tests (~5 added). If anything fails, fix before committing.
 
-Note: do NOT proceed if any test failure is NOT a StubPriceProvider / horizon_price signature issue. Investigate before continuing.
+- [ ] **Step 9: Run ruff**
 
-- [ ] **Step 6: Commit (with known broken state — T7-T9 will fix call sites)**
+Run: `uv run ruff check marketpulse/ tests/`
+Expected: `All checks passed!`
+
+- [ ] **Step 10: Single atomic commit (lock 6b+L15)**
 
 ```bash
-git add marketpulse/trading/price_provider.py tests/trading/test_price_provider.py
+git add marketpulse/trading/price_provider.py \
+        marketpulse/trading/forward_engine.py \
+        marketpulse/trading/daily_cycle.py \
+        marketpulse/scheduler/paper_trading_tick.py \
+        tests/trading/test_price_provider.py \
+        tests/trading/test_forward_engine.py \
+        tests/trading/test_daily_cycle.py \
+        tests/trading/test_e2e_stateful.py \
+        tests/trading/test_scheduler.py
 git commit -m "$(cat <<'EOF'
-feat(phase-6b-plus-T3): PriceProvider Protocol + ClosePrice + StubPriceProvider rewrite
+feat(phase-6b-plus-T3): PriceProvider rewrite + engine constructor + call-site updates (atomic)
 
-Lock 6b+L3: StubPriceProvider has no `default` kwarg; miss returns None.
-Lock 6b+L8: providers expose source + lookback_days properties.
-Lock 6b+L14: YFinancePriceProvider quantizes price to 6 decimal places
-HALF_EVEN before constructing ClosePrice — matches Numeric(18, 6) DB.
+Lock 6b+L15: single atomic commit. Bisecting onto this commit produces
+working code. tests/trading/ passes after this commit.
 
-ClosePrice carries (price, price_date, requested_date, source) for
-roll-back transparency in POSITION_CLOSED audit context.
+Changes (one cohesive refactor):
+- PriceProvider Protocol: replace horizon_price() with close_on_date()
+  returning ClosePrice | None. Adds source + lookback_days properties.
+- ClosePrice dataclass: frozen, 4 fields (price, price_date,
+  requested_date, source) for roll-back provenance.
+- StubPriceProvider: no `default` kwarg (lock 6b+L3); map-only.
+- YFinancePriceProvider: skeleton with source="yfinance" + lookback_days
+  property + Decimal quantization to 6dp HALF_EVEN (lock 6b+L14).
+  Wraps YFinanceClient (T4 fills in fetch_close_on_date).
+- ForwardExecutionEngine.__init__(price_provider=...) REQUIRED kwarg
+  (lock 6b+L2). last_price_unavailable_count() diagnostic stub added
+  (T7 wires the counter).
+- daily_cycle._make_order_request: TEMPORARY shim — drops the
+  price_provider.horizon_price() call; horizon_price stays None for
+  forward mode. T8 removes the kwarg entirely.
+- All in-tree call sites updated: 6a/6b tests pass StubPriceProvider(map={})
+  to engine constructor; scheduler entrypoint temporarily uses
+  StubPriceProvider(map={}) (T9 swaps to YFinancePriceProvider).
 
-NOTE: existing call sites in forward_engine / daily_cycle / scheduler
-will break (signature changed: horizon_price → close_on_date; ClosePrice
-return type replaces Decimal). T7-T9 fix these call sites. Tests in
-tests/trading/ have known failures until then.
+NO semantic change to _materialize_exit yet — T7 does that.
 
 Co-Authored-By: Claude <noreply@anthropic.com>
 EOF
@@ -862,6 +1046,59 @@ def test_fetch_close_on_date_bars_only_after_on_date_returns_none():
         bar = client.fetch_close_on_date("AAPL", on_date)
 
     assert bar is None
+
+
+def test_fetch_close_on_date_skips_nan_close(monkeypatch):
+    """Op-test #28: yfinance can return NaN Close on certain edge days
+    (delisted, corporate-action gaps). MUST skip NaN rows and return the
+    next-most-recent valid bar, NEVER produce Decimal('nan') or raise."""
+    import math
+    on_date = date(2026, 5, 22)
+    # Build a DataFrame where the latest bar has NaN Close
+    df = pd.DataFrame(
+        [
+            {"Open": 149.0, "High": 150.0, "Low": 148.0, "Close": 149.50, "Volume": 1000},
+            {"Open": math.nan, "High": math.nan, "Low": math.nan, "Close": math.nan, "Volume": 0},
+        ],
+        index=pd.DatetimeIndex([
+            datetime(2026, 5, 21, tzinfo=UTC),
+            datetime(2026, 5, 22, tzinfo=UTC),
+        ]),
+    )
+    mock_ticker = MagicMock()
+    mock_ticker.history.return_value = df
+
+    with patch("marketpulse.data.yfinance_client.yf.Ticker",
+               return_value=mock_ticker):
+        client = YFinanceClient()
+        bar = client.fetch_close_on_date("AAPL", on_date)
+
+    # The May 22 row has NaN Close → skipped. May 21 row is the valid candidate.
+    assert bar is not None
+    assert bar.date == date(2026, 5, 21)
+    assert bar.close == 149.50
+    assert not math.isnan(bar.close)
+
+
+def test_fetch_close_on_date_all_nan_returns_none():
+    """If ALL bars in the window have NaN Close, return None."""
+    import math
+    on_date = date(2026, 5, 22)
+    df = pd.DataFrame(
+        [
+            {"Open": math.nan, "High": math.nan, "Low": math.nan, "Close": math.nan, "Volume": 0},
+        ],
+        index=pd.DatetimeIndex([datetime(2026, 5, 22, tzinfo=UTC)]),
+    )
+    mock_ticker = MagicMock()
+    mock_ticker.history.return_value = df
+
+    with patch("marketpulse.data.yfinance_client.yf.Ticker",
+               return_value=mock_ticker):
+        client = YFinanceClient()
+        bar = client.fetch_close_on_date("AAPL", on_date)
+
+    assert bar is None
 ```
 
 - [ ] **Step 2: Run to verify failure**
@@ -889,8 +1126,14 @@ In `marketpulse/data/yfinance_client.py`, locate the `YFinanceClient` class (aro
         pass `end=on_date + 1 day` to include on_date itself. Without
         the +1 day, querying for today's close would miss today's bar.
 
-        Returns None if no bar exists in the window.
+        NaN-safe: yfinance can return Close=NaN on certain edge days
+        (delisted, corporate-action gaps). Skip those rows; never
+        produce Decimal('nan') downstream.
+
+        Returns None if no bar with a finite Close exists in the window.
         """
+        import math    # local import to keep top-of-file imports tidy
+
         start = on_date - timedelta(days=lookback_days)
         end = on_date + timedelta(days=1)    # exclusive
         hist = yf.Ticker(ticker).history(
@@ -903,13 +1146,16 @@ In `marketpulse/data/yfinance_client.py`, locate the `YFinanceClient` class (aro
             bar_date = idx.date() if hasattr(idx, "date") else idx
             if bar_date > on_date:
                 continue    # defensive — end=on_date+1 should prevent this
+            close = float(row["Close"])
+            if math.isnan(close):
+                continue    # lock 6b+L5 NaN-safe — skip NaN rows
             candidates.append(Bar(
                 date=bar_date,
                 open=float(row["Open"]),
                 high=float(row["High"]),
                 low=float(row["Low"]),
-                close=float(row["Close"]),
-                volume=int(row["Volume"]),
+                close=close,
+                volume=int(row["Volume"]) if not math.isnan(float(row["Volume"])) else 0,
             ))
         if not candidates:
             return None
@@ -1276,132 +1522,9 @@ EOF
 
 ---
 
-### Task T7a: `ForwardExecutionEngine.__init__` accepts required `price_provider`
+### Task T7: `_materialize_exit -> bool` + PRICE_UNAVAILABLE + tick accounting
 
-**Files:**
-- Modify: `marketpulse/trading/forward_engine.py`
-- Modify: `tests/trading/test_forward_engine.py` (constructor regression)
-- Modify: `tests/trading/test_e2e_stateful.py` (any direct engine constructions)
-- Modify: `tests/trading/test_scheduler.py` (DI test)
-- Modify: `tests/trading/test_daily_cycle.py` (E2E engine constructions)
-
-T7a is **scaffolding only** — adds the required kwarg + 6a regression test updates. T7b implements the actual semantic change to `_materialize_exit`.
-
-- [ ] **Step 1: Add `price_provider` to constructor**
-
-In `marketpulse/trading/forward_engine.py`, locate the `ForwardExecutionEngine.__init__` (around line 45). Update the signature + body:
-
-```python
-    def __init__(
-        self,
-        *,
-        repository: Repository,
-        clock: Clock,
-        kill_switch: KillSwitchState,
-        risk_gate: RiskGate,
-        price_provider,    # PriceProvider — duck-typed to avoid circular
-                           # import (lock 6b+L2: REQUIRED, no default)
-    ) -> None:
-        self._repo = repository
-        self._clock = clock
-        self._kill_switch = kill_switch
-        self._risk_gate = risk_gate
-        self._price_provider = price_provider
-        self._last_price_unavailable_count: int = 0    # lock 6b+L11; T7b uses
-
-    def last_price_unavailable_count(self) -> int:
-        """Lock 6b+L11: read-only diagnostic from most recent tick().
-        Reset to 0 at the start of every tick()."""
-        return self._last_price_unavailable_count
-```
-
-- [ ] **Step 2: Update all in-tree constructors to pass `price_provider`**
-
-Search-and-replace pattern: every `ForwardExecutionEngine(...)` call must pass `price_provider=...`. Use a `StubPriceProvider(map={})` for tests that don't care about exits (existing 6a tests focused on place_order / kill switch).
-
-Find affected files:
-
-Run: `grep -rn "ForwardExecutionEngine(" tests/ --include="*.py" -l`
-
-Edit each one to add `price_provider=StubPriceProvider(map={})` (or with an appropriate map for exit-tests in T7b).
-
-Example for `tests/trading/test_forward_engine.py` 6a regression fixtures — update the `_make_deps`-style helper (or each direct call) to include the new kwarg.
-
-- [ ] **Step 3: Add regression test for missing kwarg**
-
-In `tests/trading/test_forward_engine.py`, append:
-
-```python
-def test_forward_engine_requires_price_provider_kwarg(tmp_path):
-    """Lock 6b+L2: missing price_provider → TypeError."""
-    from datetime import UTC, datetime
-    from decimal import Decimal
-
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import Session
-
-    from marketpulse.db.base import Base
-    from marketpulse.trading.clock import FakeClock
-    from marketpulse.trading.forward_engine import ForwardExecutionEngine
-    from marketpulse.trading.kill_switch import KillSwitchState
-    from marketpulse.trading.repository import Repository
-    from marketpulse.trading.risk_gate import AlwaysApproveRiskGate
-
-    eng_db = tmp_path / "fe.db"
-    db_engine = create_engine(f"sqlite:///{eng_db}")
-    Base.metadata.create_all(db_engine)
-    with Session(db_engine) as s:
-        repo = Repository(session=s)
-        clock = FakeClock(now=datetime(2026, 5, 22, 21, 30, tzinfo=UTC))
-        repo.ensure_initial_deposit(amount=Decimal("10000"), timestamp=clock.now())
-        ks = KillSwitchState(env_var="MP_NEVER", repository=repo)
-        import pytest
-        with pytest.raises(TypeError):
-            ForwardExecutionEngine(
-                repository=repo, clock=clock, kill_switch=ks,
-                risk_gate=AlwaysApproveRiskGate(),
-                # price_provider omitted intentionally
-            )
-```
-
-- [ ] **Step 4: Run to verify constructor regression**
-
-Run: `uv run pytest -q tests/trading/test_forward_engine.py`
-Expected: ALL pass (including the new constructor regression test). Other 6a tests in this file are now fixed by Step 2's kwarg addition.
-
-- [ ] **Step 5: Run full trading suite — should be GREEN now**
-
-Run: `uv run pytest -q tests/trading/ --tb=no | tail -3`
-Expected: All tests pass. The T3 breakage from `StubPriceProvider(default=...)` is now fixed because we've updated call sites to use `StubPriceProvider(map={})` in T7a Step 2. If any failures remain, they're likely missed call sites — find with `grep -rn "StubPriceProvider(default=" tests/` and fix.
-
-- [ ] **Step 6: Run ruff**
-
-Run: `uv run ruff check marketpulse/ tests/`
-Expected: `All checks passed!`
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add marketpulse/trading/forward_engine.py tests/trading/
-git commit -m "$(cat <<'EOF'
-feat(phase-6b-plus-T7a): ForwardExecutionEngine accepts required price_provider
-
-Lock 6b+L2: price_provider is REQUIRED constructor kwarg (no default).
-Lock 6b+L11: adds last_price_unavailable_count() diagnostic method;
-counter resets per tick (used by T7b).
-
-All in-tree constructors updated to pass StubPriceProvider(map={}) for
-6a regression tests that don't exercise exits. No semantic changes to
-_materialize_exit yet — T7b does that.
-
-Co-Authored-By: Claude <noreply@anthropic.com>
-EOF
-)"
-```
-
----
-
-### Task T7b: `_materialize_exit -> bool` + PRICE_UNAVAILABLE + tick accounting
+(T7a from the prior plan is folded into T3 per lock 6b+L15.)
 
 **Files:**
 - Modify: `marketpulse/trading/forward_engine.py`
@@ -1509,9 +1632,9 @@ def test_materialize_exit_returns_true_on_close_price_success(session):
         source="stub",
     )
     provider = StubPriceProvider(map={("AAPL", horizon): close})
-    engine, repo, _ = _make_engine(session, price_provider=provider)
+    engine, repo, clock = _make_engine(session, price_provider=provider)
 
-    _, position = _place_and_open(repo, _, horizon_date=horizon)
+    _, position = _place_and_open(repo, clock, horizon_date=horizon)
 
     result = engine._materialize_exit(position, exit_date=date(2026, 5, 22))
 
@@ -1530,8 +1653,8 @@ def test_materialize_exit_returns_false_on_price_unavailable(session):
     from marketpulse.trading.price_provider import StubPriceProvider
 
     provider = StubPriceProvider(map={})    # empty — every call returns None
-    engine, repo, _ = _make_engine(session, price_provider=provider)
-    _, position = _place_and_open(repo, _, horizon_date=date(2026, 5, 22))
+    engine, repo, clock = _make_engine(session, price_provider=provider)
+    _, position = _place_and_open(repo, clock, horizon_date=date(2026, 5, 22))
 
     result = engine._materialize_exit(position, exit_date=date(2026, 5, 22))
 
@@ -1551,8 +1674,8 @@ def test_price_unavailable_writes_audit_with_provider_provenance(session):
     from marketpulse.trading.price_provider import StubPriceProvider
 
     provider = StubPriceProvider(map={})    # always None
-    engine, repo, _ = _make_engine(session, price_provider=provider)
-    order, position = _place_and_open(repo, _, horizon_date=date(2026, 5, 22))
+    engine, repo, clock = _make_engine(session, price_provider=provider)
+    order, position = _place_and_open(repo, clock, horizon_date=date(2026, 5, 22))
 
     engine._materialize_exit(position, exit_date=date(2026, 5, 23))
 
@@ -1578,8 +1701,8 @@ def test_attempt_count_progression_1_2_3(session):
     from marketpulse.trading.price_provider import StubPriceProvider
 
     provider = StubPriceProvider(map={})
-    engine, repo, _ = _make_engine(session, price_provider=provider)
-    _, position = _place_and_open(repo, _, horizon_date=date(2026, 5, 22))
+    engine, repo, clock = _make_engine(session, price_provider=provider)
+    _, position = _place_and_open(repo, clock, horizon_date=date(2026, 5, 22))
 
     for _ in range(3):
         engine._materialize_exit(position, exit_date=date(2026, 5, 23))
@@ -1607,8 +1730,8 @@ def test_position_closed_audit_has_provenance_fields(session):
         source="stub",
     )
     provider = StubPriceProvider(map={("AAPL", requested): close})
-    engine, repo, _ = _make_engine(session, price_provider=provider)
-    _, position = _place_and_open(repo, _, horizon_date=requested)
+    engine, repo, clock = _make_engine(session, price_provider=provider)
+    _, position = _place_and_open(repo, clock, horizon_date=requested)
 
     engine._materialize_exit(position, exit_date=date(2026, 5, 27))
 
@@ -1635,8 +1758,8 @@ def test_position_closed_audit_roll_policy_exact_match(session):
         price_date=horizon, requested_date=horizon, source="stub",
     )
     provider = StubPriceProvider(map={("AAPL", horizon): close})
-    engine, repo, _ = _make_engine(session, price_provider=provider)
-    _, position = _place_and_open(repo, _, horizon_date=horizon)
+    engine, repo, clock = _make_engine(session, price_provider=provider)
+    _, position = _place_and_open(repo, clock, horizon_date=horizon)
 
     engine._materialize_exit(position, exit_date=horizon)
 
@@ -1652,8 +1775,8 @@ def test_tick_returns_no_errors_when_only_price_unavailable(session):
     from marketpulse.trading.price_provider import StubPriceProvider
 
     provider = StubPriceProvider(map={})
-    engine, repo, _ = _make_engine(session, price_provider=provider)
-    _, _ = _place_and_open(repo, _, horizon_date=date(2026, 5, 22))
+    engine, repo, clock = _make_engine(session, price_provider=provider)
+    _, _ = _place_and_open(repo, clock, horizon_date=date(2026, 5, 22))
 
     result = engine.tick(as_of=date(2026, 5, 23))
 
@@ -1670,8 +1793,8 @@ def test_last_price_unavailable_count_resets_each_tick(session):
 
     # Tick 1: 1 PRICE_UNAVAILABLE
     provider = StubPriceProvider(map={})
-    engine, repo, _ = _make_engine(session, price_provider=provider)
-    _, _ = _place_and_open(repo, _, horizon_date=date(2026, 5, 22))
+    engine, repo, clock = _make_engine(session, price_provider=provider)
+    _, _ = _place_and_open(repo, clock, horizon_date=date(2026, 5, 22))
     engine.tick(as_of=date(2026, 5, 23))
     assert engine.last_price_unavailable_count() == 1
 
@@ -1877,12 +2000,13 @@ EOF
 
 ---
 
-### Task T8: `daily_cycle.run` signature change + `TICK_COMPLETED.context["price_unavailable_count"]`
+### Task T8: `daily_cycle.run` signature change + TICK_COMPLETED context + forward-invariant grep test (lock 6b+L16)
 
 **Files:**
 - Modify: `marketpulse/trading/daily_cycle.py`
 - Modify: `marketpulse/backtest/allocation.py` (docstring only)
 - Modify: `tests/trading/test_daily_cycle.py`
+- Create: `tests/trading/test_forward_invariants.py` (grep test for lock 6b+L16)
 
 - [ ] **Step 1: Append failing test for new behavior**
 
@@ -2116,17 +2240,88 @@ Expected: ALL pass (existing tests + the 3 new ones).
 Run: `uv run pytest -q tests/trading/ --tb=no | tail -3`
 Expected: ALL pass.
 
-- [ ] **Step 7: Ruff clean**
+- [ ] **Step 7: Create forward-invariant grep test (lock 6b+L16)**
+
+Create `tests/trading/test_forward_invariants.py`:
+
+```python
+# Layer: pure
+"""6b+T8 / Lock 6b+L16: forward path MUST NOT call PriceProvider before
+exit materialization, AND MUST NOT read paper_order.horizon_price for
+exit P&L. Enforced via source-level grep."""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+_REPO = Path(__file__).resolve().parents[2]
+
+
+def _read(path: str) -> str:
+    return (_REPO / path).read_text(encoding="utf-8")
+
+
+def test_daily_cycle_does_not_call_price_provider():
+    """Lock 6b+L16: forward daily_cycle never touches PriceProvider —
+    that's the engine's job at exit time."""
+    src = _read("marketpulse/trading/daily_cycle.py")
+    # No reference to price_provider in any form
+    assert "price_provider" not in src, (
+        "daily_cycle.py must not reference price_provider in forward "
+        "mode — exit price is fetched by ForwardExecutionEngine at "
+        "_materialize_exit time (lock 6b+L16)."
+    )
+    # No reference to horizon_price (forward leaves it None at construction)
+    # Allowed in comments? No — keep the grep strict to catch drift.
+    assert "horizon_price" not in src, (
+        "daily_cycle.py must not reference horizon_price. The field "
+        "stays None in forward mode (lock 6b+L1)."
+    )
+
+
+def test_materialize_exit_calls_close_on_date_exactly_once():
+    """Lock 6b+L16: _materialize_exit calls price_provider.close_on_date
+    exactly once. AND does NOT read order.horizon_price for P&L."""
+    src = _read("marketpulse/trading/forward_engine.py")
+    # Extract the _materialize_exit method body. We scan from
+    # `def _materialize_exit(` until the next `def ` at the same indent.
+    m = re.search(
+        r"    def _materialize_exit\([^)]*\)[^:]*:.*?(?=\n    def |\Z)",
+        src, flags=re.DOTALL,
+    )
+    assert m is not None, (
+        "Could not locate _materialize_exit in forward_engine.py — "
+        "regex needs updating after a refactor?"
+    )
+    body = m.group(0)
+    # Exactly one call to close_on_date
+    assert body.count("close_on_date") == 1, (
+        f"_materialize_exit must call price_provider.close_on_date "
+        f"exactly once. Found {body.count('close_on_date')} occurrence(s)."
+    )
+    # NEVER read order.horizon_price for exit P&L
+    assert "order.horizon_price" not in body, (
+        "_materialize_exit must NOT read order.horizon_price for P&L. "
+        "Use paper_fill.price as the canonical source (lock 6b+L1)."
+    )
+```
+
+Run: `uv run pytest tests/trading/test_forward_invariants.py -v`
+Expected: 2 PASS (the production code has already been updated to satisfy these invariants).
+
+- [ ] **Step 8: Ruff clean**
 
 Run: `uv run ruff check marketpulse/ tests/`
 Expected: `All checks passed!`
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
-git add marketpulse/trading/daily_cycle.py marketpulse/backtest/allocation.py tests/trading/test_daily_cycle.py
+git add marketpulse/trading/daily_cycle.py marketpulse/backtest/allocation.py \
+        tests/trading/test_daily_cycle.py tests/trading/test_forward_invariants.py
 git commit -m "$(cat <<'EOF'
-feat(phase-6b-plus-T8): daily_cycle.run drops price_provider kwarg
+feat(phase-6b-plus-T8): daily_cycle.run drops price_provider + forward-invariant grep
 
 Lock 6b+L1: forward mode ALWAYS writes paper_order.horizon_price=NULL.
 _make_order_request no longer accepts price_provider; OrderRequest
@@ -2139,6 +2334,11 @@ in KILL_SWITCH_CYCLE_SKIPPED for symmetry).
 Lock 6b+L12: cycle_status='completed_with_errors' iff TickResult.errors
 non-empty OR allocator failed. PRICE_UNAVAILABLE alone leaves
 cycle_status='completed'.
+
+Lock 6b+L16: tests/trading/test_forward_invariants.py enforces by grep
+that daily_cycle.py never references price_provider or horizon_price,
+and _materialize_exit reads close_on_date exactly once and never reads
+order.horizon_price. Catches future drift.
 
 Comment-only update to marketpulse/backtest/allocation.py
 AllocationWinner.horizon_price docstring clarifies Phase 5 backtest
