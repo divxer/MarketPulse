@@ -443,3 +443,38 @@ sector_exposure:
     assert p.strategy_config("sector_rotation") is not None
     # Lookup by unrelated key.
     assert p.strategy_config("not_a_strategy") is None
+
+
+def test_shipped_strategies_all_have_risk_blocks():
+    """T7: every production strategy YAML must declare a `risk:` block
+    with a finite max_position_notional. Missing or None → StrategySizeGate
+    fail-closes EVERY order in that strategy (lock 6b-L9), which is fatal
+    in production. This test guards against accidental regression of any
+    YAML file in marketpulse/strategies/definitions/."""
+    from pathlib import Path
+
+    from marketpulse.trading.risk_gates.config_provider import RiskConfigProvider
+
+    repo_root = Path(__file__).resolve().parents[3]
+    global_path = repo_root / "config" / "risk_gates.yaml"
+    strategies_dir = repo_root / "marketpulse" / "strategies" / "definitions"
+    provider = RiskConfigProvider.from_yaml(
+        global_path=global_path, strategies_dir=strategies_dir,
+    )
+    expected_stems = {
+        "news_event", "oversold_reversal", "sector_rotation",
+        "general", "momentum_breakout", "fundamental_value",
+    }
+    for stem in expected_stems:
+        cfg = provider.strategy_config(stem)
+        assert cfg is not None, (
+            f"Strategy {stem!r} has no `risk:` block in its YAML — "
+            "StrategySizeGate will fail-closed every order for this strategy "
+            "(lock 6b-L9). Add `risk: { max_position_notional: <N> }` to "
+            f"marketpulse/strategies/definitions/{stem}.yaml"
+        )
+        assert cfg.max_position_notional is not None, (
+            f"Strategy {stem!r} has `risk:` but no max_position_notional — "
+            "still fail-closed by 6b-L9"
+        )
+        assert cfg.max_position_notional > 0

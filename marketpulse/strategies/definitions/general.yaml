@@ -29,3 +29,7 @@ instructions: |
   - bullish: 综合显示中短期相对大盘有正向超额
   - bearish: 综合显示中短期相对大盘负向超额风险
   - neutral: 信号混合 / 无明确方向倾向
+
+# Phase 6b risk gate config (StrategySizeGate cap — lock 6b-L9).
+risk:
+  max_position_notional: 25000

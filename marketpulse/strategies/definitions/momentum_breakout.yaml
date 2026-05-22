@@ -29,3 +29,7 @@ instructions: |
   - bullish: 突破有效 + 量能配合 + 趋势完整 → 5-20d 跑赢 SPY
   - bearish: 假突破特征 / 趋势已破坏 / 严重超买
   - neutral: 突破存在但量能不足 / 趋势不明确
+
+# Phase 6b risk gate config (StrategySizeGate cap — lock 6b-L9).
+risk:
+  max_position_notional: 25000

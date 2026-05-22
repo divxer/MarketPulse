@@ -30,3 +30,7 @@ instructions: |
   - bullish: 超卖深 + 止跌信号 + 基本面稳 → 5-20d 反弹跑赢 SPY
   - bearish: 跌势未止 / 基本面持续恶化 / 缺乏止跌信号 → 接飞刀
   - neutral: 超卖但无明确止跌信号、或基本面信号混合
+
+# Phase 6b risk gate config (StrategySizeGate cap — lock 6b-L9).
+risk:
+  max_position_notional: 25000
