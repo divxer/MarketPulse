@@ -157,12 +157,6 @@ def _assert_cash_invariant(session) -> None:
     )
 
 
-@pytest.mark.skip(
-    reason="Phase 6b+T3 shim: paper_order.horizon_price is now NULL "
-    "(lock 6b+L1); _materialize_exit still reads order.horizon_price and "
-    "raises InvariantError until T7 wires PriceProvider.close_on_date "
-    "into the exit path. Re-enable in T7 with provider-fed exit price."
-)
 def test_full_5day_lifecycle_place_to_close(session):
     """D0: tick → 1 order placed + ENTRY_FILLED + position OPEN.
        D1-D3 (Fri 22, Tue 26, Wed 27): idle ticks — 0 new orders,
@@ -177,6 +171,7 @@ def test_full_5day_lifecycle_place_to_close(session):
     from marketpulse.db.models import PaperCashLedger, PaperPosition
     from marketpulse.trading import daily_cycle
     from marketpulse.trading.clock import FakeClock
+    from marketpulse.trading.price_provider import ClosePrice
 
     D0 = date(2026, 5, 21)   # Thu
     D5 = date(2026, 5, 28)   # Thu, horizon
@@ -191,9 +186,16 @@ def test_full_5day_lifecycle_place_to_close(session):
     fake_clock = FakeClock(now=datetime(2026, 5, 21, 21, 30, tzinfo=UTC))
     allocator = _stub_allocator(horizon_date=D5)
 
-    # StubPriceProvider lookup so the engine's exit leg has a horizon
-    # price even if the allocator hadn't set one (defensive).
-    horizon_map = {("AAPL", D5): Decimal("155")}
+    # Lock 6b+L1: exit price comes from PriceProvider.close_on_date on the
+    # horizon date. Seed a ClosePrice so D5's exit tick has data to close.
+    horizon_map = {
+        ("AAPL", D5): ClosePrice(
+            price=Decimal("155.000000"),
+            price_date=D5,
+            requested_date=D5,
+            source="stub",
+        ),
+    }
 
     # === D0: place + tick (entry) ===
     r0 = daily_cycle.run(**_make_deps(
