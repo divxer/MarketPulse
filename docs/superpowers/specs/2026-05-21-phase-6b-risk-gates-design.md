@@ -49,15 +49,39 @@ This applies to all 4 gates: `OPEN` and `ADD` intents are checked; `CLOSE` and `
 ### Module layout
 
 ```
+marketpulse/trading/audit_json.py              (NEW shared util)
+                                               normalize_for_json(obj) →
+                                               recursive Decimal→str,
+                                               datetime/date→isoformat,
+                                               dataclass→dict, etc. Used by
+                                               forward_engine._dump,
+                                               CompositeRiskGate, and any
+                                               future audit-writing code
+                                               (6f, 6g, broker integration).
+                                               Single source of truth for
+                                               audit serialization.
+
 marketpulse/trading/risk_gates/                (NEW package)
 ├── __init__.py                                re-exports CompositeRiskGate,
+│                                              build_standard_composite,
 │                                              RiskConfigProvider, the 4 gate
-│                                              classes
-├── composite.py                               CompositeRiskGate
+│                                              classes, strict_sector
+├── composite.py                               CompositeRiskGate (takes
+│                                              gates: Sequence[RiskGate]) —
+│                                              lock 6b-L15
+├── factory.py                                 build_standard_composite()
+│                                              factory — builds the canonical
+│                                              4-gate composite from injected
+│                                              deps (lives at composition
+│                                              root via paper_trading_tick.py)
 ├── market_hours.py                            MarketHoursGate
 ├── strategy_size.py                           StrategySizeGate
 ├── daily_loss.py                              DailyLossGate
 ├── sector_exposure.py                         SectorExposureGate
+├── _sector.py                                 strict_sector(t) → str | None
+│                                              wrapper (bridges
+│                                              backtest.sector.get_sector's
+│                                              "unknown" → None contract)
 └── config_provider.py                         RiskConfigProvider + dataclasses
                                                (RiskGateConfig,
                                                 MarketHoursConfig,
@@ -123,16 +147,29 @@ Phase 6 paper trading currently emits only `OPEN` (Phase 4-5 pattern: enter at e
 ### `RiskResult` (extended, 6a-compat)
 
 ```python
+from types import MappingProxyType
+from typing import Mapping
+
 @dataclass(frozen=True)
 class RiskResult:
     approved: bool
     reason: str
     gate_name: str = ""                          # 6a-compat
     failed_gates: tuple[str, ...] = ()           # NEW in 6b
-    context: dict[str, Any] = field(default_factory=dict)  # NEW in 6b
+    # 6b lock 6b-L16 — `context` is logically immutable. Gate authors pass
+    # plain dicts for ergonomics; __post_init__ wraps in MappingProxyType
+    # so external mutation (e.g., `result.context["x"] = y`) raises
+    # TypeError. Prevents audit-context drift after construction.
+    context: Mapping[str, Any] = field(
+        default_factory=lambda: MappingProxyType({}),
+    )
+
+    def __post_init__(self) -> None:
+        if isinstance(self.context, dict):
+            object.__setattr__(self, "context", MappingProxyType(self.context))
 ```
 
-6a callers (`ForwardExecutionEngine.place_order`) read `approved`/`reason`/`gate_name` unchanged. 6b adds richer fields without breaking the contract.
+6a callers (`ForwardExecutionEngine.place_order`) read `approved`/`reason`/`gate_name` unchanged. 6b adds richer fields without breaking the contract. Nested dicts inside `context` (e.g., `context["per_gate"][i]["context"]`) are NOT deep-frozen — `_normalize_context` (lock 6b-L10) is the path that materializes JSON-safe copies, so deep mutation immunity is enforced at the serialization boundary, not at the dataclass.
 
 ### Data flow
 
@@ -185,7 +222,9 @@ ForwardExecutionEngine.place_order(order_request)
 
 The umbrella spec speculated about adding a `RISK_GATE_BLOCKED` event type; 6b overrides that decision. Reusing `ORDER_REJECTED` with extended context keeps zero migration overhead and matches the 6a pattern already established for kill-switch and risk denials.
 
-**Decimal-in-context normalization (required):** every gate's `RiskResult.context` may contain `Decimal` values (e.g., `daily_loss_limit`, `sector_cap`, `projected_notional`). Before persisting to `paper_audit_event.context` (JSON column), the audit writer MUST normalize all `Decimal` values to strings via the existing 6a pattern (`_dump` helper in `forward_engine.py`). Direct `json.dumps(asdict(result))` will either crash or emit non-deterministic floats — both unacceptable for an append-only audit ledger. The implementer applies `_dump`-equivalent recursion to nested `context.per_gate[*].context` dicts.
+**Decimal-in-context normalization (required, lock 6b-L10 + 6b-L17):** every gate's `RiskResult.context` may contain `Decimal` values (e.g., `daily_loss_limit`, `sector_cap`, `projected_notional`). Before persisting to `paper_audit_event.context` (JSON column), the audit writer MUST normalize all `Decimal` values to strings, `datetime`/`date` to ISO strings, dataclasses to dicts, and recurse into nested dicts/lists/tuples.
+
+6b extracts this into a **shared utility** (`marketpulse/trading/audit_json.normalize_for_json`) so 6a's `forward_engine._dump`, 6b's `CompositeRiskGate`, and every future audit writer (6f UI rendering, 6g recap jobs, Phase 7 broker audit) use the same code path. Otherwise the codebase grows four parallel normalizers (`_dump`, `_normalize`, `_jsonify`, `_encode`) that drift apart. Direct `json.dumps(asdict(result))` is forbidden — it crashes on Decimal and emits non-deterministic floats — both unacceptable for an append-only audit ledger. T16 migrates `forward_engine._dump` to delegate to `normalize_for_json`.
 
 Operators can query risk-gate denials with:
 
@@ -200,19 +239,19 @@ WHERE event_type = 'ORDER_REJECTED'
 ```python
 # marketpulse/scheduler/paper_trading_tick.py (modified)
 from marketpulse.trading.risk_gates import (
-    CompositeRiskGate, RiskConfigProvider,
+    RiskConfigProvider, build_standard_composite,
 )
 
 config_provider = RiskConfigProvider.from_yaml(
     global_path=Path("config/risk_gates.yaml"),
-    strategies_dir=Path("config/strategies/"),
+    strategies_dir=Path("marketpulse/strategies/definitions/"),
 )
-risk_gate = CompositeRiskGate(
+risk_gate = build_standard_composite(
     config_provider=config_provider,
     repository=repository,
     calendar=calendar,
     clock=clock,
-    sector_provider=get_sector,
+    sector_provider=strict_sector,
 )
 engine = ForwardExecutionEngine(
     repository=repository, clock=clock,
@@ -220,7 +259,14 @@ engine = ForwardExecutionEngine(
 )
 ```
 
-**`CompositeRiskGate.__init__` construction model:** the composite builds its 4 child gates *internally* from the injected dependencies (config_provider, repository, calendar, clock, sector_provider). Callers do not pass pre-built gates — that's an over-flexibility trap; the gate identities + order are locked by 6b-L2. Tests substitute behavior by injecting fakes for the underlying dependencies (FakeClock, in-memory Repository, stub sector_provider) rather than overriding child gates.
+**`CompositeRiskGate.__init__` construction model (lock 6b-L15):** the composite is constructed via **dependency inversion** — `CompositeRiskGate(gates=Sequence[RiskGate])` accepts a list of fully-built child gates. Composition root lives at the **DI seam** (`paper_trading_tick.py`), NOT inside the composite. A separate factory `build_standard_composite(config_provider, repository, calendar, clock, sector_provider)` constructs the canonical 4-gate composite that production uses; tests construct `CompositeRiskGate(gates=[fake1, fake2, ...])` directly with fakes for individual gates without needing to fake every underlying dependency.
+
+This inversion serves three purposes:
+1. **Unit isolation.** Composite tests fake individual gates (approve / deny / explode), not repositories + clocks + sector providers. Failure injection per gate becomes trivial.
+2. **Forward compatibility.** Future broker-specific gates, experimental gates, or feature-flagged gates are added by extending the factory, NOT by editing composite internals. The composite stays closed for modification.
+3. **Composition root discipline.** The scheduler entrypoint owns the gate list — operators reading `paper_trading_tick.py` see the complete set of active gates without grepping into the composite implementation.
+
+Lock 6b-L2 (run-all + deny-if-any + exception=deny + audit-all) governs **runtime behavior**, not construction. Production builds the canonical 4-gate list via `build_standard_composite`; tests build arbitrary lists.
 
 **Kill-switch is OUTSIDE the RiskGate principle scope (clarification):** the core principle "Never block risk-reducing actions" applies *within* the `CompositeRiskGate` layer only. `KillSwitch` is a separate emergency global halt that lives in `marketpulse/trading/kill_switch.py`, NOT inside the `risk_gates/` package, and intentionally falls outside this principle. `ForwardExecutionEngine.place_order` checks the kill switch BEFORE invoking `CompositeRiskGate` (6a-L8 defense-in-depth) — so an active kill switch denies ALL orders, including `CLOSE`/`REDUCE` intents that the RiskGate layer would otherwise bypass. This is intentional catastrophic safety: operators flip the kill switch when they want a complete halt; reducing positions during a halt requires lifting the kill switch first. If a use case for "kill switch active but allow forced flatten" emerges, it lands in Phase 7 broker work, not 6b.
 
@@ -577,7 +623,10 @@ class RiskConfigProvider:
 | **6b-L11** | **Pre-existing OPEN positions with unknown sector are excluded from sector-cap accounting.** Operators MUST run sector mapping backfill (populate `config/sector_overrides.yaml`) before 6b production deploy, OR accept that pre-6b OPENs don't count toward the cap. 6b-L8 fail-closed prevents NEW unknown-sector positions from being placed; this lock covers the deployment transition. The implementation plan ships a **preflight deploy checklist** that enumerates every distinct ticker in `paper_position WHERE status='OPEN'`, runs `get_sector(t)` on each, and lists tickers with `None` result. Operators must add YAML overrides for that list (or explicitly accept) before flipping the DI seam. |
 | **6b-L12** | **`RiskIntent` lives in `marketpulse/trading/types.py`** (NOT in `risk_gate.py`). `OrderRequest` carries `risk_intent: RiskIntent` as a field; placing the enum in `risk_gate.py` would invert the 6a-established dependency hierarchy (types is a leaf). `risk_gate.py` re-exports for back-compat callers but `from marketpulse.trading.types import RiskIntent` is the canonical import. |
 | **6b-L13** | **DST-safe NY-day window** for `today_realized_pnl`. Both bounds are constructed as NY-local midnight (one for `tick_date`, one for `tick_date + 1`) and converted to UTC independently. The naïve `ny_start + timedelta(days=1)` adds 24 wall-clock UTC hours and is off-by-one-hour on DST transition days. Operational test #21 enforces. |
-| **6b-L14** | **`RiskConfigProvider` scope discipline.** The provider parses ONLY the `risk:` block from each strategy YAML — never `signals:`, `sizing:`, or other strategy-execution blocks (those remain owned by `marketpulse/strategies/loader.py`). The strategy lookup key is the **YAML filename stem** (e.g., `momentum.yaml` → `"momentum"`), matching the Phase 3-T2 / Phase 3-T3 loader's identifier convention. Mismatch with the Phase 3 loader's naming = silent fail-closed for every order in the affected strategy — verify naming alignment in the implementation plan's 6b-0 acceptance tests. |
+| **6b-L14** | **`RiskConfigProvider` scope discipline.** The provider parses ONLY the `risk:` block from each strategy YAML — never `signals:`, `sizing:`, or other strategy-execution blocks (those remain owned by `marketpulse/strategies/loader.py`). The strategy lookup key is the **YAML filename stem** (e.g., `momentum_breakout.yaml` → `"momentum_breakout"`), matching the Phase 3 loader's identifier convention. Mismatch with the Phase 3 loader's naming = silent fail-closed for every order in the affected strategy — verify naming alignment in the implementation plan's 6b-0 acceptance tests. |
+| **6b-L15** | **`CompositeRiskGate` uses dependency inversion.** `__init__(*, gates: Sequence[RiskGate])` accepts a list of fully-built child gates. Composition root lives at the DI seam (`paper_trading_tick.py`), NOT inside the composite. Production constructs via the `build_standard_composite(config_provider, repository, calendar, clock, sector_provider)` factory; tests construct `CompositeRiskGate(gates=[fake1, fake2, ...])` directly. The composite stays closed for modification — new gates are added to the factory, not to composite internals. |
+| **6b-L16** | **`RiskResult.context` is logically immutable.** Gate authors construct with plain `dict`; `__post_init__` wraps in `MappingProxyType` so external mutation (`result.context["x"] = y`) raises `TypeError`. Deep mutation of nested dicts is still possible — that's deliberately left to the `normalize_for_json` serialization boundary (lock 6b-L17) where deep copies are materialized for the audit ledger. The dataclass guarantee is "top-level keys cannot be reassigned post-construction." |
+| **6b-L17** | **Single audit JSON normalizer.** All audit-context serialization MUST route through `marketpulse/trading/audit_json.normalize_for_json(obj)`: recursive `Decimal → str`, `datetime`/`date`/`time → isoformat`, `dataclass → dict`, `tuple/list → list`, `Mapping → dict`. `forward_engine._dump` delegates to this util (migrated in T16). New audit-writing code (6f UI, 6g recap, Phase 7 broker) MUST use this util — no per-module normalizers, no inline `json.dumps` of dataclasses. Prevents the `_dump` / `_normalize` / `_jsonify` / `_encode` four-way drift problem. |
 
 ---
 
@@ -619,14 +668,17 @@ class RiskConfigProvider:
 
 Single PR `feat(phase-6b): risk gates`. Branches from main → `plan/phase-6b-risk-gates` → merge to main at end of 6b-4.
 
-**New files (8):**
+**New files (11):**
+- `marketpulse/trading/audit_json.py` — `normalize_for_json()` shared util (lock 6b-L17)
 - `marketpulse/trading/risk_gates/__init__.py`
-- `marketpulse/trading/risk_gates/composite.py`
+- `marketpulse/trading/risk_gates/composite.py` — `CompositeRiskGate(gates=...)` (lock 6b-L15)
+- `marketpulse/trading/risk_gates/factory.py` — `build_standard_composite(...)` factory
 - `marketpulse/trading/risk_gates/market_hours.py`
 - `marketpulse/trading/risk_gates/strategy_size.py`
 - `marketpulse/trading/risk_gates/daily_loss.py`
 - `marketpulse/trading/risk_gates/sector_exposure.py`
 - `marketpulse/trading/risk_gates/config_provider.py`
+- `marketpulse/trading/risk_gates/_sector.py` — `strict_sector(t) → str | None` wrapper
 - `config/risk_gates.yaml`
 
 **Modified files (5):**
