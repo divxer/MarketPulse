@@ -206,3 +206,180 @@ def select_critical_events(
                 )
             )
     return out
+
+
+MAX_NUMERIC_FAILURES_PER_TICK = 10
+
+
+def _safe_decimal(
+    value,
+    default: str = "0",
+    *,
+    field_name: str | None = None,
+    failures: list[NotificationFailure] | None = None,
+) -> Decimal:
+    if value is None:
+        return Decimal(default)
+    try:
+        return Decimal(str(value))
+    except Exception as exc:
+        if field_name is not None and failures is not None:
+            numeric_failures = [
+                failure
+                for failure in failures
+                if failure.error.startswith("malformed_numeric:")
+            ]
+            capped = any(
+                failure.error == "malformed_numeric_capped"
+                for failure in failures
+            )
+            if len(numeric_failures) < MAX_NUMERIC_FAILURES_PER_TICK:
+                failures.append(
+                    NotificationFailure(
+                        event_type="tick_summary",
+                        title="",
+                        error=f"malformed_numeric:{field_name}:{type(exc).__name__}",
+                    )
+                )
+            elif not capped:
+                failures.append(
+                    NotificationFailure(
+                        event_type="tick_summary",
+                        title="",
+                        error="malformed_numeric_capped",
+                    )
+                )
+        return Decimal(default)
+
+
+def _first_failed_gate(context: Mapping[str, object]) -> str:
+    gates = context.get("failed_gates")
+    if isinstance(gates, (list, tuple)) and gates:
+        return str(gates[0])
+    return "unknown"
+
+
+def _resolve_cycle_status(
+    rows,
+    tick_date: date,
+) -> tuple[str, tuple[NotificationFailure, ...]]:
+    iso_date = tick_date.isoformat()
+    for row in rows:
+        context = row.context or {}
+        if row.event_type == "TICK_COMPLETED" and context.get("tick_date") == iso_date:
+            return str(context.get("status", "completed")), ()
+
+    for row in rows:
+        context = row.context or {}
+        if (
+            row.event_type == "KILL_SWITCH_CYCLE_SKIPPED"
+            and context.get("tick_date") == iso_date
+        ):
+            return str(context.get("status", "skipped")), ()
+
+    return (
+        "unknown",
+        (
+            NotificationFailure(
+                event_type="tick_summary",
+                title="",
+                error="missing_tick_completed_row",
+            ),
+        ),
+    )
+
+
+def summarize_tick(
+    *,
+    new_audit_rows,
+    tick_date: date,
+    cash_balance_end: Decimal,
+    active_positions_with_pu_attempts: list[tuple[str, int]],
+    active_positions_count: int,
+) -> tuple[TickSummary, tuple[NotificationFailure, ...]]:
+    """Build the routine tick summary from audit rows plus canonical state.
+
+    Lock 6g-L21: cycle status comes from TICK_COMPLETED, then
+    KILL_SWITCH_CYCLE_SKIPPED, then "unknown" with a failure record. Cash and
+    active-position fields are supplied by the caller from canonical tables.
+    """
+    rows = list(new_audit_rows)
+    cycle_status, cycle_failures = _resolve_cycle_status(rows, tick_date)
+    failures: list[NotificationFailure] = list(cycle_failures)
+
+    orders_placed_detail: list[PlacedOrderDetail] = []
+    orders_rejected_breakdown: list[tuple[str, str]] = []
+    entries_filled: list[tuple[str, Decimal]] = []
+    positions_closed: list[tuple[str, Decimal, Decimal]] = []
+    orders_cancelled = 0
+    duplicates_skipped = 0
+    total_realized_pnl = Decimal("0")
+
+    for row in rows:
+        context = row.context or {}
+        if row.event_type == "ORDER_PLACED":
+            orders_placed_detail.append(
+                PlacedOrderDetail(
+                    ticker=str(context.get("ticker", "?")),
+                    strategy=str(row.strategy or context.get("strategy", "?")),
+                    quantity=int(context.get("quantity", 0) or 0),
+                )
+            )
+        elif row.event_type == "ORDER_REJECTED":
+            orders_rejected_breakdown.append(
+                (
+                    str(context.get("ticker", "?")),
+                    _first_failed_gate(context),
+                )
+            )
+        elif row.event_type == "ORDER_CANCELLED":
+            orders_cancelled += 1
+        elif row.event_type == "ORDER_PLACED_DUPLICATE":
+            duplicates_skipped += 1
+        elif row.event_type == "ORDER_ENTRY_FILLED":
+            entries_filled.append(
+                (
+                    str(context.get("ticker", "?")),
+                    _safe_decimal(
+                        context.get("fill_price"),
+                        field_name="fill_price",
+                        failures=failures,
+                    ),
+                )
+            )
+        elif row.event_type == "POSITION_CLOSED":
+            realized_pnl = _safe_decimal(
+                context.get("realized_pnl"),
+                field_name="realized_pnl",
+                failures=failures,
+            )
+            positions_closed.append(
+                (
+                    str(context.get("ticker", "?")),
+                    _safe_decimal(
+                        context.get("exit_price"),
+                        field_name="exit_price",
+                        failures=failures,
+                    ),
+                    realized_pnl,
+                )
+            )
+            total_realized_pnl += realized_pnl
+
+    summary = TickSummary(
+        tick_date=tick_date,
+        cycle_status=cycle_status,
+        orders_placed=len(orders_placed_detail),
+        orders_placed_detail=orders_placed_detail,
+        orders_rejected=len(orders_rejected_breakdown),
+        orders_rejected_breakdown=orders_rejected_breakdown,
+        orders_cancelled=orders_cancelled,
+        duplicates_skipped=duplicates_skipped,
+        entries_filled=entries_filled,
+        positions_closed=positions_closed,
+        total_realized_pnl=total_realized_pnl,
+        cash_balance_end=cash_balance_end,
+        active_positions_count=active_positions_count,
+        active_positions_with_pu=list(active_positions_with_pu_attempts),
+    )
+    return summary, tuple(failures)
