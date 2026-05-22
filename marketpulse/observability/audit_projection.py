@@ -1,0 +1,208 @@
+"""Pure audit projection helpers for Phase 6g notifications."""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from datetime import date, datetime
+from decimal import Decimal
+from types import MappingProxyType
+
+
+@dataclass(frozen=True)
+class NotificationFailure:
+    """Structured failure record for notification dispatch and CLI output."""
+
+    event_type: str
+    title: str
+    error: str
+
+
+@dataclass(frozen=True)
+class CriticalEvent:
+    """One critical audit row selected for a standalone push."""
+
+    event_type: str
+    audit_id: int
+    timestamp: datetime
+    strategy: str | None
+    reason: str | None
+    context: Mapping[str, object]
+
+
+@dataclass(frozen=True)
+class PlacedOrderDetail:
+    """One placed-order detail for the routine tick summary."""
+
+    ticker: str
+    strategy: str
+    quantity: int
+
+
+@dataclass(frozen=True)
+class TickSummary:
+    """Aggregate of routine activity for the per-tick summary push."""
+
+    tick_date: date
+    cycle_status: str
+    orders_placed: int
+    orders_placed_detail: list[PlacedOrderDetail]
+    orders_rejected: int
+    orders_rejected_breakdown: list[tuple[str, str]]
+    orders_cancelled: int
+    duplicates_skipped: int
+    entries_filled: list[tuple[str, Decimal]]
+    positions_closed: list[tuple[str, Decimal, Decimal]]
+    total_realized_pnl: Decimal
+    cash_balance_end: Decimal
+    active_positions_count: int
+    active_positions_with_pu: list[tuple[str, int]]
+
+
+@dataclass(frozen=True)
+class _DedupFacts:
+    kill_switch_cycle_skipped_in_period: bool
+    positions_with_prior_pu: set[int]
+    threshold: int
+
+
+_ALWAYS_CRITICAL = frozenset(
+    {
+        "ENGINE_INVARIANT_ERROR",
+        "SCHEDULER_GAP_DETECTED",
+        "TICK_REPROCESSED_COMPLETED",
+        "KILL_SWITCH_FLIPPED",
+    },
+)
+
+
+def _freeze_context(raw: Mapping[str, object] | None) -> Mapping[str, object]:
+    return MappingProxyType(dict(raw or {}))
+
+
+def _is_daily_loss_reject(context: Mapping[str, object]) -> bool:
+    gates = context.get("failed_gates")
+    if not isinstance(gates, (list, tuple)):
+        return False
+    return "daily_loss" in gates
+
+
+def _is_pu_threshold_attempt(
+    context: Mapping[str, object],
+    facts: _DedupFacts,
+) -> bool:
+    return context.get("attempt_count") == facts.threshold
+
+
+def _is_position_recovered(
+    context: Mapping[str, object],
+    facts: _DedupFacts,
+) -> bool:
+    position_id = context.get("position_id")
+    return isinstance(position_id, int) and position_id in facts.positions_with_prior_pu
+
+
+def _is_first_kill_switch_skip(
+    context: Mapping[str, object],
+    facts: _DedupFacts,
+) -> bool:
+    del context
+    return not facts.kill_switch_cycle_skipped_in_period
+
+
+_CONDITIONAL_RULES: dict[str, Callable[[Mapping[str, object], _DedupFacts], bool]] = {
+    "KILL_SWITCH_CYCLE_SKIPPED": _is_first_kill_switch_skip,
+    "ORDER_REJECTED": lambda context, facts: _is_daily_loss_reject(context),
+    "PRICE_UNAVAILABLE": _is_pu_threshold_attempt,
+    "POSITION_CLOSED": _is_position_recovered,
+}
+
+
+def _check_pu_monotonic(
+    new_audit_rows,
+    failures: list[NotificationFailure],
+    *,
+    prior_attempts_by_position: dict[int, int],
+) -> None:
+    max_failures = 10
+    appended = 0
+    seen_max = dict(prior_attempts_by_position)
+    for row in new_audit_rows:
+        if row.event_type != "PRICE_UNAVAILABLE":
+            continue
+        context = row.context or {}
+        position_id = context.get("position_id")
+        attempt = context.get("attempt_count")
+        if not isinstance(position_id, int) or not isinstance(attempt, int):
+            continue
+        prior = seen_max.get(position_id, 0)
+        if attempt < prior and appended < max_failures:
+            failures.append(
+                NotificationFailure(
+                    event_type="PRICE_UNAVAILABLE",
+                    title=f"position_id={position_id}",
+                    error=(
+                        "monotonic_invariant_violation:"
+                        f"attempt_count {prior}->{attempt} (lock 6g-L4c)"
+                    ),
+                )
+            )
+            appended += 1
+        seen_max[position_id] = max(prior, attempt)
+    if appended >= max_failures:
+        failures.append(
+            NotificationFailure(
+                event_type="PRICE_UNAVAILABLE",
+                title="invariant_failures_capped",
+                error=(
+                    f"more than {max_failures} monotonic violations in this tick "
+                    "suppressed (lock 6g-L4c)"
+                ),
+            )
+        )
+
+
+def select_critical_events(
+    *,
+    new_audit_rows,
+    kill_switch_cycle_skipped_in_period: bool,
+    positions_with_prior_pu: set[int],
+    threshold: int = 3,
+    failures: list[NotificationFailure] | None = None,
+    prior_attempts_by_position: dict[int, int] | None = None,
+) -> list[CriticalEvent]:
+    """Select audit rows that warrant standalone critical notification pushes."""
+    rows = list(new_audit_rows)
+    if failures is not None:
+        _check_pu_monotonic(
+            rows,
+            failures,
+            prior_attempts_by_position=prior_attempts_by_position or {},
+        )
+
+    facts = _DedupFacts(
+        kill_switch_cycle_skipped_in_period=kill_switch_cycle_skipped_in_period,
+        positions_with_prior_pu=positions_with_prior_pu,
+        threshold=threshold,
+    )
+    out: list[CriticalEvent] = []
+    for row in rows:
+        context = row.context or {}
+        event_type = row.event_type
+        keep = event_type in _ALWAYS_CRITICAL
+        if not keep:
+            rule = _CONDITIONAL_RULES.get(event_type)
+            keep = rule(context, facts) if rule is not None else False
+
+        if keep:
+            out.append(
+                CriticalEvent(
+                    event_type=event_type,
+                    audit_id=row.id,
+                    timestamp=row.timestamp,
+                    strategy=row.strategy,
+                    reason=row.reason if row.reason else None,
+                    context=_freeze_context(context),
+                )
+            )
+    return out
