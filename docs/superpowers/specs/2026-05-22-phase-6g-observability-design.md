@@ -82,7 +82,7 @@ Concretely (all signals land on the post-tick notification pass — see § 5.1 /
 
 - **(6g-L1)** Notifications are emitted **only after** `daily_cycle.run()` completes. Audit writes are never notification-aware. The audit-write code path in `repository.write_audit_event` is unchanged.
 - **(6g-L13)** `observability/` is the audit-consumer layer; `alerts/` remains transport-only. Dependency direction is `observability → alerts`, never reverse.
-- **(6g-L19)** Audit row filter applies `context["tick_date"] == tick_date` **conditionally**: events that carry the key in their context (TICK_COMPLETED, TICK_REPROCESSED_COMPLETED, KILL_SWITCH_CYCLE_SKIPPED, ENGINE_INVARIANT_ERROR) MUST match; events that don't (ORDER_PLACED, ORDER_ENTRY_FILLED, POSITION_CLOSED, PRICE_UNAVAILABLE, KILL_SWITCH_FLIPPED, ORDER_REJECTED, ORDER_CANCELLED, ORDER_PLACED_DUPLICATE, SCHEDULER_GAP_DETECTED) are admitted on the `[since, notify_started_at]` time window alone.
+- **(6g-L19)** Audit row filter applies `context["tick_date"] == tick_date` **conditionally**: events that carry the key in their context (TICK_COMPLETED, TICK_REPROCESSED_COMPLETED, KILL_SWITCH_CYCLE_SKIPPED) MUST match; events that don't (ORDER_PLACED, ORDER_ENTRY_FILLED, POSITION_CLOSED, PRICE_UNAVAILABLE, KILL_SWITCH_FLIPPED, ORDER_REJECTED, ORDER_CANCELLED, ORDER_PLACED_DUPLICATE, SCHEDULER_GAP_DETECTED, **ENGINE_INVARIANT_ERROR**) are admitted on the time window alone. ENGINE_INVARIANT_ERROR was reclassified out of the tick_date-required group because 6a writes its context with `phase / order_id / position_id / error / as_of` — `tick_date` is not guaranteed.
 
 ## 3 — Notification Taxonomy
 
@@ -244,7 +244,8 @@ CLI behavior:
 ### 5.3 Section 5 locks
 
 - **(6g-L7)** `notify_paper_tick_events(since=tick_started_at, ...)` only emits notifications for audit rows written during the current tick execution window. Reprocessing a historical tick does NOT replay prior notifications automatically.
-  - **Acknowledged delay:** Kill-switch flips and clears written *between* ticks (e.g., manual operator action at noon) are picked up by the *next* tick's notification window, not in real-time. This is acceptable for paper trading where ticks are daily; if real-time flip notification becomes required, lock 6g-L1 needs revisiting.
+  - **Acknowledged delay:** Kill-switch flips and clears written *between* ticks (e.g., manual operator action at noon) are picked up by the *next* tick's notification window via the extended kill-switch window (lock 6g-L20), not in real-time. This is acceptable for paper trading where ticks are daily; if real-time flip notification becomes required, lock 6g-L1 needs revisiting.
+- **(6g-L20)** KILL_SWITCH_FLIPPED rows are scanned in the **extended between-tick window** `[latest_tick_completed_at, notify_started_at]` (where `latest_tick_completed_at = repository.latest_tick_completed_timestamp(before=since)`, falling back to epoch if no prior TICK_COMPLETED exists). This honors lock 6g-L7's "next-tick pickup" promise for externally-triggered flips. All other event types use the narrower `[since=tick_started_at, notify_started_at]` window. KILL_SWITCH_FLIPPED is the only event type with an asymmetric window because it's the only one that can be written externally between ticks.
 - **(6g-L8)** Replay / recovery notifications are operator-triggered only, via explicit CLI (`republish_tick_notifications --date YYYY-MM-DD`). No automatic replay fan-out.
 - **(6g-L18)** `republish_cli` refuses to run when `MP_PAPER_NOTIFICATIONS_ENABLED=false`; exit code 1.
 
@@ -265,6 +266,7 @@ marketpulse/alerts/notifier.py   # Existing; gains get_notifier_from_settings(se
 marketpulse/trading/repository.py # Existing; gains:
   - positions_with_prior_price_unavailable(position_ids, before) -> set[int]   (lock 6g-L17)
   - kill_switch_cycle_skipped_in_active_period(before) -> bool                 (lock 6g-L5)
+  - latest_tick_completed_timestamp(before) -> datetime | None                 (lock 6g-L20)
 
 marketpulse/scheduler/paper_trading_tick.py   # Existing; adds best-effort notify hook.
 ```
@@ -312,11 +314,23 @@ def notify_paper_tick_events(
 ) -> NotificationResult:
     """Audit-driven operator notification dispatcher.
 
-    **Query window:** `[since, notify_started_at]` where
+    **Query window:** `[since, notify_started_at]` for engine-written
+    events (everything except the kill-switch family), where
     `notify_started_at = clock.now()` is captured at the top of this
     call. The window upper bound is bounded explicitly to keep the
     function deterministic under test (FakeClock) and to prevent races
     with audit rows written by a concurrent process.
+
+    **Between-tick window (kill-switch family only — lock 6g-L20):**
+    `KILL_SWITCH_FLIPPED` rows can be written by external triggers
+    (manual CLI, drawdown gate inside the engine of a *prior* tick that
+    cleared) at any time, including between ticks. To honor lock 6g-L7's
+    "kill-switch flips/clears land on the next tick" promise, the entrypoint
+    additionally scans KILL_SWITCH_FLIPPED rows in the extended window
+    `[latest_tick_completed_at, notify_started_at]`, where
+    `latest_tick_completed_at = repository.latest_tick_completed_timestamp(
+        before=since)`. If no prior TICK_COMPLETED exists (first-ever
+    tick), the kill-switch query uses `[epoch, notify_started_at]`.
 
     **Audit row filter:** rows are first filtered by
     `since <= timestamp <= notify_started_at`. The `tick_date` parameter
@@ -444,10 +458,41 @@ def select_critical_events(
 def summarize_tick(
     *,
     new_audit_rows: list,
+    tick_date: date,
     cash_balance_end: Decimal,
     active_positions_with_pu_attempts: list[tuple[str, int]],
     active_positions_count: int,
-) -> TickSummary:
+) -> tuple[TickSummary, NotificationFailure | None]:
+    """Builds the routine summary. Two field-sourcing rules (lock 6g-L21):
+    
+    1. `cycle_status` is read from the audit row in priority order:
+       a. The row's context["status"] field on the TICK_COMPLETED row
+          whose context["tick_date"] == tick_date.isoformat(); else
+       b. The row's context["status"] on a KILL_SWITCH_CYCLE_SKIPPED row
+          with matching tick_date (status will be "skipped"); else
+       c. `cycle_status="unknown"` and a `NotificationFailure(
+            event_type="tick_summary", error="missing_tick_completed_row")`
+          is returned alongside — the summary push still emits (heartbeat
+          discipline), but with the unknown status and the failure
+          recorded in NotificationResult.failures so the operator can
+          tell something is off.
+    2. `cash_balance_end` and `active_positions_count` /
+       `active_positions_with_pu_attempts` are pulled from the **DB
+       directly** by the entrypoint (`repository.cash_balance()` etc.)
+       and threaded through to this function — NOT read from audit row
+       context. Reasoning: cash + open positions are canonical state in
+       paper_position / paper_cash_ledger, not audit context. Audit only
+       owns event history. This avoids the "audit row missing → no
+       summary" failure mode for state that is recoverable from canonical
+       tables.
+
+    Returns the TickSummary plus an optional NotificationFailure for the
+    caller to append to NotificationResult.failures."""
+```
+
+**Section 6.3 lock:**
+
+- **(6g-L21)** `summarize_tick` field-sourcing: `cycle_status` reads from TICK_COMPLETED row (priority) → KILL_SWITCH_CYCLE_SKIPPED row → falls back to `"unknown"` with a `NotificationFailure(event_type="tick_summary", error="missing_tick_completed_row")`. `cash_balance_end` and active-position fields are pulled from canonical tables (`paper_cash_ledger`, `paper_position`), NEVER from audit row context — heartbeat summary must not crash on missing audit metadata.
     """Aggregate routine events for the summary push. Pure: no DB, no
     notifier. Caller is responsible for fetching cash_balance and active
     position state."""
@@ -484,6 +529,17 @@ def kill_switch_cycle_skipped_in_active_period(
     Empty-history contract: if NO KILL_SWITCH_FLIPPED(active=true) row
     exists in history (orphan SKIPPED state), returns `False` (per 6g-L5
     boundary clause — emit the push)."""
+
+def latest_tick_completed_timestamp(
+    self, *, before: datetime,
+) -> datetime | None:
+    """Lock 6g-L20: returns the most recent TICK_COMPLETED audit row's
+    `timestamp` strictly before `before`, or None if no such row exists
+    (first-ever tick). Used by 6g to construct the between-tick window
+    for KILL_SWITCH_FLIPPED rows, which can be written externally
+    (manual CLI, etc.) outside any tick execution.
+
+    Read-only `select()` — boundary guard PASS."""
 ```
 
 Both helpers are read-only `select()` queries. Lock-iii repository-boundary architecture guard tests pass.
@@ -516,6 +572,7 @@ def paper_trading_tick_job(
             tick_date=result.tick_date,
             repository=repository,
             notifier=notifier,
+            clock=clock,                  # required (lock 6g-L19 window upper bound)
         )
     except Exception as e:
         log.warning("paper_tick_notify_failed", error=str(e))
@@ -701,4 +758,6 @@ Detailed task breakdown belongs in the plan doc. High-level phases:
 | 6g-L16 | § 8.1 | Tests layered: pure projection, templates, notifier entrypoint with seeded DB, one E2E scheduler test. Projection and template tests stay separate. |
 | 6g-L17 | § 6.6 | Recovery detection uses repository batch helper `positions_with_prior_price_unavailable(position_ids)`, not per-position SQL. |
 | 6g-L18 | § 5.3 | `republish_cli` refuses to run when `MP_PAPER_NOTIFICATIONS_ENABLED=false`; exit code 1. |
-| 6g-L19 | § 2.2 | Audit row filter applies `context["tick_date"]` match **conditionally**: required for events whose context carries the key; admitted on time window alone otherwise. |
+| 6g-L19 | § 2.2 | Audit row filter applies `context["tick_date"]` match **conditionally**: required for TICK_COMPLETED / TICK_REPROCESSED_COMPLETED / KILL_SWITCH_CYCLE_SKIPPED; admitted on time window alone for all others (incl. ENGINE_INVARIANT_ERROR). |
+| 6g-L20 | § 5.3 | KILL_SWITCH_FLIPPED uses the extended between-tick window `[latest_tick_completed_at, notify_started_at]` so externally-triggered flips are picked up on the next tick. All other event types use `[since=tick_started_at, notify_started_at]`. |
+| 6g-L21 | § 6.3 | `summarize_tick` reads `cycle_status` from TICK_COMPLETED (priority) → KILL_SWITCH_CYCLE_SKIPPED → "unknown" + failure record. Cash balance and active positions are pulled from canonical tables, NOT audit context. |
