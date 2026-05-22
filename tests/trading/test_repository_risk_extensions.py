@@ -150,3 +150,124 @@ def test_today_realized_pnl_dst_spring_forward_no_overlap(session):
     assert repo.today_realized_pnl(tick_date=date(2026, 3, 8)) == Decimal(10)
     # The 00:30 next-day fill counts for 2026-03-09.
     assert repo.today_realized_pnl(tick_date=date(2026, 3, 9)) == Decimal(999)
+
+
+def _insert_position(
+    session, *, ticker, quantity, entry_price,
+    status="OPEN", strategy="momentum_breakout",
+):
+    """Helper — minimal OPEN position. order_id reused to avoid wiring a
+    second order; CHECK constraints don't gate on order_id uniqueness across
+    OPEN rows (only the order table enforces that via unique idx)."""
+    from marketpulse.db.models import PaperOrder, PaperPosition
+    # Each PaperPosition needs a distinct order_id (UNIQUE). Insert a stub
+    # order first.
+    nxt = (session.execute(
+        __import__("sqlalchemy").select(__import__("sqlalchemy").func.coalesce(
+            __import__("sqlalchemy").func.max(PaperOrder.id), 0
+        ))
+    ).scalar() or 0) + 1
+    o = PaperOrder(
+        id=nxt, strategy=strategy, ticker=ticker, quantity=quantity,
+        event_time=datetime(2026, 5, 21, 14, 0, tzinfo=UTC),
+        allocation_date=date(2026, 5, 21),
+        event_price=entry_price,
+        horizon_date=date(2026, 5, 28),
+        horizon_price=Decimal("0"),
+        idempotency_key=f"pos-{nxt}-{ticker}",
+        allocation_run_id=f"r-{nxt}",
+        status="ENTRY_FILLED",
+        placed_at=datetime(2026, 5, 21, 14, 0, tzinfo=UTC),
+        filled_at=datetime(2026, 5, 21, 14, 1, tzinfo=UTC),
+        strategy_version="v1",
+        allocator_version="phase6a-v1",
+        execution_engine_version="phase6a-v1",
+        weight=1.0, raw_bid_weight=1.0, pool_corr=0.1,
+        contribution_multiplier=1.0, adjusted_bid_weight=1.0,
+        effective_corr_window=60,
+        rewarded_for_negative_corr=False,
+        would_change_rank=False,
+        size_clamped_by_override=False,
+    )
+    session.add(o)
+    session.flush()
+    # ck_paper_position_closed_both_set: CLOSED rows need both fill_ids
+    # set. Use stub integers (we're not exercising the FK relation).
+    if status == "CLOSED":
+        p = PaperPosition(
+            order_id=o.id, strategy=strategy, ticker=ticker,
+            quantity=quantity, entry_price=entry_price,
+            entry_date=date(2026, 5, 21),
+            horizon_date=date(2026, 5, 28),
+            status=status,
+            opened_at=datetime(2026, 5, 21, 14, 1, tzinfo=UTC),
+            entry_fill_id=nxt, exit_fill_id=nxt + 10_000,
+            closed_at=datetime(2026, 5, 21, 15, 0, tzinfo=UTC),
+            exit_price=entry_price,
+            realized_pnl=Decimal("0"),
+        )
+    else:
+        p = PaperPosition(
+            order_id=o.id, strategy=strategy, ticker=ticker,
+            quantity=quantity, entry_price=entry_price,
+            entry_date=date(2026, 5, 21),
+            horizon_date=date(2026, 5, 28),
+            status=status,
+            opened_at=datetime(2026, 5, 21, 14, 1, tzinfo=UTC),
+            entry_fill_id=None, exit_fill_id=None,
+        )
+    session.add(p)
+    session.flush()
+    return p
+
+
+def test_sector_exposure_notional_empty(session):
+    from marketpulse.trading.repository import Repository
+    repo = Repository(session=session)
+    result = repo.sector_exposure_notional(sector_provider=lambda t: "Technology")
+    assert result == {}
+
+
+def test_sector_exposure_notional_groups_open_positions(session):
+    from marketpulse.trading.repository import Repository
+    _insert_position(session, ticker="AAPL", quantity=10, entry_price=Decimal("150"))
+    _insert_position(session, ticker="MSFT", quantity=5, entry_price=Decimal("400"))
+    _insert_position(session, ticker="JPM", quantity=20, entry_price=Decimal("160"))
+
+    def sector(t):
+        return {"AAPL": "Technology", "MSFT": "Technology", "JPM": "Financials"}[t]
+
+    repo = Repository(session=session)
+    result = repo.sector_exposure_notional(sector_provider=sector)
+    assert result["Technology"] == Decimal("3500")   # 10*150 + 5*400
+    assert result["Financials"] == Decimal("3200")   # 20*160
+
+
+def test_sector_exposure_notional_excludes_closed_positions(session):
+    from marketpulse.trading.repository import Repository
+    _insert_position(session, ticker="AAPL", quantity=10, entry_price=Decimal("150"))
+    _insert_position(
+        session, ticker="OLD", quantity=10,
+        entry_price=Decimal("100"), status="CLOSED",
+    )
+
+    repo = Repository(session=session)
+    result = repo.sector_exposure_notional(sector_provider=lambda t: "Technology")
+    assert result == {"Technology": Decimal("1500")}
+
+
+def test_sector_exposure_notional_excludes_unknown_sector_positions(session):
+    """Lock 6b-L8 / 6b-L11: positions with sector_provider(t) == None do
+    not anchor a sector bucket. They're silently dropped from the result;
+    SectorExposureGate's own pre-check fails NEW orders with unknown sector
+    via the fail-closed `proposed_sector is None` path."""
+    from marketpulse.trading.repository import Repository
+    _insert_position(session, ticker="KNOWN", quantity=10, entry_price=Decimal("100"))
+    _insert_position(session, ticker="UNKNOWN", quantity=5, entry_price=Decimal("200"))
+
+    def sector(t):
+        return "Tech" if t == "KNOWN" else None
+
+    repo = Repository(session=session)
+    result = repo.sector_exposure_notional(sector_provider=sector)
+    assert result == {"Tech": Decimal("1000")}
