@@ -84,7 +84,7 @@ Concretely: a fill happens → operator knows. A reject happens → operator kno
 
 ### 3.1 Critical (standalone) events
 
-Each row triggers exactly one `notifier.send(title, body, url=None)` call.
+Each row triggers exactly one `notifier.send(title, body, url=None)` call. **No coalescing across rows of the same event type** in MVP — three `ENGINE_INVARIANT_ERROR` rows in one tick produce three pushes. (If noise becomes a problem, defer to a future enhancement; explicit-per-row is operator-correct because each row may have different context.)
 
 | Audit event | Standalone? | Title | Notes |
 |---|---|---|---|
@@ -114,8 +114,12 @@ Aggregated into one `📊 Paper Tick YYYY-MM-DD` push per tick. **The summary pu
 
 - **(6g-L2)** 6g uses hybrid notification: critical audit events emit standalone push; routine activity is summarized once per tick. No per-event spam for normal fills/orders.
 - **(6g-L3)** `ORDER_REJECTED` enters summary by default; standalone push iff `context["failed_gates"]` includes `daily_loss`.
-- **(6g-L4)** `PRICE_UNAVAILABLE` standalone push iff `context["attempt_count"] == 3` exactly. Subsequent attempts (≥ 4) suppressed. Recovery push iff this tick's `POSITION_CLOSED` row has a `position_id` with prior `PRICE_UNAVAILABLE` audit history.
+- **(6g-L4a)** `PRICE_UNAVAILABLE` standalone push iff `context["attempt_count"] == 3` exactly. Subsequent attempts (≥ 4) suppressed.
+- **(6g-L4b)** Recovery push iff this tick's `POSITION_CLOSED` row has a `position_id` with ≥ 1 `PRICE_UNAVAILABLE` audit row whose `timestamp < POSITION_CLOSED.timestamp` (i.e., prior in history, not concurrent).
+- **(6g-L4c)** Invariant assumption: `context["attempt_count"]` is **per-position monotonic non-decreasing**. Phase 6b+ T6/T7 enforce this — each new `PRICE_UNAVAILABLE` row sets `attempt_count = repository.count_price_unavailable_attempts(position_id) + 1`, and audit rows are append-only (lock v). If a future change introduces "retry counter reset" semantics, 6g-L4a must be revisited.
 - **(6g-L5)** `KILL_SWITCH_CYCLE_SKIPPED` standalone push iff no prior `KILL_SWITCH_CYCLE_SKIPPED` row exists since the most recent `KILL_SWITCH_FLIPPED(active=true)`. Pure audit projection — no state.
+  - **Boundary contract:** If no `KILL_SWITCH_FLIPPED(active=true)` row exists in history (orphan SKIPPED — shouldn't happen but defensive), the helper returns `False` (no prior skip in nonexistent period → emit the push). This is operator-correct: a `SKIPPED` without a flip is itself anomalous and worth notifying.
+- **(6g-L6)** Paper trading MVP has exactly one routine daily notification: the post-tick summary. No separate daily digest cron. Phase 2 AI recap is independent and continues operating in its own track.
 - **(6g-L9)** `TICK_REPROCESSED_COMPLETED` emits critical standalone push with prefix `⚠️ Tick Reprocessed — YYYY-MM-DD`.
 
 ## 4 — Format Conventions
@@ -137,7 +141,7 @@ Body:  Reason: <context.reason>
        Time:   <timestamp HH:MM NY>
 
 Title: ✅ Kill Switch CLEARED
-Body:  By:     <context.reason>
+Body:  Reason: <context.reason>
 
 Title: 🛑 Kill Switch — Cycle Skipped
 Body:  Date:   <tick_date>
@@ -231,6 +235,7 @@ CLI behavior:
 ### 5.3 Section 5 locks
 
 - **(6g-L7)** `notify_paper_tick_events(since=tick_started_at, ...)` only emits notifications for audit rows written during the current tick execution window. Reprocessing a historical tick does NOT replay prior notifications automatically.
+  - **Acknowledged delay:** Kill-switch flips and clears written *between* ticks (e.g., manual operator action at noon) are picked up by the *next* tick's notification window, not in real-time. This is acceptable for paper trading where ticks are daily; if real-time flip notification becomes required, lock 6g-L1 needs revisiting.
 - **(6g-L8)** Replay / recovery notifications are operator-triggered only, via explicit CLI (`republish_tick_notifications --date YYYY-MM-DD`). No automatic replay fan-out.
 - **(6g-L18)** `republish_cli` refuses to run when `MP_PAPER_NOTIFICATIONS_ENABLED=false`; exit code 1.
 
@@ -383,11 +388,17 @@ def summarize_tick(
 # marketpulse/trading/repository.py (additions)
 
 def positions_with_prior_price_unavailable(
-    self, *, position_ids: list[int],
+    self, *, position_ids: list[int], before: datetime,
 ) -> set[int]:
     """Lock 6g-L17: batch helper. Returns subset of position_ids that
-    have ≥ 1 PRICE_UNAVAILABLE audit row in history. Used by 6g
-    translator to detect "recovered" POSITION_CLOSED events.
+    have ≥ 1 PRICE_UNAVAILABLE audit row with timestamp < `before`
+    (i.e., prior in history, not concurrent with the POSITION_CLOSED
+    row being evaluated). Used by 6g translator to detect "recovered"
+    POSITION_CLOSED events (lock 6g-L4b).
+
+    Empty-history contract: `position_ids=[]` returns `set()` without
+    querying. `position_ids` non-empty but no matching audit rows
+    returns `set()`.
 
     Uses json_extract(context, '$.position_id') matching for consistency
     with Repository.count_price_unavailable_attempts (T6)."""
@@ -397,7 +408,11 @@ def kill_switch_cycle_skipped_in_active_period(
 ) -> bool:
     """Lock 6g-L5: True iff a KILL_SWITCH_CYCLE_SKIPPED audit row exists
     with timestamp > most_recent_KILL_SWITCH_FLIPPED(active=true).timestamp
-    AND timestamp < `before`. Pure audit projection — no extra state."""
+    AND timestamp < `before`. Pure audit projection — no extra state.
+
+    Empty-history contract: if NO KILL_SWITCH_FLIPPED(active=true) row
+    exists in history (orphan SKIPPED state), returns `False` (per 6g-L5
+    boundary clause — emit the push)."""
 ```
 
 Both helpers are read-only `select()` queries. Lock-iii repository-boundary architecture guard tests pass.
@@ -407,26 +422,39 @@ Both helpers are read-only `select()` queries. Lock-iii repository-boundary arch
 ```python
 # marketpulse/scheduler/paper_trading_tick.py (modification)
 
-def paper_trading_tick_job():
+def paper_trading_tick_job(
+    *,
+    notifier: Notifier | None = None,    # NEW — test seam
+) -> None:
     # ... existing setup ...
+    settings = get_settings()
+    if notifier is None:
+        notifier = get_notifier_from_settings(settings)  # production default
+
     tick_started_at = clock.now()                 # NEW
     result = daily_cycle.run(...)
 
-    # NEW — 6g hook, best-effort, never raises
+    # NEW — 6g hook, best-effort, never raises.
+    # The try/except here is belt-and-braces with 6g-L14's internal
+    # capture; the inner contract is authoritative, this layer exists so
+    # any *unexpected* escape (e.g., an unhandled exception type) still
+    # cannot crash the scheduler job.
     try:
         notify_paper_tick_events(
             since=tick_started_at,
             tick_date=result.tick_date,
             repository=repository,
-            notifier=get_notifier_from_settings(settings),
+            notifier=notifier,
         )
     except Exception as e:
         log.warning("paper_tick_notify_failed", error=str(e))
 ```
 
+**Test injection seam (lock 6g-L16):** `notifier` is a keyword-only parameter so L3/E2E tests can pass `CapturingNotifier()` directly without monkey-patching `get_notifier_from_settings`. Production scheduler calls `paper_trading_tick_job()` with no args → defaults to settings-driven notifier.
+
 ### 6.6 Section 6 locks
 
-- **(6g-L14)** `notify_paper_tick_events(...)` is best-effort. Notifier failures and translator errors are captured/logged and returned in `NotificationResult`; they never propagate to scheduler or engine.
+- **(6g-L14)** `notify_paper_tick_events(...)` is best-effort. Notifier failures and translator errors are captured/logged and returned in `NotificationResult`; they never propagate to scheduler or engine. Per-send timeout is enforced by the transport layer (`BarkNotifier`/`ServerChanNotifier` already use `httpx.post(..., timeout=10)`); translator does not retry on timeout failures — the failure is logged and the next event proceeds.
 - **(6g-L15)** Paper notifications have an independent enable flag `MP_PAPER_NOTIFICATIONS_ENABLED`; disabled means no sends, but projection functions remain testable.
 - **(6g-L17)** Recovery detection uses repository batch helper `positions_with_prior_price_unavailable(position_ids)`, not per-position ad hoc SQL.
 
@@ -530,7 +558,7 @@ Day D+2 (third PU): summary footer + **1 standalone push**:
 > 3 retries failed
 > Source:   yfinance
 
-Day D+3: summary footer shows `(1 with PRICE_UNAVAILABLE attempt 4/3)`. No new standalone push (lock 6g-L4 suppresses ≥ 4).
+Day D+3: summary footer shows `(1 with PRICE_UNAVAILABLE attempt 4+)`. No new standalone push (lock 6g-L4a suppresses ≥ 4). The `N+` notation caps display at the threshold; the actual `attempt_count` value is still in the audit row.
 
 Day D+N (provider recovers, exit succeeds): **1 standalone push**:
 
@@ -585,17 +613,19 @@ Detailed task breakdown belongs in the plan doc. High-level phases:
 | 6g-L1 | § 2.2 | Notifications emitted only after `daily_cycle.run()` completes. Audit writes are never notification-aware. |
 | 6g-L2 | § 3.3 | Hybrid notification: critical events standalone; routine activity summarized once per tick. |
 | 6g-L3 | § 3.3 | `ORDER_REJECTED` enters summary by default; standalone push iff `failed_gates` includes `daily_loss`. |
-| 6g-L4 | § 3.3 | `PRICE_UNAVAILABLE` standalone iff `attempt_count == 3` exactly; ≥ 4 suppressed. Recovery push iff `POSITION_CLOSED` row has position with prior PU history. |
-| 6g-L5 | § 3.3 | `KILL_SWITCH_CYCLE_SKIPPED` standalone push iff no prior skip exists since most recent `KILL_SWITCH_FLIPPED(active=true)`. |
+| 6g-L4a | § 3.3 | `PRICE_UNAVAILABLE` standalone iff `attempt_count == 3` exactly; ≥ 4 suppressed. |
+| 6g-L4b | § 3.3 | Recovery push iff `POSITION_CLOSED` row has position with prior PU history (timestamp strictly before POSITION_CLOSED). |
+| 6g-L4c | § 3.3 | Invariant: `attempt_count` is per-position monotonic non-decreasing (enforced by 6b+ T6/T7 + append-only audit). |
+| 6g-L5 | § 3.3 | `KILL_SWITCH_CYCLE_SKIPPED` standalone push iff no prior skip exists since most recent `KILL_SWITCH_FLIPPED(active=true)`. If no FLIPPED row exists, returns False (emit). |
 | 6g-L6 | § 3.3 / § 1 | Paper trading MVP has exactly one routine daily notification: the post-tick summary. No separate daily digest cron. |
-| 6g-L7 | § 5.3 | `notify_paper_tick_events(since=tick_started_at, ...)` emits only for current-tick audit window. Reprocessing a historical tick does NOT replay prior notifications. |
+| 6g-L7 | § 5.3 | `notify_paper_tick_events(since=tick_started_at, ...)` emits only for current-tick audit window. Reprocessing does NOT replay. Kill-switch flips/clears written between ticks land on the NEXT tick's notification. |
 | 6g-L8 | § 5.3 | Replay is operator-triggered only via explicit CLI. No automatic replay fan-out. |
 | 6g-L9 | § 3.3 | `TICK_REPROCESSED_COMPLETED` emits critical standalone push with `⚠️ Tick Reprocessed — YYYY-MM-DD`. |
 | 6g-L10 | § 4.4 | Mixed Chinese labels + English identifiers. Fixed emoji prefixes: 🛑 critical, ⚠️ warning, ✅ recovery, 📊 routine summary. |
 | 6g-L11 | § 4.4 | MVP sends `url=None`. Deep links deferred to 6f integration. |
 | 6g-L12 | § 4.4 | Routine summary compact + section-skipping. Empty sections omitted; truncation reuses `push.py`; money/prices rendered with sign + 2 decimals. |
 | 6g-L13 | § 2.2 | `observability/` is consumer; `alerts/` is transport-only. Dependency direction: `observability → alerts`. |
-| 6g-L14 | § 6.6 | `notify_paper_tick_events` is best-effort. Failures/exceptions captured in `NotificationResult`; never propagate. |
+| 6g-L14 | § 6.6 | `notify_paper_tick_events` is best-effort. Failures/exceptions captured in `NotificationResult`; never propagate. Per-send timeout enforced by transport layer (existing httpx timeout=10s); translator does not retry on timeout. |
 | 6g-L15 | § 6.6 | Independent enable flag `MP_PAPER_NOTIFICATIONS_ENABLED`. Disabled = no sends; projection still testable. |
 | 6g-L16 | § 8.1 | Tests layered: pure projection, templates, notifier entrypoint with seeded DB, one E2E scheduler test. Projection and template tests stay separate. |
 | 6g-L17 | § 6.6 | Recovery detection uses repository batch helper `positions_with_prior_price_unavailable(position_ids)`, not per-position SQL. |
