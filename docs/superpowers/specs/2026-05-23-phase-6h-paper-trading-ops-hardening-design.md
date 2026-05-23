@@ -147,6 +147,15 @@ Inputs:
 - `--password` or `MARKETPULSE_SMOKE_PASSWORD`
 - optional `--timeout-seconds`
 
+Authentication flow:
+
+1. `GET /lab/paper-trading` unauthenticated and verify redirect to `/login`.
+2. `POST /login` with the supplied password.
+3. Preserve the returned session cookie.
+4. `GET /lab/paper-trading` with the session cookie.
+
+The script must not bypass the app's normal login/session flow.
+
 Exit codes:
 
 - `0`: all checks pass.
@@ -176,6 +185,12 @@ Checks:
 - unresolved critical/warning audit rows in the current operational window.
 - section-level query failures should be reported as degraded, not hidden.
 
+Implementation rule:
+
+- The health command must prefer `load_paper_trading_dashboard(...)` or same-layer
+  query helpers for COW, stuck `PRICE_UNAVAILABLE`, kill switch, section health,
+  and status semantics. It must not reimplement those semantics inside the CLI.
+
 Inputs:
 
 - optional positional `DB_URL`
@@ -203,13 +218,17 @@ Rules:
 
 - default mode is configuration-only and sends nothing.
 - sending requires an explicit flag: `--send`.
+- sending also requires explicit confirmation: `--confirm-send`.
+- smoke message title must start with
+  `SMOKE TEST — Paper Trading Notifications`.
 - smoke message text must include `SMOKE TEST` and must not resemble a real
-  trading event.
+  trading event or real paper tick alert.
 - command never writes paper state or audit rows.
 
 Inputs:
 
 - `--send`
+- `--confirm-send`
 - optional `--channel` if supported by the notifier implementation.
 
 Exit codes:
@@ -225,6 +244,12 @@ calls. It should validate that a known liquid ticker can resolve a recent close
 without mutating trading state.
 
 Default ticker: `SPY`.
+
+Date rule:
+
+- Query the most recent completed New York trading day close, not "today".
+  Weekends, holidays, and pre-close intraday runs must not produce false
+  Attention solely because today's close is not final yet.
 
 Rules:
 
@@ -285,6 +310,13 @@ which require the next real tick.
 
 `Failed` is a script outcome. It is not a paper-engine state.
 
+Fresh / empty DB semantics:
+
+- No completed paper tick yet is an explicit empty state.
+- Fresh / empty DB is Healthy unless a query, configuration, app, notifier, or
+  provider check fails.
+- Empty does not mean Attention and does not mean Degraded.
+
 ---
 
 ## 5 — Testing Strategy
@@ -304,9 +336,19 @@ Required coverage:
 - Health check returns Attention for kill switch ON.
 - Health check reports DB inspection failure as exit code 2.
 - Notification smoke default mode does not send.
-- Notification smoke `--send` requires explicit operator action.
+- Notification smoke `--send` requires `--confirm-send` and emits a fixed
+  `SMOKE TEST — Paper Trading Notifications` title.
 - No 6h script inserts, updates, or deletes `paper_order`, `paper_fill`,
   `paper_position`, `paper_cash_ledger`, or `paper_audit_event`.
+
+No-mutation tests must use two layers:
+
+1. Static guard: grep/AST-style test rejects `insert`, `update`, `delete`,
+   `session.add`, `session.merge`, and `session.delete` in 6h scripts when they
+   touch paper trading tables/models.
+2. Runtime guard: run each script against a test DB and assert row counts for
+   `paper_order`, `paper_fill`, `paper_position`, `paper_cash_ledger`, and
+   `paper_audit_event` are unchanged before vs. after.
 
 Verification before merge:
 
@@ -329,6 +371,9 @@ Verification before merge:
 | 6h-L6 | Notification smoke must be explicit, labeled as smoke, and must not mimic real trading events. |
 | 6h-L7 | Scripts use existing canonical query/projection helpers where available instead of re-deriving trading semantics ad hoc. |
 | 6h-L8 | Scripts must return stable exit codes suitable for CI/deploy tooling. |
+| 6h-L9 | Fresh / empty DB is Healthy empty state unless an actual check fails. |
+| 6h-L10 | Price smoke uses the most recent completed NY trading day close. |
+| 6h-L11 | No-mutation safety is verified by both static guards and DB before/after row-count checks. |
 
 ---
 
@@ -343,4 +388,3 @@ Verification before merge:
 - CorrelationCapGate.
 - Control-plane actions in `/lab/paper-trading`.
 - Automated remediation.
-
