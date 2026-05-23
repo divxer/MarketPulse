@@ -780,6 +780,10 @@ def test_position_closed_recovery_collapses_prior_price_unavailable(db_session):
     assert [event.event_type for event in dashboard.critical_events.data] == ["POSITION_CLOSED"]
     assert dashboard.critical_events.data[0].severity == "recovery"
     assert dashboard.critical_events.data[0].audit_id == recovered.id
+    assert [row.event_type for row in dashboard.audit_timeline.data.rows] == [
+        "PRICE_UNAVAILABLE",
+        "POSITION_CLOSED",
+    ]
 
 
 def test_position_closed_recovery_uses_historical_price_unavailable(db_session):
@@ -888,23 +892,39 @@ def _severity_for(row: PaperAuditEvent, recovered_positions: set[int]) -> Litera
     return "routine"
 
 
-def _positions_with_historical_price_unavailable(
+@dataclass(frozen=True)
+class ProjectionContext:
+    rows: list[PaperAuditEvent]
+    recovered_positions: set[int]
+    suppressed_price_unavailable_positions: set[int]
+
+
+def _historical_price_unavailable_before_closes(
     db: Session,
-    *,
-    position_ids: set[int],
-    before: datetime,
+    close_rows: list[PaperAuditEvent],
 ) -> set[int]:
-    if not position_ids:
+    if not close_rows:
         return set()
     position_id_expr = func.json_extract(PaperAuditEvent.context, "$.position_id")
-    rows = db.execute(
-        select(position_id_expr)
+    close_ts_by_position = {
+        pid: row.timestamp
+        for row in close_rows
+        if (pid := _position_id(row)) is not None
+    }
+    if not close_ts_by_position:
+        return set()
+    pu_rows = db.execute(
+        select(position_id_expr, PaperAuditEvent.timestamp)
         .where(PaperAuditEvent.event_type == "PRICE_UNAVAILABLE")
-        .where(PaperAuditEvent.timestamp < before)
-        .where(position_id_expr.in_(sorted(position_ids)))
-        .distinct()
+        .where(position_id_expr.in_(sorted(close_ts_by_position)))
+        .where(PaperAuditEvent.timestamp < max(close_ts_by_position.values()))
     ).all()
-    return {int(row[0]) for row in rows if row[0] is not None}
+    return {
+        int(position_id)
+        for position_id, pu_timestamp in pu_rows
+        if position_id is not None
+        and pu_timestamp < close_ts_by_position.get(int(position_id), datetime.min.replace(tzinfo=UTC))
+    }
 
 
 def _recovered_positions(
@@ -921,27 +941,39 @@ def _recovered_positions(
             seen_pu.add(pid)
         elif row.event_type == "POSITION_CLOSED" and pid in seen_pu:
             recovered.add(pid)
-    closed_ids = {
-        pid
+    historical_close_rows = [
+        row
         for row in rows
-        if row.event_type == "POSITION_CLOSED" and (pid := _position_id(row)) is not None
-    }
-    if rows:
-        historical = _positions_with_historical_price_unavailable(
-            db,
-            position_ids=closed_ids - recovered,
-            before=min(row.timestamp for row in rows),
-        )
-        recovered.update(closed_ids & historical)
+        if row.event_type == "POSITION_CLOSED"
+        and (pid := _position_id(row)) is not None
+        and pid not in recovered
+    ]
+    recovered.update(_historical_price_unavailable_before_closes(db, historical_close_rows))
     return recovered
 
 
-def _suppressed_price_unavailable_positions(
+def _build_projection_context(
     db: Session,
     rows: list[PaperAuditEvent],
-) -> set[int]:
-    return _recovered_positions(db, rows)
+) -> ProjectionContext:
+    recovered = _recovered_positions(db, rows)
+    return ProjectionContext(
+        rows=rows,
+        recovered_positions=recovered,
+        suppressed_price_unavailable_positions=recovered,
+    )
 ```
+
+Update the top-level loader after `rows = _window_rows(db, window)`:
+
+```python
+projection = _build_projection_context(db, rows)
+critical_events = _load_critical_events_section(db, window, projection)
+audit_timeline = _load_audit_timeline_section(db, window, projection)
+```
+
+Leave Positions and Orders/Fills on `rows` at this point. Positions computes
+latest PU attempts once after it has the loaded position IDs.
 
 Replace `_load_critical_events_section(...)`:
 
@@ -949,13 +981,13 @@ Replace `_load_critical_events_section(...)`:
 def _load_critical_events_section(
     db: Session,
     window: OperationalWindow,
-    rows: list[PaperAuditEvent],
+    projection: ProjectionContext,
 ) -> SectionResult[list[OperationalEvent]]:
-    del window
-    recovered = _recovered_positions(db, rows)
-    suppressed_pu = _suppressed_price_unavailable_positions(db, rows)
+    del db, window
+    recovered = projection.recovered_positions
+    suppressed_pu = projection.suppressed_price_unavailable_positions
     events: list[OperationalEvent] = []
-    for row in rows:
+    for row in projection.rows:
         pid = _position_id(row)
         severity = _severity_for(row, recovered)
         if row.event_type == "PRICE_UNAVAILABLE" and pid in suppressed_pu:
@@ -983,19 +1015,23 @@ def _load_critical_events_section(
     return section_ok(events, "No operational events in current cycle")
 ```
 
+Critical Events collapses/suppresses `PRICE_UNAVAILABLE` when the position is
+recovered. Audit Timeline preserves the underlying non-routine rows for
+debugging context.
+
 Replace `_load_audit_timeline_section(...)`:
 
 ```python
 def _load_audit_timeline_section(
     db: Session,
     window: OperationalWindow,
-    rows: list[PaperAuditEvent],
+    projection: ProjectionContext,
 ) -> SectionResult[AuditTimeline]:
-    del window
-    recovered = _recovered_positions(db, rows)
+    del db, window
+    recovered = projection.recovered_positions
     timeline_rows: list[AuditTimelineRow] = []
     hidden_count = 0
-    for row in rows:
+    for row in projection.rows:
         if row.event_type == "TICK_COMPLETED":
             continue
         severity = _severity_for(row, recovered)
@@ -1234,6 +1270,8 @@ Expected: position and order lifecycle tests fail.
 Update imports:
 
 ```python
+from sqlalchemy import Integer, cast, desc, func, select
+
 from marketpulse.db.models import PaperAuditEvent, PaperCashLedger, PaperFill, PaperOrder, PaperPosition
 ```
 
@@ -1249,7 +1287,10 @@ def _latest_pu_attempts(
     attempts: dict[int, int] = {}
     if position_ids:
         position_id_expr = func.json_extract(PaperAuditEvent.context, "$.position_id")
-        attempt_expr = func.json_extract(PaperAuditEvent.context, "$.attempt_count")
+        attempt_expr = cast(
+            func.json_extract(PaperAuditEvent.context, "$.attempt_count"),
+            Integer,
+        )
         historical = db.execute(
             select(
                 position_id_expr.label("position_id"),
@@ -1798,9 +1839,10 @@ def _safe_section(title: str, loader):
 Update the top-level loader:
 
 ```python
+projection = _build_projection_context(db, rows)
 critical_events = _safe_section(
     "Unable to load Critical Events",
-    lambda: _load_critical_events_section(db, window, rows),
+    lambda: _load_critical_events_section(db, window, projection),
 )
 positions = _safe_section(
     "Unable to load Positions",
@@ -1812,7 +1854,7 @@ order_lifecycles = _safe_section(
 )
 audit_timeline = _safe_section(
     "Unable to load Audit Timeline",
-    lambda: _load_audit_timeline_section(db, window, rows),
+    lambda: _load_audit_timeline_section(db, window, projection),
 )
 ```
 
@@ -2165,6 +2207,6 @@ If no files changed, skip the commit.
 
 ## Self-Review Notes
 
-- Spec coverage: plan covers route, auth, read-only/no POST, COW, `>= started_at`, fresh DB Healthy, kill switch source, fail-soft degraded sections, empty states, positions overlay with historical `PRICE_UNAVAILABLE`, recovery collapse with historical `PRICE_UNAVAILABLE`, order lifecycle aggregation, audit triage feed, client-side drill-down tabs, routine client reveal, nav, styling, no charts, and no mutation controls.
+- Spec coverage: plan covers route, auth, read-only/no POST, COW, `>= started_at`, fresh DB Healthy, kill switch source, fail-soft degraded sections, empty states, positions overlay with historical `PRICE_UNAVAILABLE`, recovery collapse with close-timestamp historical `PRICE_UNAVAILABLE`, integer-cast attempt counts, shared projection context, order lifecycle aggregation, audit triage feed, client-side drill-down tabs, routine client reveal, nav, styling, no charts, and no mutation controls.
 - Placeholder scan: no deferred implementation placeholders remain in task steps; explicit deferrals are product scope from the spec.
 - Type consistency: DTO and helper names match across tasks: `PaperTradingDashboard`, `OperationalWindow`, `SectionResult`, `section_ok`, `section_error`, `HealthSummary`, `OperationalEvent`, `PositionRow`, `OrderLifecycleRow`, `AuditTimelineRow`, `AuditTimeline`, and `load_paper_trading_dashboard`.
