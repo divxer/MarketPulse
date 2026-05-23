@@ -46,6 +46,8 @@ Add the test file:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
@@ -69,7 +71,12 @@ def test_ops_common_counts_paper_tables(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'ops.db'}")
     Base.metadata.create_all(engine)
     with Session(engine) as session:
-        session.add(PaperCashLedger(delta=100, reason="INITIAL_DEPOSIT", balance_after=100))
+        session.add(PaperCashLedger(
+            timestamp=datetime(2026, 5, 23, tzinfo=UTC),
+            delta=100,
+            reason="INITIAL_DEPOSIT",
+            balance_after=100,
+        ))
         session.commit()
 
         counts = count_paper_tables(session)
@@ -283,6 +290,18 @@ from marketpulse.trading.price_provider import YFinancePriceProvider
 from marketpulse.trading.query_models import load_paper_trading_dashboard
 
 
+def _status_value(status: object) -> str:
+    value = getattr(status, "value", status)
+    return str(value)
+
+
+def _generated_at_label(dashboard) -> str:
+    label = getattr(dashboard, "generated_at_label", None)
+    if label is not None:
+        return str(label)
+    return f"Generated at {dashboard.generated_at.astimezone(NY):%H:%M NY}"
+
+
 def _latest_completed_ny_trading_day(now: datetime | None = None):
     now_utc = now or datetime.now(UTC)
     ny_now = now_utc.astimezone(NY)
@@ -335,7 +354,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"FAILED: {type(exc).__name__}: {exc}")
         return 2
 
-    effective_status = dashboard.system_status
+    effective_status = _status_value(dashboard.system_status)
     if price_status == "Attention" and effective_status == "Healthy":
         effective_status = "Attention"
 
@@ -347,7 +366,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(f"System Status: {effective_status}")
         print(dashboard.current_operational_window.label)
-        print(dashboard.generated_at_label)
+        print(_generated_at_label(dashboard))
         print(f"Latest Tick: {dashboard.health.latest_tick_status or 'none'}")
         print(f"Cash Balance: {dashboard.health.cash_balance}")
         print(f"Open Positions: {dashboard.health.open_positions_count}")
@@ -428,7 +447,7 @@ def test_route_smoke_success_with_mock_transport(monkeypatch, capsys):
                 ),
             )
         if request.method == "POST" and request.url.path == "/login":
-            return httpx.Response(303, headers={"set-cookie": "session=abc; Path=/"})
+            return httpx.Response(303, headers={"Set-Cookie": "session=abc; Path=/"})
         if request.method == "POST" and request.url.path == "/lab/paper-trading":
             return httpx.Response(405)
         return httpx.Response(404)
@@ -521,7 +540,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with _client(args.timeout_seconds) as client:
             unauth = client.get(f"{base_url}/lab/paper-trading")
-            if unauth.status_code != 303 or "/login" not in unauth.headers.get("location", ""):
+            if unauth.status_code not in {302, 303} or "/login" not in unauth.headers.get("location", ""):
                 return _fail("unauthenticated /lab/paper-trading did not redirect to /login")
 
             post_route = client.post(f"{base_url}/lab/paper-trading")
@@ -767,9 +786,13 @@ def test_phase6h_scripts_do_not_use_sqlalchemy_mutation_apis():
         ".add(",
         ".merge(",
         ".delete(",
+        ".execute(",
         "insert(",
         "update(",
         "delete(",
+        "INSERT ",
+        "UPDATE ",
+        "DELETE ",
     )
     offenders: list[str] = []
     for path in PHASE6H_SCRIPTS:
@@ -813,6 +836,7 @@ def test_notification_smoke_default_does_not_mutate_paper_tables(tmp_path, monke
     db_path = tmp_path / "notify_nomutate.db"
     engine = create_engine(f"sqlite:///{db_path}")
     Base.metadata.create_all(engine)
+    monkeypatch.setenv("MARKETPULSE_DB_URL", f"sqlite:///{db_path}")
     with Session(engine) as session:
         before = count_paper_tables(session)
 
@@ -991,6 +1015,7 @@ This checklist is required before enabling unattended daily paper ticks after a 
 
 - [ ] App container/process is running.
 - [ ] Database migrations are current: `uv run alembic heads`.
+- [ ] Deployed database revision is current: `uv run alembic current`.
 - [ ] `/lab/paper-trading` route smoke passes:
   ```bash
   MARKETPULSE_SMOKE_PASSWORD=dev uv run python scripts/smoke_paper_trading_ops.py --base-url http://127.0.0.1:8000
@@ -1007,6 +1032,8 @@ This checklist is required before enabling unattended daily paper ticks after a 
   ```bash
   uv run python scripts/check_paper_trading_health.py sqlite:///./data/marketpulse.db
   ```
+- [ ] If price smoke reports Attention, classify it as external data/provider
+      availability first, not an automatic deployment rollback.
 - [ ] No unexpected `Degraded` state.
 - [ ] No unexpected control-plane buttons are visible in `/lab/paper-trading`.
 
