@@ -185,3 +185,12 @@ def test_paper_trading_uses_compact_ops_console_layout(client, monkeypatch):
         "Orders &amp; Fills",
     )
     assert response.text.index("Positions") < response.text.index("Audit Timeline")
+
+
+def test_paper_trading_css_reserves_stable_tab_width():
+    css = "marketpulse/web/static/css/app.css"
+    text = __import__("pathlib").Path(css).read_text()
+
+    assert "scrollbar-gutter: stable;" in text
+    assert ".mp-paper-tab-panel" in text
+    assert "min-width: 0;" in text
