@@ -108,3 +108,51 @@ def test_health_cli_db_failure_returns_2(capsys):
     out = capsys.readouterr().out
     assert code == 2
     assert "FAILED:" in out
+
+
+def test_route_smoke_requires_password(capsys):
+    from scripts.smoke_paper_trading_ops import main
+
+    code = main(["--base-url", "http://example.test"])
+
+    out = capsys.readouterr().out
+    assert code == 2
+    assert "password" in out.lower()
+
+
+def test_route_smoke_success_with_mock_transport(monkeypatch, capsys):
+    import httpx
+    from scripts import smoke_paper_trading_ops as smoke
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/lab/paper-trading":
+            if "session=" not in request.headers.get("cookie", ""):
+                return httpx.Response(303, headers={"location": "/login"})
+            return httpx.Response(
+                200,
+                text=(
+                    "Paper Trading · Operations System Status Generated at "
+                    "Critical Events Positions Orders & Fills Audit Timeline"
+                ),
+            )
+        if request.method == "POST" and request.url.path == "/login":
+            return httpx.Response(303, headers={"Set-Cookie": "session=abc; Path=/"})
+        if request.method == "POST" and request.url.path == "/lab/paper-trading":
+            return httpx.Response(405)
+        return httpx.Response(404)
+
+    monkeypatch.setattr(
+        smoke,
+        "_client",
+        lambda timeout: httpx.Client(
+            transport=httpx.MockTransport(handler),
+            follow_redirects=False,
+            timeout=timeout,
+        ),
+    )
+
+    code = smoke.main(["--base-url", "http://example.test", "--password", "dev"])
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "OK: /lab/paper-trading smoke passed" in out
