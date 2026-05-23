@@ -50,6 +50,9 @@ The page lives at `/lab/paper-trading`. It is a Lab/diagnostic page, not a
 top-level production trading page. The navigation label is `纸上交易`; the page
 H1 is `Paper Trading · Operations`.
 
+Access follows the existing admin/lab route authorization policy. 6f adds no
+new role model.
+
 6f MVP is desktop-first. Mobile optimization is deferred.
 
 Primary operational signals must fit within a single desktop viewport whenever
@@ -163,6 +166,8 @@ Boundary locks:
 - 6f may reuse 6g operational taxonomy/projection rules.
 - 6f does not reuse notification DTOs/templates as UI models.
 - 6f does not write to paper tables.
+- Query-model loaders batch-load `paper_order`, `paper_position`,
+  `paper_fill`, and `paper_audit_event`. No per-row DB query loops.
 - Query-model/data-fetch failures become section-level degraded states.
 - Template/render exceptions are not swallowed.
 
@@ -189,6 +194,9 @@ COW boundary events define the inspection window. Their event type may still
 contribute to `SystemStatus` independently. Example:
 `TICK_REPROCESSED_COMPLETED` can start the COW and still make the dashboard
 `Attention`.
+
+COW queries use `timestamp >= started_at`, not `timestamp > started_at`, so
+the boundary event remains inside the current inspection window.
 
 ### Critical Events Panel
 
@@ -264,6 +272,19 @@ Rules:
 
 Overlay never writes back to `paper_position` and never changes execution
 semantics.
+
+### Kill Switch State
+
+Health Summary displays kill switch state as operational state only.
+
+Source priority:
+
+- repository/helper-exposed environment override, if available
+- latest `KILL_SWITCH_FLIPPED` audit event
+- `unknown` when no reliable source is available
+
+If an environment override forces the kill switch on, the UI displays
+`Kill switch: ON (env override)`.
 
 ## 5 — Tabs and Rows
 
@@ -375,6 +396,7 @@ Routine hidden by default:
 - additive, not a mode switch
 - critical/warning events always remain visible
 - display `N routine events hidden`
+- client-side reveal of already-loaded routine rows, not a second server query
 
 Deferred:
 
@@ -400,6 +422,8 @@ or data-fetch failures are converted into degraded UI states.
 ### Empty Semantics
 
 Empty operational state is explicit and healthy.
+
+Fresh DB with no tick yet is `Healthy`, unless a query failure occurs.
 
 Empty rendering comes from query-model semantics, not frontend truthiness
 checks.
