@@ -49,9 +49,21 @@ def _find_session_mutation_calls(tree: ast.AST) -> list[tuple[int, str]]:
             continue
         func = node.func
         # Match attribute calls like session.add(...) / self._session.add(...)
-        if isinstance(func, ast.Attribute) and func.attr in FORBIDDEN_CALLS:
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr in FORBIDDEN_CALLS
+            and _is_session_receiver(func.value)
+        ):
             hits.append((node.lineno, f".{func.attr}(...)"))
     return hits
+
+
+def _is_session_receiver(node: ast.AST) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id in {"session", "db"}
+    if isinstance(node, ast.Attribute):
+        return node.attr in {"_session", "session"}
+    return False
 
 
 def _find_insert_update_execute(tree: ast.AST) -> list[tuple[int, str]]:
@@ -98,4 +110,21 @@ def test_repository_is_single_writer():
         "Single-writer architecture violated (lock iii). Mutations of "
         "paper_* state must go through marketpulse/trading/repository.py. "
         "Violations:\n  " + "\n  ".join(sorted(violations))
+    )
+
+
+def test_paper_query_models_are_read_only():
+    path = TRADING_ROOT / "query_models.py"
+    tree = ast.parse(path.read_text())
+    violations = [
+        f"{path}:{lineno} {call}"
+        for lineno, call in [
+            *_find_session_mutation_calls(tree),
+            *_find_insert_update_execute(tree),
+        ]
+    ]
+
+    assert not violations, (
+        "Phase 6f query_models.py is read-side only and must not mutate "
+        "paper_* state. Violations:\n  " + "\n  ".join(violations)
     )
