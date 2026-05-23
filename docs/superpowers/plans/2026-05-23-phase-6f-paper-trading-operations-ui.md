@@ -26,6 +26,14 @@ Implementation locks to preserve:
 - Routine audit rows are already loaded and revealed client-side; no second server query.
 - Batch-load paper tables; no per-row query loops.
 - No new trading state, no mutation endpoint, no replay/force-close/retry/kill-switch controls.
+- `marketpulse.trading.calendar` publicly exposes `NY`; use that canonical
+  timezone instead of defining another `ZoneInfo`.
+- `TICK_COMPLETED` may be the COW boundary, but routine completed-tick rows do
+  not count toward `routine_hidden_count`.
+- Recovery and stuck overlays consider historical `PRICE_UNAVAILABLE` rows for
+  the affected positions, not only rows inside the current COW.
+- `load_paper_trading_dashboard(db, *, now=None)` accepts an optional clock
+  value for deterministic tests.
 
 ## File Structure
 
@@ -44,7 +52,8 @@ Implementation locks to preserve:
 
 - Create `marketpulse/web/templates/lab_paper_trading.html`
   - Compact Ops Console layout.
-  - Health summary, critical events, positions, secondary tabs for orders/fills and audit timeline.
+  - Health summary, critical events, positions, secondary client-side tabs for
+    orders/fills and audit timeline.
   - Section-level degraded cards and explicit empty states.
   - Client-side routine reveal only.
 
@@ -151,7 +160,7 @@ paper tables and never changes execution semantics.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Generic, Literal, TypeVar
 
@@ -295,9 +304,13 @@ class PaperTradingDashboard:
     audit_timeline: SectionResult[AuditTimeline]
 
 
-def load_paper_trading_dashboard(db: Session) -> PaperTradingDashboard:
+def load_paper_trading_dashboard(
+    db: Session,
+    *,
+    now: datetime | None = None,
+) -> PaperTradingDashboard:
     del db
-    generated_at = datetime.now(UTC)
+    generated_at = now or datetime.now(UTC)
     generated_at_label = f"Generated at {generated_at.astimezone(NY):%H:%M NY}"
     window = OperationalWindow(
         started_at=None,
@@ -468,13 +481,25 @@ def test_env_kill_switch_override_is_reported(monkeypatch, db_session):
     get_settings.cache_clear()
 
 
+def test_generated_at_label_uses_injected_now_and_ny_timezone(db_session):
+    from marketpulse.trading.query_models import load_paper_trading_dashboard
+
+    dashboard = load_paper_trading_dashboard(
+        db_session,
+        now=datetime(2026, 5, 23, 21, 34, tzinfo=UTC),
+    )
+
+    assert dashboard.generated_at == datetime(2026, 5, 23, 21, 34, tzinfo=UTC)
+    assert dashboard.generated_at_label == "Generated at 17:34 NY"
+
+
 def test_section_error_has_degraded_priority(db_session, monkeypatch):
     import marketpulse.trading.query_models as qm
 
     monkeypatch.setattr(
         qm,
         "_load_positions_section",
-        lambda db, window, today: qm.section_error("Unable to load Positions", "positions query failed"),
+        lambda db, window, today, rows: qm.section_error("Unable to load Positions", "positions query failed"),
     )
 
     dashboard = qm.load_paper_trading_dashboard(db_session)
@@ -499,7 +524,7 @@ Expected: failures for COW loader, kill switch source, status computation, and m
 Modify `marketpulse/trading/query_models.py`:
 
 ```python
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import desc, func, select
 
@@ -641,15 +666,15 @@ def _compute_system_status(
 Replace `load_paper_trading_dashboard(...)` body so it calls:
 
 ```python
-generated_at = datetime.now(UTC)
+generated_at = now or datetime.now(UTC)
 generated_at_label = f"Generated at {generated_at.astimezone(NY):%H:%M NY}"
 window = _load_operational_window(db)
 rows = _window_rows(db, window)
 health = _load_health_summary(db, generated_at=generated_at, rows=rows)
 today = generated_at.astimezone(NY).date()
 critical_events = _load_critical_events_section(db, window, rows)
-positions = _load_positions_section(db, window, today)
-order_lifecycles = _load_order_lifecycles_section(db, window)
+positions = _load_positions_section(db, window, today, rows)
+order_lifecycles = _load_order_lifecycles_section(db, window, rows)
 audit_timeline = _load_audit_timeline_section(db, window, rows)
 system_status = _compute_system_status(
     health=health,
@@ -671,13 +696,13 @@ def _load_critical_events_section(db: Session, window: OperationalWindow, rows: 
     return section_ok([], "No operational events in current cycle")
 
 
-def _load_positions_section(db: Session, window: OperationalWindow, today: object) -> SectionResult[list[PositionRow]]:
-    del db, window, today
+def _load_positions_section(db: Session, window: OperationalWindow, today: object, rows: list[PaperAuditEvent]) -> SectionResult[list[PositionRow]]:
+    del db, window, today, rows
     return section_ok([], "No open paper positions")
 
 
-def _load_order_lifecycles_section(db: Session, window: OperationalWindow) -> SectionResult[list[OrderLifecycleRow]]:
-    del db, window
+def _load_order_lifecycles_section(db: Session, window: OperationalWindow, rows: list[PaperAuditEvent]) -> SectionResult[list[OrderLifecycleRow]]:
+    del db, window, rows
     return section_ok([], "No order lifecycle activity in current cycle")
 
 
@@ -757,6 +782,22 @@ def test_position_closed_recovery_collapses_prior_price_unavailable(db_session):
     assert dashboard.critical_events.data[0].audit_id == recovered.id
 
 
+def test_position_closed_recovery_uses_historical_price_unavailable(db_session):
+    from marketpulse.trading.query_models import load_paper_trading_dashboard
+
+    _audit(db_session, event_type="PRICE_UNAVAILABLE", ts=datetime(2026, 5, 22, 21, 31, tzinfo=UTC), reason="no_price", context={"position_id": 7, "ticker": "AAPL", "attempt_count": 3})
+    start = datetime(2026, 5, 23, 21, 30, tzinfo=UTC)
+    _audit(db_session, event_type="TICK_COMPLETED", ts=start, context={"tick_date": "2026-05-23", "status": "completed"})
+    recovered = _audit(db_session, event_type="POSITION_CLOSED", ts=datetime(2026, 5, 23, 21, 32, tzinfo=UTC), reason="closed", context={"position_id": 7, "ticker": "AAPL"})
+    db_session.commit()
+
+    dashboard = load_paper_trading_dashboard(db_session)
+
+    assert [event.event_type for event in dashboard.critical_events.data] == ["POSITION_CLOSED"]
+    assert dashboard.critical_events.data[0].severity == "recovery"
+    assert dashboard.critical_events.data[0].audit_id == recovered.id
+
+
 def test_audit_timeline_hides_routine_rows_but_loads_them_for_client_reveal(db_session):
     from marketpulse.trading.query_models import load_paper_trading_dashboard
 
@@ -769,8 +810,8 @@ def test_audit_timeline_hides_routine_rows_but_loads_them_for_client_reveal(db_s
     dashboard = load_paper_trading_dashboard(db_session)
     timeline = dashboard.audit_timeline.data
 
-    assert timeline.routine_hidden_count == 2
-    assert {row.audit_id for row in timeline.rows} == {placed.id, rejected.id, next(row.audit_id for row in timeline.rows if row.event_type == "TICK_COMPLETED")}
+    assert timeline.routine_hidden_count == 1
+    assert {row.audit_id for row in timeline.rows} == {placed.id, rejected.id}
     assert [row.routine for row in timeline.rows if row.audit_id == placed.id] == [True]
     assert [row.routine for row in timeline.rows if row.audit_id == rejected.id] == [False]
 ```
@@ -847,7 +888,29 @@ def _severity_for(row: PaperAuditEvent, recovered_positions: set[int]) -> Litera
     return "routine"
 
 
-def _recovered_positions(rows: list[PaperAuditEvent]) -> set[int]:
+def _positions_with_historical_price_unavailable(
+    db: Session,
+    *,
+    position_ids: set[int],
+    before: datetime,
+) -> set[int]:
+    if not position_ids:
+        return set()
+    position_id_expr = func.json_extract(PaperAuditEvent.context, "$.position_id")
+    rows = db.execute(
+        select(position_id_expr)
+        .where(PaperAuditEvent.event_type == "PRICE_UNAVAILABLE")
+        .where(PaperAuditEvent.timestamp < before)
+        .where(position_id_expr.in_(sorted(position_ids)))
+        .distinct()
+    ).all()
+    return {int(row[0]) for row in rows if row[0] is not None}
+
+
+def _recovered_positions(
+    db: Session,
+    rows: list[PaperAuditEvent],
+) -> set[int]:
     seen_pu: set[int] = set()
     recovered: set[int] = set()
     for row in rows:
@@ -858,11 +921,26 @@ def _recovered_positions(rows: list[PaperAuditEvent]) -> set[int]:
             seen_pu.add(pid)
         elif row.event_type == "POSITION_CLOSED" and pid in seen_pu:
             recovered.add(pid)
+    closed_ids = {
+        pid
+        for row in rows
+        if row.event_type == "POSITION_CLOSED" and (pid := _position_id(row)) is not None
+    }
+    if rows:
+        historical = _positions_with_historical_price_unavailable(
+            db,
+            position_ids=closed_ids - recovered,
+            before=min(row.timestamp for row in rows),
+        )
+        recovered.update(closed_ids & historical)
     return recovered
 
 
-def _suppressed_price_unavailable_positions(rows: list[PaperAuditEvent]) -> set[int]:
-    return _recovered_positions(rows)
+def _suppressed_price_unavailable_positions(
+    db: Session,
+    rows: list[PaperAuditEvent],
+) -> set[int]:
+    return _recovered_positions(db, rows)
 ```
 
 Replace `_load_critical_events_section(...)`:
@@ -873,9 +951,9 @@ def _load_critical_events_section(
     window: OperationalWindow,
     rows: list[PaperAuditEvent],
 ) -> SectionResult[list[OperationalEvent]]:
-    del db, window
-    recovered = _recovered_positions(rows)
-    suppressed_pu = _suppressed_price_unavailable_positions(rows)
+    del window
+    recovered = _recovered_positions(db, rows)
+    suppressed_pu = _suppressed_price_unavailable_positions(db, rows)
     events: list[OperationalEvent] = []
     for row in rows:
         pid = _position_id(row)
@@ -913,11 +991,13 @@ def _load_audit_timeline_section(
     window: OperationalWindow,
     rows: list[PaperAuditEvent],
 ) -> SectionResult[AuditTimeline]:
-    del db, window
-    recovered = _recovered_positions(rows)
+    del window
+    recovered = _recovered_positions(db, rows)
     timeline_rows: list[AuditTimelineRow] = []
     hidden_count = 0
     for row in rows:
+        if row.event_type == "TICK_COMPLETED":
+            continue
         severity = _severity_for(row, recovered)
         routine = severity == "routine"
         if routine:
@@ -1097,6 +1177,24 @@ def test_positions_overlay_stuck_three_plus(db_session):
     assert dashboard.positions.data[0].exit_health_label == "Stuck 3+"
 
 
+def test_positions_overlay_uses_historical_price_unavailable_attempts(db_session):
+    from marketpulse.trading.query_models import load_paper_trading_dashboard
+
+    order = _paper_order(db_session)
+    position = _position(db_session, order, horizon_date=date(2026, 5, 23))
+    _audit(db_session, event_type="PRICE_UNAVAILABLE", ts=datetime(2026, 5, 22, 21, 31, tzinfo=UTC), context={"position_id": position.id, "attempt_count": 3, "ticker": "AAPL"})
+    _audit(db_session, event_type="TICK_COMPLETED", ts=datetime(2026, 5, 23, 21, 30, tzinfo=UTC), context={"tick_date": "2026-05-23", "status": "completed"})
+    db_session.commit()
+
+    dashboard = load_paper_trading_dashboard(
+        db_session,
+        now=datetime(2026, 5, 23, 22, 0, tzinfo=UTC),
+    )
+
+    assert dashboard.positions.data[0].operational_exit_status == "STUCK_3_PLUS"
+    assert dashboard.positions.data[0].exit_health_label == "Stuck 3+"
+
+
 def test_order_lifecycle_joins_entry_exit_fills_and_latest_cow_audit(db_session):
     from decimal import Decimal
     from marketpulse.trading.query_models import load_paper_trading_dashboard
@@ -1142,8 +1240,32 @@ from marketpulse.db.models import PaperAuditEvent, PaperCashLedger, PaperFill, P
 Add helpers:
 
 ```python
-def _latest_pu_attempts(rows: list[PaperAuditEvent]) -> dict[int, int]:
+def _latest_pu_attempts(
+    db: Session,
+    *,
+    position_ids: set[int],
+    rows: list[PaperAuditEvent],
+) -> dict[int, int]:
     attempts: dict[int, int] = {}
+    if position_ids:
+        position_id_expr = func.json_extract(PaperAuditEvent.context, "$.position_id")
+        attempt_expr = func.json_extract(PaperAuditEvent.context, "$.attempt_count")
+        historical = db.execute(
+            select(
+                position_id_expr.label("position_id"),
+                func.max(attempt_expr).label("max_attempt"),
+            )
+            .where(PaperAuditEvent.event_type == "PRICE_UNAVAILABLE")
+            .where(position_id_expr.in_(sorted(position_ids)))
+            .group_by(position_id_expr)
+        ).all()
+        attempts.update(
+            {
+                int(row.position_id): int(row.max_attempt)
+                for row in historical
+                if row.position_id is not None and row.max_attempt is not None
+            }
+        )
     for row in rows:
         if row.event_type != "PRICE_UNAVAILABLE":
             continue
@@ -1176,10 +1298,9 @@ def _load_positions_section(
     db: Session,
     window: OperationalWindow,
     today: object,
+    rows: list[PaperAuditEvent],
 ) -> SectionResult[list[PositionRow]]:
-    rows = _window_rows(db, window)
-    attempts = _latest_pu_attempts(rows)
-    recovered = _recovered_positions(rows)
+    recovered = _recovered_positions(db, rows)
     recovered_ids = sorted(recovered)
     query = select(PaperPosition).where(PaperPosition.status == "OPEN")
     open_positions = list(db.execute(query.order_by(PaperPosition.id)).scalars().all())
@@ -1193,6 +1314,11 @@ def _load_positions_section(
                 .order_by(PaperPosition.id)
             ).scalars().all()
         )
+    all_position_ids = {
+        position.id
+        for position in [*open_positions, *recovered_positions]
+    }
+    attempts = _latest_pu_attempts(db, position_ids=all_position_ids, rows=rows)
     seen: set[int] = set()
     out: list[PositionRow] = []
     for position in [*open_positions, *recovered_positions]:
@@ -1225,8 +1351,9 @@ Replace `_load_order_lifecycles_section(...)`:
 def _load_order_lifecycles_section(
     db: Session,
     window: OperationalWindow,
+    rows: list[PaperAuditEvent],
 ) -> SectionResult[list[OrderLifecycleRow]]:
-    rows = _window_rows(db, window)
+    del window
     order_ids = sorted({row.order_id for row in rows if row.order_id is not None})
     if not order_ids:
         return section_ok([], "No order lifecycle activity in current cycle")
@@ -1504,7 +1631,12 @@ Create `marketpulse/web/templates/lab_paper_trading.html`:
   </section>
 
   <section class="mp-paper-drilldown">
-    <article class="mp-card">
+    <div class="mp-paper-tabs" role="tablist" aria-label="Paper trading drill-down">
+      <button type="button" class="mp-paper-tab is-active" data-paper-tab="orders">Orders &amp; Fills</button>
+      <button type="button" class="mp-paper-tab" data-paper-tab="audit">Audit Timeline</button>
+    </div>
+
+    <article class="mp-card mp-paper-tab-panel" data-paper-panel="orders">
       <div class="mp-card__head"><div class="mp-card__title">Orders &amp; Fills</div></div>
       <div class="mp-card__body">
         {% if dashboard.order_lifecycles.status == "error" %}
@@ -1526,7 +1658,7 @@ Create `marketpulse/web/templates/lab_paper_trading.html`:
       </div>
     </article>
 
-    <article class="mp-card">
+    <article class="mp-card mp-paper-tab-panel is-hidden" data-paper-panel="audit">
       <div class="mp-card__head"><div class="mp-card__title">Audit Timeline</div></div>
       <div class="mp-card__body">
         {% if dashboard.audit_timeline.status == "error" %}
@@ -1549,6 +1681,15 @@ Create `marketpulse/web/templates/lab_paper_trading.html`:
 </section>
 
 <script>
+document.querySelectorAll("[data-paper-tab]").forEach((tab) => {
+  tab.addEventListener("click", () => {
+    const target = tab.getAttribute("data-paper-tab");
+    document.querySelectorAll("[data-paper-tab]").forEach((item) => item.classList.toggle("is-active", item === tab));
+    document.querySelectorAll("[data-paper-panel]").forEach((panel) => {
+      panel.classList.toggle("is-hidden", panel.getAttribute("data-paper-panel") !== target);
+    });
+  });
+});
 document.querySelectorAll("[data-routine-toggle]").forEach((toggle) => {
   toggle.addEventListener("click", () => {
     document.querySelectorAll(".mp-paper-routine-row").forEach((row) => row.classList.toggle("is-hidden"));
@@ -1594,7 +1735,7 @@ Append to `tests/trading/test_query_models.py`:
 def test_positions_loader_failure_degrades_only_positions(db_session, monkeypatch):
     import marketpulse.trading.query_models as qm
 
-    def fail_positions(db, window, today):
+    def fail_positions(db, window, today, rows):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(qm, "_load_positions_section", fail_positions)
@@ -1620,7 +1761,7 @@ def test_paper_trading_renders_degraded_positions_section(client, monkeypatch):
 
     import marketpulse.trading.query_models as qm
 
-    def fail_positions(db, window, today):
+    def fail_positions(db, window, today, rows):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(qm, "_load_positions_section", fail_positions)
@@ -1663,11 +1804,11 @@ critical_events = _safe_section(
 )
 positions = _safe_section(
     "Unable to load Positions",
-    lambda: _load_positions_section(db, window, today),
+    lambda: _load_positions_section(db, window, today, rows),
 )
 order_lifecycles = _safe_section(
     "Unable to load Orders & Fills",
-    lambda: _load_order_lifecycles_section(db, window),
+    lambda: _load_order_lifecycles_section(db, window, rows),
 )
 audit_timeline = _safe_section(
     "Unable to load Audit Timeline",
@@ -1786,7 +1927,29 @@ Append near the existing lab/backtest styles in `marketpulse/web/static/css/app.
 .mp-paper-drilldown {
   display: grid;
   grid-template-columns: 1fr;
-  gap: 16px;
+  gap: 10px;
+}
+.mp-paper-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.mp-paper-tab {
+  border: 1px solid var(--ns-outline-variant);
+  background: white;
+  color: var(--ns-on-surface-variant);
+  border-radius: 4px;
+  padding: 8px 12px;
+  font: 700 12px/1 var(--ns-font-headline);
+  cursor: pointer;
+}
+.mp-paper-tab.is-active {
+  background: var(--ns-navy);
+  color: white;
+  border-color: var(--ns-navy);
+}
+.mp-paper-tab-panel.is-hidden {
+  display: none;
 }
 .mp-paper-table-wrap {
   overflow-x: auto;
@@ -2002,6 +2165,6 @@ If no files changed, skip the commit.
 
 ## Self-Review Notes
 
-- Spec coverage: plan covers route, auth, read-only/no POST, COW, `>= started_at`, fresh DB Healthy, kill switch source, fail-soft degraded sections, empty states, positions overlay, order lifecycle aggregation, audit triage feed, routine client reveal, nav, styling, no charts, and no mutation controls.
+- Spec coverage: plan covers route, auth, read-only/no POST, COW, `>= started_at`, fresh DB Healthy, kill switch source, fail-soft degraded sections, empty states, positions overlay with historical `PRICE_UNAVAILABLE`, recovery collapse with historical `PRICE_UNAVAILABLE`, order lifecycle aggregation, audit triage feed, client-side drill-down tabs, routine client reveal, nav, styling, no charts, and no mutation controls.
 - Placeholder scan: no deferred implementation placeholders remain in task steps; explicit deferrals are product scope from the spec.
 - Type consistency: DTO and helper names match across tasks: `PaperTradingDashboard`, `OperationalWindow`, `SectionResult`, `section_ok`, `section_error`, `HealthSummary`, `OperationalEvent`, `PositionRow`, `OrderLifecycleRow`, `AuditTimelineRow`, `AuditTimeline`, and `load_paper_trading_dashboard`.
