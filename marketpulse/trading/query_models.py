@@ -23,6 +23,7 @@ from marketpulse.db.models import (
     PaperPosition,
 )
 from marketpulse.trading.calendar import NY
+from marketpulse.trading.clock import WallClock
 
 SystemStatus = Literal["Healthy", "Attention", "Degraded"]
 SectionStatus = Literal["ok", "error"]
@@ -692,7 +693,7 @@ def load_paper_trading_dashboard(
     *,
     now: datetime | None = None,
 ) -> PaperTradingDashboard:
-    generated_at = now or datetime.now(UTC)
+    generated_at = now or WallClock().now()
     generated_at_label = f"Generated at {generated_at.astimezone(NY):%H:%M NY}"
     window = _load_operational_window(db)
     rows = _window_rows(db, window)
