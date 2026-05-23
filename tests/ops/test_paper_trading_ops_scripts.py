@@ -156,3 +156,61 @@ def test_route_smoke_success_with_mock_transport(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert code == 0
     assert "OK: /lab/paper-trading smoke passed" in out
+
+
+def test_notification_smoke_default_does_not_send(monkeypatch, capsys):
+    from scripts import smoke_notifications
+
+    sent = []
+
+    class CapturingNotifier:
+        def send(self, title, body, url=None):
+            sent.append((title, body, url))
+            return True
+
+    monkeypatch.setattr(
+        smoke_notifications,
+        "get_notifier_from_settings",
+        lambda settings: CapturingNotifier(),
+    )
+
+    code = smoke_notifications.main([])
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "config OK" in out
+    assert sent == []
+
+
+def test_notification_smoke_send_requires_confirm(capsys):
+    from scripts.smoke_notifications import main
+
+    code = main(["--send"])
+
+    out = capsys.readouterr().out
+    assert code == 2
+    assert "--confirm-send" in out
+
+
+def test_notification_smoke_send_uses_fixed_smoke_title(monkeypatch):
+    from scripts import smoke_notifications
+
+    sent = []
+
+    class CapturingNotifier:
+        def send(self, title, body, url=None):
+            sent.append((title, body, url))
+            return True
+
+    monkeypatch.setattr(
+        smoke_notifications,
+        "get_notifier_from_settings",
+        lambda settings: CapturingNotifier(),
+    )
+
+    code = smoke_notifications.main(["--send", "--confirm-send"])
+
+    assert code == 0
+    assert sent
+    assert sent[0][0].startswith("SMOKE TEST — Paper Trading Notifications")
+    assert "SMOKE TEST" in sent[0][1]
