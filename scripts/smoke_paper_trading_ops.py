@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import html
 import os
 import sys
 from pathlib import Path
@@ -80,11 +81,12 @@ def main(argv: list[str] | None = None) -> int:
                     f"authenticated /lab/paper-trading returned {page.status_code}",
                 )
 
-            missing = [marker for marker in REQUIRED_MARKERS if marker not in page.text]
+            page_text = html.unescape(page.text)
+            missing = [marker for marker in REQUIRED_MARKERS if marker not in page_text]
             if missing:
                 return _fail(f"missing marker(s): {', '.join(missing)}")
 
-            forbidden = [marker for marker in FORBIDDEN_MARKERS if marker in page.text]
+            forbidden = [marker for marker in FORBIDDEN_MARKERS if marker in page_text]
             if forbidden:
                 return _fail(f"control-plane marker(s) present: {', '.join(forbidden)}")
     except Exception as exc:
