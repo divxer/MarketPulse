@@ -67,3 +67,16 @@ def test_paper_trading_renders_degraded_positions_section(client, monkeypatch):
     assert "Degraded" in response.text
     assert "Unable to load Positions" in response.text
     assert "Traceback" not in response.text
+
+
+def test_paper_trading_uses_compact_ops_console_layout(client, monkeypatch):
+    _login(client, monkeypatch)
+    response = client.get("/lab/paper-trading")
+
+    assert "mp-paper-ops" in response.text
+    assert "mp-paper-kpis" in response.text
+    assert "mp-paper-primary-row" in response.text
+    assert response.text.index("Critical Events") < response.text.index(
+        "Orders &amp; Fills",
+    )
+    assert response.text.index("Positions") < response.text.index("Audit Timeline")
