@@ -49,6 +49,12 @@ class Settings(BaseSettings):
     paper_tick_minute: int = Field(30, alias="MP_PAPER_TICK_MINUTE")
     paper_initial_deposit: str = Field("10000", alias="MP_PAPER_INITIAL_DEPOSIT")
     paper_kill_switch: bool = Field(False, alias="MP_PAPER_KILL_SWITCH")
+    # Phase 6g: master enable for paper-trading post-tick notifications.
+    # Independent of NOTIFIER_RECAP_ENABLED (Phase 2). Lock 6g-L15.
+    paper_notifications_enabled: bool = Field(
+        True,
+        alias="MP_PAPER_NOTIFICATIONS_ENABLED",
+    )
 
 
 @lru_cache(maxsize=1)
