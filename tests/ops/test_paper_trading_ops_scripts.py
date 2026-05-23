@@ -13,7 +13,7 @@ def test_ops_common_resolves_db_url_from_arg_or_env(monkeypatch):
 
     monkeypatch.delenv("MARKETPULSE_DB_URL", raising=False)
     assert resolve_db_url("sqlite:///explicit.db") == "sqlite:///explicit.db"
-    assert resolve_db_url(None) == "sqlite:///./data/marketpulse.db"
+    assert resolve_db_url(None) == "sqlite:///./marketpulse.db"
 
     monkeypatch.setenv("MARKETPULSE_DB_URL", "sqlite:///env.db")
     assert resolve_db_url(None) == "sqlite:///env.db"

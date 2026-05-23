@@ -24,7 +24,7 @@ Run:
 
 ```bash
 MARKETPULSE_SMOKE_PASSWORD=dev uv run python scripts/smoke_paper_trading_ops.py --base-url http://127.0.0.1:8000
-uv run python scripts/check_paper_trading_health.py sqlite:///./data/marketpulse.db --skip-price-smoke
+uv run python scripts/check_paper_trading_health.py sqlite:///./marketpulse.db --skip-price-smoke
 uv run python scripts/smoke_notifications.py
 ```
 
@@ -86,7 +86,7 @@ The smoke title must begin with `SMOKE TEST — Paper Trading Notifications`.
 Run health with price smoke enabled:
 
 ```bash
-uv run python scripts/check_paper_trading_health.py sqlite:///./data/marketpulse.db
+uv run python scripts/check_paper_trading_health.py sqlite:///./marketpulse.db
 ```
 
 The price smoke checks the most recent completed NY trading day close for SPY by default. A failure is Attention, not automatic proof of engine corruption.

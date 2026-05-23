@@ -26,7 +26,7 @@ from marketpulse.db.models import (  # noqa: E402
     PaperPosition,
 )
 
-DEFAULT_DB_URL = "sqlite:///./data/marketpulse.db"
+DEFAULT_DB_URL = "sqlite:///./marketpulse.db"
 PAPER_TABLE_MODELS = {
     "paper_order": PaperOrder,
     "paper_fill": PaperFill,

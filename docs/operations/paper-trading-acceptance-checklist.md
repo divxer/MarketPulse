@@ -13,7 +13,7 @@ This checklist is required before enabling unattended daily paper ticks after a 
   ```
 - [ ] DB health snapshot runs:
   ```bash
-  uv run python scripts/check_paper_trading_health.py sqlite:///./data/marketpulse.db --skip-price-smoke
+  uv run python scripts/check_paper_trading_health.py sqlite:///./marketpulse.db --skip-price-smoke
   ```
 - [ ] Notification config smoke runs:
   ```bash
@@ -21,7 +21,7 @@ This checklist is required before enabling unattended daily paper ticks after a 
   ```
 - [ ] Price provider smoke runs:
   ```bash
-  uv run python scripts/check_paper_trading_health.py sqlite:///./data/marketpulse.db
+  uv run python scripts/check_paper_trading_health.py sqlite:///./marketpulse.db
   ```
 - [ ] If price smoke reports Attention, classify it as external data/provider availability first, not an automatic deployment rollback.
 - [ ] No unexpected `Degraded` state.

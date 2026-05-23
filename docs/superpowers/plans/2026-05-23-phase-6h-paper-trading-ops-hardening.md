@@ -57,7 +57,7 @@ def test_ops_common_resolves_db_url_from_arg_or_env(monkeypatch):
 
     monkeypatch.delenv("MARKETPULSE_DB_URL", raising=False)
     assert resolve_db_url("sqlite:///explicit.db") == "sqlite:///explicit.db"
-    assert resolve_db_url(None) == "sqlite:///./data/marketpulse.db"
+    assert resolve_db_url(None) == "sqlite:///./marketpulse.db"
 
     monkeypatch.setenv("MARKETPULSE_DB_URL", "sqlite:///env.db")
     assert resolve_db_url(None) == "sqlite:///env.db"
@@ -131,7 +131,7 @@ from marketpulse.db.models import (  # noqa: E402
     PaperPosition,
 )
 
-DEFAULT_DB_URL = "sqlite:///./data/marketpulse.db"
+DEFAULT_DB_URL = "sqlite:///./marketpulse.db"
 PAPER_TABLE_MODELS = {
     "paper_order": PaperOrder,
     "paper_fill": PaperFill,
@@ -904,7 +904,7 @@ Run:
 
 ```bash
 MARKETPULSE_SMOKE_PASSWORD=dev uv run python scripts/smoke_paper_trading_ops.py --base-url http://127.0.0.1:8000
-uv run python scripts/check_paper_trading_health.py sqlite:///./data/marketpulse.db --skip-price-smoke
+uv run python scripts/check_paper_trading_health.py sqlite:///./marketpulse.db --skip-price-smoke
 uv run python scripts/smoke_notifications.py
 ```
 
@@ -966,7 +966,7 @@ The smoke title must begin with `SMOKE TEST — Paper Trading Notifications`.
 Run health with price smoke enabled:
 
 ```bash
-uv run python scripts/check_paper_trading_health.py sqlite:///./data/marketpulse.db
+uv run python scripts/check_paper_trading_health.py sqlite:///./marketpulse.db
 ```
 
 The price smoke checks the most recent completed NY trading day close for SPY by default. A failure is Attention, not automatic proof of engine corruption.
@@ -1022,7 +1022,7 @@ This checklist is required before enabling unattended daily paper ticks after a 
   ```
 - [ ] DB health snapshot runs:
   ```bash
-  uv run python scripts/check_paper_trading_health.py sqlite:///./data/marketpulse.db --skip-price-smoke
+  uv run python scripts/check_paper_trading_health.py sqlite:///./marketpulse.db --skip-price-smoke
   ```
 - [ ] Notification config smoke runs:
   ```bash
@@ -1030,7 +1030,7 @@ This checklist is required before enabling unattended daily paper ticks after a 
   ```
 - [ ] Price provider smoke runs:
   ```bash
-  uv run python scripts/check_paper_trading_health.py sqlite:///./data/marketpulse.db
+  uv run python scripts/check_paper_trading_health.py sqlite:///./marketpulse.db
   ```
 - [ ] If price smoke reports Attention, classify it as external data/provider
       availability first, not an automatic deployment rollback.
@@ -1124,7 +1124,7 @@ Run:
 
 ```bash
 MARKETPULSE_SMOKE_PASSWORD=dev uv run python scripts/smoke_paper_trading_ops.py --base-url http://127.0.0.1:8000
-uv run python scripts/check_paper_trading_health.py sqlite:///./data/marketpulse.db --skip-price-smoke
+uv run python scripts/check_paper_trading_health.py sqlite:///./marketpulse.db --skip-price-smoke
 uv run python scripts/smoke_notifications.py
 ```
 
