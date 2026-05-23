@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Generic, Literal, TypeVar
+from typing import Literal
 
 from sqlalchemy import Integer, cast, desc, func, select
 from sqlalchemy.orm import Session
@@ -36,11 +36,8 @@ OperationalExitStatus = Literal[
     "STUCK_3_PLUS",
 ]
 
-T = TypeVar("T")
-
-
 @dataclass(frozen=True)
-class SectionResult(Generic[T]):
+class SectionResult[T]:
     status: SectionStatus
     data: T | None
     empty_message: str | None = None
@@ -54,11 +51,11 @@ class SectionResult(Generic[T]):
             raise ValueError("error SectionResult requires data=None")
 
 
-def section_ok(data: T, empty_message: str | None = None) -> SectionResult[T]:
+def section_ok[T](data: T, empty_message: str | None = None) -> SectionResult[T]:
     return SectionResult(status="ok", data=data, empty_message=empty_message)
 
 
-def section_error(error_title: str, degraded_reason: str) -> SectionResult[T]:
+def section_error[T](error_title: str, degraded_reason: str) -> SectionResult[T]:
     return SectionResult(
         status="error",
         data=None,

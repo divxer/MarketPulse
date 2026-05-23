@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import pytest
 from datetime import UTC, date, datetime
+
+import pytest
 
 
 def test_section_ok_requires_non_none_data():
