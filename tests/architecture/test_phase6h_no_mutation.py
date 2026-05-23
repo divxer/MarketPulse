@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 PHASE6H_SCRIPTS = [
     Path("scripts/check_paper_trading_health.py"),
     Path("scripts/smoke_paper_trading_ops.py"),

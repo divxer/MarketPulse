@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -122,6 +121,7 @@ def test_route_smoke_requires_password(capsys):
 
 def test_route_smoke_success_with_mock_transport(monkeypatch, capsys):
     import httpx
+
     from scripts import smoke_paper_trading_ops as smoke
 
     def handler(request: httpx.Request) -> httpx.Response:

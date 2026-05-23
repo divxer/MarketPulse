@@ -14,12 +14,16 @@ from pathlib import Path
 
 # Allow direct script execution from the repository root.
 sys.path[:0] = [str(Path(__file__).resolve().parent.parent)]
-from scripts._paper_ops_common import count_paper_tables, resolve_db_url, session_from_url
 
 from marketpulse.data.yfinance_client import YFinanceClient  # noqa: E402
 from marketpulse.trading.calendar import NY, NYTradingCalendar  # noqa: E402
 from marketpulse.trading.price_provider import YFinancePriceProvider  # noqa: E402
 from marketpulse.trading.query_models import load_paper_trading_dashboard  # noqa: E402
+from scripts._paper_ops_common import (  # noqa: E402
+    count_paper_tables,
+    resolve_db_url,
+    session_from_url,
+)
 
 
 def _status_value(status: object) -> str:
