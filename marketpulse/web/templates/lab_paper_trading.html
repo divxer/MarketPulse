@@ -1,0 +1,193 @@
+{% extends "base.html" %}
+{% block main_width %}max-w-[1800px]{% endblock %}
+{% block nav_width %}max-w-[1800px]{% endblock %}
+{% block content %}
+
+<section class="mp-paper-ops">
+  <header class="mp-paper-ops__header">
+    <div>
+      <p class="mp-eyebrow mp-eyebrow--primary">Lab · Inspection Plane</p>
+      <h1>Paper Trading · Operations</h1>
+      <p>{{ dashboard.current_operational_window.label }}</p>
+    </div>
+    <div class="mp-paper-ops__generated">{{ dashboard.generated_at_label }}</div>
+  </header>
+
+  <section class="mp-paper-kpis" aria-label="Health Summary">
+    <article class="mp-card mp-paper-kpi">
+      <div class="mp-card__body">
+        <div class="mp-card__eyebrow">System Status</div>
+        <div class="mp-paper-kpi__value">{{ dashboard.system_status }}</div>
+      </div>
+    </article>
+    <article class="mp-card mp-paper-kpi">
+      <div class="mp-card__body">
+        <div class="mp-card__eyebrow">Cash Balance</div>
+        <div class="mp-paper-kpi__value">${{ dashboard.health.cash_balance }}</div>
+      </div>
+    </article>
+    <article class="mp-card mp-paper-kpi">
+      <div class="mp-card__body">
+        <div class="mp-card__eyebrow">Realized P&amp;L Today</div>
+        <div class="mp-paper-kpi__value">{{ dashboard.health.realized_pnl_today }}</div>
+      </div>
+    </article>
+    <article class="mp-card mp-paper-kpi">
+      <div class="mp-card__body">
+        <div class="mp-card__eyebrow">Open Positions</div>
+        <div class="mp-paper-kpi__value">{{ dashboard.health.open_positions_count }}</div>
+      </div>
+    </article>
+    <article class="mp-card mp-paper-kpi">
+      <div class="mp-card__body">
+        <div class="mp-card__eyebrow">Kill Switch</div>
+        <div class="mp-paper-kpi__value">{{ dashboard.health.kill_switch_state }}</div>
+        {% if dashboard.health.kill_switch_reason %}
+          <div class="mp-paper-muted">{{ dashboard.health.kill_switch_reason }}</div>
+        {% endif %}
+      </div>
+    </article>
+  </section>
+
+  <section class="mp-paper-primary-row">
+    <article class="mp-card">
+      <div class="mp-card__head"><div class="mp-card__title">Critical Events</div></div>
+      <div class="mp-card__body">
+        {% if dashboard.critical_events.status == "error" %}
+          <div class="mp-paper-degraded">
+            <strong>{{ dashboard.critical_events.error_title }}</strong>
+            {% if dashboard.critical_events.degraded_reason %}
+              <div class="mp-paper-muted">{{ dashboard.critical_events.degraded_reason }}</div>
+            {% endif %}
+          </div>
+        {% elif dashboard.critical_events.data %}
+          <ul class="mp-paper-events">
+            {% for event in dashboard.critical_events.data %}
+              <li><strong>{{ event.title }}</strong><span>{{ event.ticker or "" }}</span><small>{{ event.detail }}</small></li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <div class="mp-paper-empty">{{ dashboard.critical_events.empty_message }}</div>
+        {% endif %}
+      </div>
+    </article>
+
+    <article class="mp-card">
+      <div class="mp-card__head"><div class="mp-card__title">Positions</div></div>
+      <div class="mp-card__body">
+        {% if dashboard.positions.status == "error" %}
+          <div class="mp-paper-degraded">
+            <strong>{{ dashboard.positions.error_title }}</strong>
+            {% if dashboard.positions.degraded_reason %}
+              <div class="mp-paper-muted">{{ dashboard.positions.degraded_reason }}</div>
+            {% endif %}
+          </div>
+        {% elif dashboard.positions.data %}
+          <div class="mp-paper-table-wrap">
+            <table class="mp-table mp-table--paper">
+              <thead>
+                <tr><th>Ticker</th><th>Strategy</th><th class="num">Qty</th><th class="num">Entry</th><th>Horizon</th><th>Status</th><th>Exit Health</th><th class="num">Realized P&amp;L</th></tr>
+              </thead>
+              <tbody>
+              {% for row in dashboard.positions.data %}
+                <tr>
+                  <td>{{ row.ticker }}</td>
+                  <td>{{ row.strategy }}</td>
+                  <td class="num">{{ row.quantity }}</td>
+                  <td class="num">{{ row.entry_price }}</td>
+                  <td>{{ row.horizon_date }}</td>
+                  <td>{{ row.canonical_status }}</td>
+                  <td>{{ row.exit_health_label }}</td>
+                  <td class="num">{% if row.realized_pnl is not none %}{{ row.realized_pnl }}{% endif %}</td>
+                </tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% else %}
+          <div class="mp-paper-empty">{{ dashboard.positions.empty_message }}</div>
+        {% endif %}
+      </div>
+    </article>
+  </section>
+
+  <section class="mp-paper-drilldown">
+    <div class="mp-paper-tabs" role="tablist" aria-label="Paper trading drill-down">
+      <button type="button" class="mp-paper-tab is-active" data-paper-tab="orders">Orders &amp; Fills</button>
+      <button type="button" class="mp-paper-tab" data-paper-tab="audit">Audit Timeline</button>
+    </div>
+
+    <article class="mp-card mp-paper-tab-panel" data-paper-panel="orders">
+      <div class="mp-card__head"><div class="mp-card__title">Orders &amp; Fills</div></div>
+      <div class="mp-card__body">
+        {% if dashboard.order_lifecycles.status == "error" %}
+          <div class="mp-paper-degraded">
+            <strong>{{ dashboard.order_lifecycles.error_title }}</strong>
+            {% if dashboard.order_lifecycles.degraded_reason %}
+              <div class="mp-paper-muted">{{ dashboard.order_lifecycles.degraded_reason }}</div>
+            {% endif %}
+          </div>
+        {% elif dashboard.order_lifecycles.data %}
+          <div class="mp-paper-table-wrap">
+            <table class="mp-table mp-table--paper">
+              <thead>
+                <tr><th>Order ID</th><th>Ticker</th><th>Strategy</th><th class="num">Qty</th><th>Status</th><th>Placed</th><th>Entry</th><th>Exit</th><th class="num">P&amp;L</th><th>Latest Audit Reason</th></tr>
+              </thead>
+              <tbody>
+              {% for row in dashboard.order_lifecycles.data %}
+                <tr><td>{{ row.order_id }}</td><td>{{ row.ticker }}</td><td>{{ row.strategy }}</td><td class="num">{{ row.quantity }}</td><td>{{ row.order_status }}</td><td>{{ row.placed_at }}</td><td>{% if row.entry_price is not none %}{{ row.entry_price }}{% endif %}</td><td>{% if row.exit_price is not none %}{{ row.exit_price }}{% endif %}</td><td class="num">{% if row.realized_pnl is not none %}{{ row.realized_pnl }}{% endif %}</td><td>{% if row.latest_audit_reason is not none %}{{ row.latest_audit_reason }}{% endif %}</td></tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% else %}
+          <div class="mp-paper-empty">{{ dashboard.order_lifecycles.empty_message }}</div>
+        {% endif %}
+      </div>
+    </article>
+
+    <article class="mp-card mp-paper-tab-panel is-hidden" data-paper-panel="audit">
+      <div class="mp-card__head"><div class="mp-card__title">Audit Timeline</div></div>
+      <div class="mp-card__body">
+        {% if dashboard.audit_timeline.status == "error" %}
+          <div class="mp-paper-degraded">
+            <strong>{{ dashboard.audit_timeline.error_title }}</strong>
+            {% if dashboard.audit_timeline.degraded_reason %}
+              <div class="mp-paper-muted">{{ dashboard.audit_timeline.degraded_reason }}</div>
+            {% endif %}
+          </div>
+        {% elif dashboard.audit_timeline.data.rows %}
+          {% if dashboard.audit_timeline.data.routine_hidden_count %}
+            <button type="button" class="mp-paper-routine-toggle" data-routine-toggle>Show routine events · {{ dashboard.audit_timeline.data.routine_hidden_count }} hidden</button>
+          {% endif %}
+          <ul class="mp-paper-audit-list">
+            {% for row in dashboard.audit_timeline.data.rows %}
+              <li class="{% if row.routine %}mp-paper-routine-row is-hidden{% endif %}"><strong>{{ row.event_type }}</strong><span>{{ row.ticker or "" }}</span><small>{{ row.reason }}</small></li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <div class="mp-paper-empty">{{ dashboard.audit_timeline.empty_message }}</div>
+        {% endif %}
+      </div>
+    </article>
+  </section>
+</section>
+
+<script>
+document.querySelectorAll("[data-paper-tab]").forEach((tab) => {
+  tab.addEventListener("click", () => {
+    const target = tab.getAttribute("data-paper-tab");
+    document.querySelectorAll("[data-paper-tab]").forEach((item) => item.classList.toggle("is-active", item === tab));
+    document.querySelectorAll("[data-paper-panel]").forEach((panel) => {
+      panel.classList.toggle("is-hidden", panel.getAttribute("data-paper-panel") !== target);
+    });
+  });
+});
+document.querySelectorAll("[data-routine-toggle]").forEach((toggle) => {
+  toggle.addEventListener("click", () => {
+    document.querySelectorAll(".mp-paper-routine-row").forEach((row) => row.classList.toggle("is-hidden"));
+  });
+});
+</script>
+
+{% endblock %}

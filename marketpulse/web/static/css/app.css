@@ -1137,6 +1137,161 @@ hr.mp-hr {
   background: var(--ns-surface-container);
 }
 
+/* ════════ Phase 6f: /lab/paper-trading operations UI ════════ */
+.mp-paper-ops {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.mp-paper-ops__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 24px;
+  padding: 10px 4px 2px;
+}
+.mp-paper-ops__header h1 {
+  margin: 4px 0 4px;
+  font: 700 34px/1 var(--ns-font-headline);
+  color: var(--ns-navy);
+  letter-spacing: 0;
+}
+.mp-paper-ops__header p {
+  margin: 0;
+  color: var(--ns-on-surface-variant);
+  font-size: 13px;
+}
+.mp-paper-ops__generated,
+.mp-paper-muted {
+  color: var(--ns-on-surface-variant);
+  font-size: 12px;
+}
+.mp-paper-kpis {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+}
+.mp-paper-kpi .mp-card__body {
+  padding: 16px 18px;
+}
+.mp-paper-kpi__value {
+  margin-top: 6px;
+  font: 700 28px/1.05 var(--ns-font-headline);
+  color: var(--ns-navy);
+  letter-spacing: 0;
+}
+.mp-paper-primary-row {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.8fr) minmax(640px, 1.2fr);
+  gap: 16px;
+  align-items: start;
+}
+.mp-paper-drilldown {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+.mp-paper-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.mp-paper-tab {
+  border: 1px solid var(--ns-outline-variant);
+  background: white;
+  color: var(--ns-on-surface-variant);
+  border-radius: 4px;
+  padding: 8px 12px;
+  font: 700 12px/1 var(--ns-font-headline);
+  cursor: pointer;
+}
+.mp-paper-tab.is-active {
+  background: var(--ns-navy);
+  color: white;
+  border-color: var(--ns-navy);
+}
+.mp-paper-tab-panel.is-hidden {
+  display: none;
+}
+.mp-paper-table-wrap {
+  overflow-x: auto;
+}
+.mp-table--paper {
+  min-width: 920px;
+  width: 100%;
+  border-collapse: collapse;
+}
+.mp-table--paper th {
+  font: 600 10px/1 var(--ns-font-headline);
+  color: var(--ns-on-surface-variant);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 8px 10px;
+}
+.mp-table--paper td {
+  padding: 10px;
+  font-size: 12px;
+}
+.mp-paper-events,
+.mp-paper-audit-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.mp-paper-events li,
+.mp-paper-audit-list li {
+  border: 1px solid var(--ns-outline-variant);
+  background: var(--ns-surface-container-low);
+  padding: 10px 12px;
+  border-radius: 4px;
+}
+.mp-paper-events strong,
+.mp-paper-audit-list strong {
+  display: block;
+  font: 700 12px/1.2 var(--ns-font-headline);
+  color: var(--ns-navy);
+}
+.mp-paper-events span,
+.mp-paper-audit-list span,
+.mp-paper-events small,
+.mp-paper-audit-list small {
+  color: var(--ns-on-surface-variant);
+  font-size: 12px;
+}
+.mp-paper-empty,
+.mp-paper-degraded {
+  padding: 14px 16px;
+  border: 1px dashed var(--ns-outline-variant);
+  border-radius: 4px;
+  color: var(--ns-on-surface-variant);
+  background: var(--ns-surface-container-low);
+}
+.mp-paper-degraded {
+  border-color: #f59e0b;
+  background: #fffbeb;
+  color: #92400e;
+}
+.mp-paper-routine-toggle {
+  border: 1px solid var(--ns-outline-variant);
+  background: white;
+  color: var(--ns-on-surface-variant);
+  border-radius: 4px;
+  padding: 8px 10px;
+  font: 600 12px/1 var(--ns-font-headline);
+  margin-bottom: 12px;
+  cursor: pointer;
+}
+.mp-paper-routine-row.is-hidden {
+  display: none;
+}
+@media (max-width: 1100px) {
+  .mp-paper-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .mp-paper-primary-row { grid-template-columns: 1fr; }
+}
+
 /* ════════ Top-nav active state ════════
  * Applied to the <a> in base.html nav when the link matches the current
  * request path. Underline + primary color matches the rest of NS tokens.
