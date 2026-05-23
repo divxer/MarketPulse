@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from marketpulse.evaluation import scoring
 from marketpulse.evaluation.outcomes import DEFAULT_HORIZONS
 from marketpulse.strategies import load_strategies
+from marketpulse.trading import query_models as paper_query_models
 from marketpulse.web.deps import get_db, require_auth
 from marketpulse.web.main import templates
 
@@ -143,3 +144,17 @@ def lab_ai_track(
         "filters_qs_no_ticker": _qs_from_filters({**filters, "ticker": None}),
         "filters_qs_no_strategy": _qs_from_filters({**filters, "strategy": None}),
     })
+
+
+@router.get("/lab/paper-trading", response_class=HTMLResponse)
+def lab_paper_trading(
+    request: Request,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_auth),
+):
+    dashboard = paper_query_models.load_paper_trading_dashboard(db)
+    return templates.TemplateResponse(
+        request,
+        "lab_paper_trading.html",
+        {"dashboard": dashboard},
+    )
