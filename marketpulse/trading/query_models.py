@@ -305,6 +305,51 @@ def _safe_section(error_title: str, loader):
         return section_error(error_title, type(exc).__name__)
 
 
+def _fallback_health_summary() -> HealthSummary:
+    return HealthSummary(
+        cash_balance=Decimal("0"),
+        realized_pnl_today=Decimal("0"),
+        open_positions_count=0,
+        latest_tick_status=None,
+        kill_switch_state="UNKNOWN",
+        kill_switch_reason=None,
+    )
+
+
+def _shared_fetch_error_dashboard(
+    *,
+    generated_at: datetime,
+    generated_at_label: str,
+    degraded_reason: str,
+) -> PaperTradingDashboard:
+    window = OperationalWindow(
+        started_at=None,
+        source_event_type=None,
+        label="Unable to load dashboard data",
+    )
+    critical_events = section_error(
+        "Unable to load Critical Events",
+        degraded_reason,
+    )
+    positions = section_error("Unable to load Positions", degraded_reason)
+    order_lifecycles = section_error(
+        "Unable to load Orders & Fills",
+        degraded_reason,
+    )
+    audit_timeline = section_error("Unable to load Audit Timeline", degraded_reason)
+    return PaperTradingDashboard(
+        generated_at=generated_at,
+        generated_at_label=generated_at_label,
+        current_operational_window=window,
+        system_status="Degraded",
+        health=_fallback_health_summary(),
+        critical_events=critical_events,
+        positions=positions,
+        order_lifecycles=order_lifecycles,
+        audit_timeline=audit_timeline,
+    )
+
+
 def _context_int(context: dict, key: str) -> int | None:
     value = context.get(key)
     if isinstance(value, bool) or value is None:
@@ -316,9 +361,40 @@ def _context_int(context: dict, key: str) -> int | None:
     return None
 
 
-def _ticker_from(row: PaperAuditEvent) -> str | None:
+def _ticker_from(
+    row: PaperAuditEvent,
+    projection: ProjectionContext | None = None,
+) -> str | None:
     value = (row.context or {}).get("ticker")
-    return str(value) if value is not None else None
+    if value is not None:
+        return str(value)
+    if projection is None:
+        return None
+    pid = _position_id(row)
+    if pid is not None and pid in projection.ticker_by_position_id:
+        return projection.ticker_by_position_id[pid]
+    if row.order_id is not None:
+        return projection.ticker_by_order_id.get(row.order_id)
+    return None
+
+
+def _strategy_from(
+    row: PaperAuditEvent,
+    projection: ProjectionContext | None = None,
+) -> str | None:
+    if row.strategy is not None:
+        return row.strategy
+    value = (row.context or {}).get("strategy")
+    if value is not None:
+        return str(value)
+    if projection is None:
+        return None
+    pid = _position_id(row)
+    if pid is not None and pid in projection.strategy_by_position_id:
+        return projection.strategy_by_position_id[pid]
+    if row.order_id is not None:
+        return projection.strategy_by_order_id.get(row.order_id)
+    return None
 
 
 def _is_daily_loss_or_failed_gate(row: PaperAuditEvent) -> bool:
@@ -335,6 +411,10 @@ class ProjectionContext:
     rows: list[PaperAuditEvent]
     recovered_positions: set[int]
     suppressed_price_unavailable_positions: set[int]
+    ticker_by_position_id: dict[int, str]
+    strategy_by_position_id: dict[int, str]
+    ticker_by_order_id: dict[int, str]
+    strategy_by_order_id: dict[int, str]
 
 
 def _historical_price_unavailable_before_closes(
@@ -401,10 +481,37 @@ def _build_projection_context(
     rows: list[PaperAuditEvent],
 ) -> ProjectionContext:
     recovered = _recovered_positions(db, rows)
+    position_ids = {
+        position_id
+        for row in rows
+        if (position_id := _position_id(row)) is not None
+    }
+    order_ids = {row.order_id for row in rows if row.order_id is not None}
+    positions: list[PaperPosition] = []
+    if position_ids:
+        positions = list(
+            db.execute(
+                select(PaperPosition).where(PaperPosition.id.in_(sorted(position_ids))),
+            ).scalars().all(),
+        )
+        order_ids.update(position.order_id for position in positions)
+    orders: list[PaperOrder] = []
+    if order_ids:
+        orders = list(
+            db.execute(
+                select(PaperOrder).where(PaperOrder.id.in_(sorted(order_ids))),
+            ).scalars().all(),
+        )
     return ProjectionContext(
         rows=rows,
         recovered_positions=recovered,
         suppressed_price_unavailable_positions=recovered,
+        ticker_by_position_id={position.id: position.ticker for position in positions},
+        strategy_by_position_id={
+            position.id: position.strategy for position in positions
+        },
+        ticker_by_order_id={order.id: order.ticker for order in orders},
+        strategy_by_order_id={order.id: order.strategy for order in orders},
     )
 
 
@@ -461,8 +568,8 @@ def _load_critical_events_section(
                 severity=severity,
                 title=title,
                 detail=row.reason or "",
-                ticker=_ticker_from(row),
-                strategy=row.strategy,
+                ticker=_ticker_from(row, projection),
+                strategy=_strategy_from(row, projection),
             ),
         )
     return section_ok(events, "No operational events in current cycle")
@@ -673,8 +780,8 @@ def _load_audit_timeline_section(
                 event_type=row.event_type,
                 reason=row.reason or "",
                 order_id=row.order_id,
-                ticker=_ticker_from(row),
-                strategy=row.strategy,
+                ticker=_ticker_from(row, projection),
+                strategy=_strategy_from(row, projection),
                 severity=severity,
                 routine=routine,
             ),
@@ -692,10 +799,17 @@ def load_paper_trading_dashboard(
 ) -> PaperTradingDashboard:
     generated_at = now or WallClock().now()
     generated_at_label = f"Generated at {generated_at.astimezone(NY):%H:%M NY}"
-    window = _load_operational_window(db)
-    rows = _window_rows(db, window)
-    projection = _build_projection_context(db, rows)
-    health = _load_health_summary(db, generated_at=generated_at, rows=rows)
+    try:
+        window = _load_operational_window(db)
+        rows = _window_rows(db, window)
+        projection = _build_projection_context(db, rows)
+        health = _load_health_summary(db, generated_at=generated_at, rows=rows)
+    except Exception as exc:
+        return _shared_fetch_error_dashboard(
+            generated_at=generated_at,
+            generated_at_label=generated_at_label,
+            degraded_reason=type(exc).__name__,
+        )
     today = generated_at.astimezone(NY).date()
     critical_events = _safe_section(
         "Unable to load Critical Events",

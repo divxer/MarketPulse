@@ -233,6 +233,42 @@ def test_section_error_has_degraded_priority(db_session, monkeypatch):
     assert dashboard.positions.degraded_reason == "positions query failed"
 
 
+@pytest.mark.parametrize(
+    "helper_name",
+    [
+        "_load_operational_window",
+        "_window_rows",
+        "_build_projection_context",
+        "_load_health_summary",
+    ],
+)
+def test_shared_query_failure_returns_degraded_dashboard(
+    db_session,
+    monkeypatch,
+    helper_name,
+):
+    import marketpulse.trading.query_models as qm
+
+    def fail_shared_fetch(*args, **kwargs):
+        raise RuntimeError("shared fetch failed")
+
+    monkeypatch.setattr(qm, helper_name, fail_shared_fetch)
+
+    dashboard = qm.load_paper_trading_dashboard(db_session)
+
+    assert dashboard.system_status == "Degraded"
+    assert dashboard.current_operational_window.label == "Unable to load dashboard data"
+    assert dashboard.critical_events.status == "error"
+    assert dashboard.critical_events.error_title == "Unable to load Critical Events"
+    assert dashboard.critical_events.degraded_reason == "RuntimeError"
+    assert dashboard.positions.status == "error"
+    assert dashboard.positions.error_title == "Unable to load Positions"
+    assert dashboard.order_lifecycles.status == "error"
+    assert dashboard.order_lifecycles.error_title == "Unable to load Orders & Fills"
+    assert dashboard.audit_timeline.status == "error"
+    assert dashboard.audit_timeline.error_title == "Unable to load Audit Timeline"
+
+
 def test_price_unavailable_three_plus_is_attention_and_visible(db_session):
     from marketpulse.trading.query_models import load_paper_trading_dashboard
 
@@ -335,6 +371,53 @@ def test_position_closed_recovery_uses_historical_price_unavailable(db_session):
     ]
     assert dashboard.critical_events.data[0].severity == "recovery"
     assert dashboard.critical_events.data[0].audit_id == recovered.id
+
+
+def test_position_closed_recovery_ticker_is_enriched_from_position(db_session):
+    from decimal import Decimal
+
+    from marketpulse.trading.query_models import load_paper_trading_dashboard
+
+    order = _paper_order(db_session, ticker="AAPL", strategy="momentum_breakout")
+    position = _position(
+        db_session,
+        order,
+        status="CLOSED",
+        closed_at=datetime(2026, 5, 23, 21, 32, tzinfo=UTC),
+        realized_pnl=Decimal("0"),
+    )
+    _audit(
+        db_session,
+        event_type="PRICE_UNAVAILABLE",
+        ts=datetime(2026, 5, 22, 21, 31, tzinfo=UTC),
+        reason="no_price",
+        context={"position_id": position.id, "attempt_count": 3},
+    )
+    start = datetime(2026, 5, 23, 21, 30, tzinfo=UTC)
+    _audit(
+        db_session,
+        event_type="TICK_COMPLETED",
+        ts=start,
+        context={"tick_date": "2026-05-23", "status": "completed"},
+    )
+    recovered = _audit(
+        db_session,
+        event_type="POSITION_CLOSED",
+        ts=datetime(2026, 5, 23, 21, 32, tzinfo=UTC),
+        reason="closed",
+        context={"position_id": position.id},
+    )
+    db_session.commit()
+
+    dashboard = load_paper_trading_dashboard(db_session)
+
+    assert dashboard.critical_events.data[0].audit_id == recovered.id
+    assert dashboard.critical_events.data[0].ticker == "AAPL"
+    assert dashboard.critical_events.data[0].strategy == "momentum_breakout"
+    timeline_row = dashboard.audit_timeline.data.rows[0]
+    assert timeline_row.audit_id == recovered.id
+    assert timeline_row.ticker == "AAPL"
+    assert timeline_row.strategy == "momentum_breakout"
 
 
 def test_audit_timeline_hides_routine_rows_but_loads_them_for_client_reveal(

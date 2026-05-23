@@ -54,7 +54,12 @@
       <div class="mp-card__head"><div class="mp-card__title">Critical Events</div></div>
       <div class="mp-card__body">
         {% if dashboard.critical_events.status == "error" %}
-          <div class="mp-paper-degraded">{{ dashboard.critical_events.error_title }}</div>
+          <div class="mp-paper-degraded">
+            <strong>{{ dashboard.critical_events.error_title }}</strong>
+            {% if dashboard.critical_events.degraded_reason %}
+              <div class="mp-paper-muted">{{ dashboard.critical_events.degraded_reason }}</div>
+            {% endif %}
+          </div>
         {% elif dashboard.critical_events.data %}
           <ul class="mp-paper-events">
             {% for event in dashboard.critical_events.data %}
@@ -71,7 +76,12 @@
       <div class="mp-card__head"><div class="mp-card__title">Positions</div></div>
       <div class="mp-card__body">
         {% if dashboard.positions.status == "error" %}
-          <div class="mp-paper-degraded">{{ dashboard.positions.error_title }}</div>
+          <div class="mp-paper-degraded">
+            <strong>{{ dashboard.positions.error_title }}</strong>
+            {% if dashboard.positions.degraded_reason %}
+              <div class="mp-paper-muted">{{ dashboard.positions.degraded_reason }}</div>
+            {% endif %}
+          </div>
         {% elif dashboard.positions.data %}
           <div class="mp-paper-table-wrap">
             <table class="mp-table mp-table--paper">
@@ -88,7 +98,7 @@
                   <td>{{ row.horizon_date }}</td>
                   <td>{{ row.canonical_status }}</td>
                   <td>{{ row.exit_health_label }}</td>
-                  <td class="num">{{ row.realized_pnl or "" }}</td>
+                  <td class="num">{% if row.realized_pnl is not none %}{{ row.realized_pnl }}{% endif %}</td>
                 </tr>
               {% endfor %}
               </tbody>
@@ -111,7 +121,12 @@
       <div class="mp-card__head"><div class="mp-card__title">Orders &amp; Fills</div></div>
       <div class="mp-card__body">
         {% if dashboard.order_lifecycles.status == "error" %}
-          <div class="mp-paper-degraded">{{ dashboard.order_lifecycles.error_title }}</div>
+          <div class="mp-paper-degraded">
+            <strong>{{ dashboard.order_lifecycles.error_title }}</strong>
+            {% if dashboard.order_lifecycles.degraded_reason %}
+              <div class="mp-paper-muted">{{ dashboard.order_lifecycles.degraded_reason }}</div>
+            {% endif %}
+          </div>
         {% elif dashboard.order_lifecycles.data %}
           <div class="mp-paper-table-wrap">
             <table class="mp-table mp-table--paper">
@@ -120,7 +135,7 @@
               </thead>
               <tbody>
               {% for row in dashboard.order_lifecycles.data %}
-                <tr><td>{{ row.order_id }}</td><td>{{ row.ticker }}</td><td>{{ row.strategy }}</td><td class="num">{{ row.quantity }}</td><td>{{ row.order_status }}</td><td>{{ row.placed_at }}</td><td>{{ row.entry_price or "" }}</td><td>{{ row.exit_price or "" }}</td><td class="num">{{ row.realized_pnl or "" }}</td><td>{{ row.latest_audit_reason or "" }}</td></tr>
+                <tr><td>{{ row.order_id }}</td><td>{{ row.ticker }}</td><td>{{ row.strategy }}</td><td class="num">{{ row.quantity }}</td><td>{{ row.order_status }}</td><td>{{ row.placed_at }}</td><td>{% if row.entry_price is not none %}{{ row.entry_price }}{% endif %}</td><td>{% if row.exit_price is not none %}{{ row.exit_price }}{% endif %}</td><td class="num">{% if row.realized_pnl is not none %}{{ row.realized_pnl }}{% endif %}</td><td>{% if row.latest_audit_reason is not none %}{{ row.latest_audit_reason }}{% endif %}</td></tr>
               {% endfor %}
               </tbody>
             </table>
@@ -135,7 +150,12 @@
       <div class="mp-card__head"><div class="mp-card__title">Audit Timeline</div></div>
       <div class="mp-card__body">
         {% if dashboard.audit_timeline.status == "error" %}
-          <div class="mp-paper-degraded">{{ dashboard.audit_timeline.error_title }}</div>
+          <div class="mp-paper-degraded">
+            <strong>{{ dashboard.audit_timeline.error_title }}</strong>
+            {% if dashboard.audit_timeline.degraded_reason %}
+              <div class="mp-paper-muted">{{ dashboard.audit_timeline.degraded_reason }}</div>
+            {% endif %}
+          </div>
         {% elif dashboard.audit_timeline.data.rows %}
           {% if dashboard.audit_timeline.data.routine_hidden_count %}
             <button type="button" class="mp-paper-routine-toggle" data-routine-toggle>Show routine events · {{ dashboard.audit_timeline.data.routine_hidden_count }} hidden</button>
