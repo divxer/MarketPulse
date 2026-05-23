@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 
 def test_section_ok_requires_non_none_data():
@@ -375,3 +375,264 @@ def test_audit_timeline_hides_routine_rows_but_loads_them_for_client_reveal(
     assert [row.routine for row in timeline.rows if row.audit_id == rejected.id] == [
         False,
     ]
+
+
+def _paper_order(
+    db_session,
+    *,
+    ticker="AAPL",
+    strategy="momentum_breakout",
+    status="ENTRY_FILLED",
+    placed_at=None,
+    filled_at=None,
+):
+    from decimal import Decimal
+
+    from marketpulse.db.models import PaperOrder
+
+    ts = placed_at or datetime(2026, 5, 23, 21, 30, tzinfo=UTC)
+    effective_filled_at = filled_at
+    if status == "ENTRY_FILLED" and effective_filled_at is None:
+        effective_filled_at = ts
+    row = PaperOrder(
+        idempotency_key=f"key-{ticker}-{ts.timestamp()}",
+        allocation_run_id="run-1",
+        strategy=strategy,
+        ticker=ticker,
+        quantity=3,
+        event_time=ts,
+        allocation_date=date(2026, 5, 23),
+        horizon_date=date(2026, 5, 23),
+        placed_at=ts,
+        filled_at=effective_filled_at,
+        cancelled_at=None,
+        cancel_reason=None,
+        event_price=Decimal("100"),
+        horizon_price=None,
+        status=status,
+        strategy_version="v1",
+        allocator_version="v1",
+        execution_engine_version="v1",
+        weight=1.0,
+        raw_bid_weight=None,
+        pool_corr=None,
+        contribution_multiplier=1.0,
+        adjusted_bid_weight=None,
+        effective_corr_window=60,
+        rewarded_for_negative_corr=False,
+        would_change_rank=False,
+        size_clamped_by_override=False,
+    )
+    db_session.add(row)
+    db_session.flush()
+    return row
+
+
+def _position(
+    db_session,
+    order,
+    *,
+    status="OPEN",
+    horizon_date=date(2026, 5, 23),
+    realized_pnl=None,
+    closed_at=None,
+):
+    from decimal import Decimal
+
+    from marketpulse.db.models import PaperPosition
+
+    row = PaperPosition(
+        order_id=order.id,
+        entry_fill_id=1 if status == "CLOSED" else None,
+        exit_fill_id=2 if status == "CLOSED" else None,
+        strategy=order.strategy,
+        ticker=order.ticker,
+        quantity=order.quantity,
+        entry_price=Decimal("100"),
+        entry_date=date(2026, 5, 20),
+        horizon_date=horizon_date,
+        status=status,
+        opened_at=order.placed_at,
+        closed_at=closed_at,
+        exit_price=Decimal("110") if status == "CLOSED" else None,
+        realized_pnl=realized_pnl,
+    )
+    db_session.add(row)
+    db_session.flush()
+    return row
+
+
+def _fill(db_session, *, order, position, side, price, filled_at, realized_pnl=None):
+    from decimal import Decimal
+
+    from marketpulse.db.models import PaperFill
+
+    row = PaperFill(
+        order_id=order.id,
+        position_id=position.id,
+        side=side,
+        price=Decimal(price),
+        quantity=order.quantity,
+        filled_at=filled_at,
+        cash_delta=Decimal("-300") if side == "ENTRY" else Decimal("330"),
+        realized_pnl=realized_pnl,
+    )
+    db_session.add(row)
+    db_session.flush()
+    if side == "ENTRY":
+        position.entry_fill_id = row.id
+    else:
+        position.exit_fill_id = row.id
+    db_session.flush()
+    return row
+
+
+def test_positions_overlay_exit_health_attempts(db_session):
+    from marketpulse.trading.query_models import load_paper_trading_dashboard
+
+    start = datetime(2026, 5, 23, 21, 30, tzinfo=UTC)
+    _audit(
+        db_session,
+        event_type="TICK_COMPLETED",
+        ts=start,
+        context={"tick_date": "2026-05-23", "status": "completed"},
+    )
+    order = _paper_order(db_session)
+    position = _position(db_session, order, horizon_date=date(2026, 5, 23))
+    _audit(
+        db_session,
+        event_type="PRICE_UNAVAILABLE",
+        ts=datetime(2026, 5, 23, 21, 31, tzinfo=UTC),
+        context={"position_id": position.id, "attempt_count": 2, "ticker": "AAPL"},
+    )
+    db_session.commit()
+
+    dashboard = load_paper_trading_dashboard(db_session)
+
+    assert len(dashboard.positions.data) == 1
+    row = dashboard.positions.data[0]
+    assert row.canonical_status == "OPEN"
+    assert row.operational_exit_status == "PRICE_UNAVAILABLE_2"
+    assert row.exit_health_label == "Price unavailable 2/3"
+
+
+def test_positions_overlay_stuck_three_plus(db_session):
+    from marketpulse.trading.query_models import load_paper_trading_dashboard
+
+    start = datetime(2026, 5, 23, 21, 30, tzinfo=UTC)
+    _audit(
+        db_session,
+        event_type="TICK_COMPLETED",
+        ts=start,
+        context={"tick_date": "2026-05-23", "status": "completed"},
+    )
+    order = _paper_order(db_session)
+    position = _position(db_session, order, horizon_date=date(2026, 5, 23))
+    _audit(
+        db_session,
+        event_type="PRICE_UNAVAILABLE",
+        ts=datetime(2026, 5, 23, 21, 31, tzinfo=UTC),
+        context={"position_id": position.id, "attempt_count": 3, "ticker": "AAPL"},
+    )
+    db_session.commit()
+
+    dashboard = load_paper_trading_dashboard(db_session)
+
+    assert dashboard.positions.data[0].operational_exit_status == "STUCK_3_PLUS"
+    assert dashboard.positions.data[0].exit_health_label == "Stuck 3+"
+
+
+def test_positions_overlay_uses_historical_price_unavailable_attempts(db_session):
+    from marketpulse.trading.query_models import load_paper_trading_dashboard
+
+    order = _paper_order(db_session)
+    position = _position(db_session, order, horizon_date=date(2026, 5, 23))
+    _audit(
+        db_session,
+        event_type="PRICE_UNAVAILABLE",
+        ts=datetime(2026, 5, 22, 21, 31, tzinfo=UTC),
+        context={"position_id": position.id, "attempt_count": 3, "ticker": "AAPL"},
+    )
+    _audit(
+        db_session,
+        event_type="TICK_COMPLETED",
+        ts=datetime(2026, 5, 23, 21, 30, tzinfo=UTC),
+        context={"tick_date": "2026-05-23", "status": "completed"},
+    )
+    db_session.commit()
+
+    dashboard = load_paper_trading_dashboard(
+        db_session,
+        now=datetime(2026, 5, 23, 22, 0, tzinfo=UTC),
+    )
+
+    assert dashboard.positions.data[0].operational_exit_status == "STUCK_3_PLUS"
+    assert dashboard.positions.data[0].exit_health_label == "Stuck 3+"
+
+
+def test_order_lifecycle_joins_entry_exit_fills_and_latest_cow_audit(db_session):
+    from decimal import Decimal
+
+    from marketpulse.trading.query_models import load_paper_trading_dashboard
+
+    start = datetime(2026, 5, 23, 21, 30, tzinfo=UTC)
+    _audit(
+        db_session,
+        event_type="TICK_COMPLETED",
+        ts=start,
+        context={"tick_date": "2026-05-23", "status": "completed"},
+    )
+    order = _paper_order(
+        db_session,
+        filled_at=datetime(2026, 5, 23, 21, 31, tzinfo=UTC),
+    )
+    position = _position(
+        db_session,
+        order,
+        status="CLOSED",
+        realized_pnl=Decimal("30"),
+        closed_at=datetime(2026, 5, 23, 21, 40, tzinfo=UTC),
+    )
+    _fill(
+        db_session,
+        order=order,
+        position=position,
+        side="ENTRY",
+        price="100",
+        filled_at=datetime(2026, 5, 23, 21, 31, tzinfo=UTC),
+    )
+    _fill(
+        db_session,
+        order=order,
+        position=position,
+        side="EXIT",
+        price="110",
+        filled_at=datetime(2026, 5, 23, 21, 40, tzinfo=UTC),
+        realized_pnl=Decimal("30"),
+    )
+    _audit(
+        db_session,
+        event_type="ORDER_ENTRY_FILLED",
+        ts=datetime(2026, 5, 23, 21, 31, tzinfo=UTC),
+        order_id=order.id,
+        reason="entry_filled",
+        context={"ticker": "AAPL"},
+    )
+    _audit(
+        db_session,
+        event_type="POSITION_CLOSED",
+        ts=datetime(2026, 5, 23, 21, 40, tzinfo=UTC),
+        order_id=order.id,
+        reason="closed",
+        context={"position_id": position.id, "ticker": "AAPL"},
+    )
+    db_session.commit()
+
+    dashboard = load_paper_trading_dashboard(db_session)
+
+    row = dashboard.order_lifecycles.data[0]
+    assert row.order_id == order.id
+    assert row.entry_price == Decimal("100.000000")
+    assert row.exit_price == Decimal("110.000000")
+    assert row.realized_pnl == Decimal("30.000000")
+    assert row.latest_audit_reason == "closed"

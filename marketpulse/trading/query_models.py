@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Generic, Literal, TypeVar
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import Integer, cast, desc, func, select
 from sqlalchemy.orm import Session
 
 from marketpulse.config import get_settings
@@ -19,6 +19,7 @@ from marketpulse.db.models import (
     PaperAuditEvent,
     PaperCashLedger,
     PaperFill,
+    PaperOrder,
     PaperPosition,
 )
 from marketpulse.trading.calendar import NY
@@ -462,14 +463,121 @@ def _load_critical_events_section(
     return section_ok(events, "No operational events in current cycle")
 
 
+def _latest_pu_attempts(
+    db: Session,
+    *,
+    position_ids: set[int],
+    rows: list[PaperAuditEvent],
+) -> dict[int, int]:
+    attempts: dict[int, int] = {}
+    if position_ids:
+        position_id_expr = func.json_extract(PaperAuditEvent.context, "$.position_id")
+        attempt_expr = cast(
+            func.json_extract(PaperAuditEvent.context, "$.attempt_count"),
+            Integer,
+        )
+        historical = db.execute(
+            select(
+                position_id_expr.label("position_id"),
+                func.max(attempt_expr).label("max_attempt"),
+            )
+            .where(PaperAuditEvent.event_type == "PRICE_UNAVAILABLE")
+            .where(position_id_expr.in_(sorted(position_ids)))
+            .group_by(position_id_expr),
+        ).all()
+        attempts.update(
+            {
+                int(row.position_id): int(row.max_attempt)
+                for row in historical
+                if row.position_id is not None and row.max_attempt is not None
+            },
+        )
+    for row in rows:
+        if row.event_type != "PRICE_UNAVAILABLE":
+            continue
+        pid = _position_id(row)
+        attempt = _context_int(row.context or {}, "attempt_count")
+        if pid is not None and attempt is not None:
+            attempts[pid] = max(attempts.get(pid, 0), attempt)
+    return attempts
+
+
+def _exit_status(
+    position: PaperPosition,
+    *,
+    today: object,
+    attempts: dict[int, int],
+) -> tuple[OperationalExitStatus, str]:
+    if position.status == "CLOSED":
+        return "CLOSED", "Closed"
+    attempt = attempts.get(position.id, 0)
+    if attempt >= 3:
+        return "STUCK_3_PLUS", "Stuck 3+"
+    if attempt == 2:
+        return "PRICE_UNAVAILABLE_2", "Price unavailable 2/3"
+    if attempt == 1:
+        return "PRICE_UNAVAILABLE_1", "Price unavailable 1/3"
+    if position.horizon_date <= today:
+        return "EXIT_PENDING", "Exit pending"
+    return "ON_SCHEDULE", "On schedule"
+
+
 def _load_positions_section(
     db: Session,
     window: OperationalWindow,
     today: object,
     rows: list[PaperAuditEvent],
 ) -> SectionResult[list[PositionRow]]:
-    del db, window, today, rows
-    return section_ok([], "No open paper positions")
+    del window
+    recovered_ids = sorted(_recovered_positions(db, rows))
+    open_positions = list(
+        db.execute(
+            select(PaperPosition)
+            .where(PaperPosition.status == "OPEN")
+            .order_by(PaperPosition.id),
+        ).scalars().all(),
+    )
+    recovered_positions: list[PaperPosition] = []
+    if recovered_ids:
+        recovered_positions = list(
+            db.execute(
+                select(PaperPosition)
+                .where(PaperPosition.id.in_(recovered_ids))
+                .where(PaperPosition.status == "CLOSED")
+                .order_by(PaperPosition.id),
+            ).scalars().all(),
+        )
+
+    positions = [*open_positions, *recovered_positions]
+    attempts = _latest_pu_attempts(
+        db,
+        position_ids={position.id for position in positions},
+        rows=rows,
+    )
+    out: list[PositionRow] = []
+    seen: set[int] = set()
+    for position in positions:
+        if position.id in seen:
+            continue
+        seen.add(position.id)
+        exit_status, label = _exit_status(position, today=today, attempts=attempts)
+        out.append(
+            PositionRow(
+                position_id=position.id,
+                order_id=position.order_id,
+                ticker=position.ticker,
+                strategy=position.strategy,
+                quantity=position.quantity,
+                entry_price=position.entry_price,
+                entry_date=position.entry_date,
+                horizon_date=position.horizon_date,
+                canonical_status=position.status,
+                operational_exit_status=exit_status,
+                exit_health_label=label,
+                realized_pnl=position.realized_pnl,
+            ),
+        )
+    return section_ok(out, "No open paper positions")
 
 
 def _load_order_lifecycles_section(
@@ -477,8 +585,65 @@ def _load_order_lifecycles_section(
     window: OperationalWindow,
     rows: list[PaperAuditEvent],
 ) -> SectionResult[list[OrderLifecycleRow]]:
-    del db, window, rows
-    return section_ok([], "No order lifecycle activity in current cycle")
+    del window
+    order_ids = sorted({row.order_id for row in rows if row.order_id is not None})
+    if not order_ids:
+        return section_ok([], "No order lifecycle activity in current cycle")
+
+    orders = list(
+        db.execute(
+            select(PaperOrder)
+            .where(PaperOrder.id.in_(order_ids))
+            .order_by(PaperOrder.id),
+        ).scalars().all(),
+    )
+    positions = list(
+        db.execute(
+            select(PaperPosition).where(PaperPosition.order_id.in_(order_ids)),
+        ).scalars().all(),
+    )
+    fills = list(
+        db.execute(
+            select(PaperFill).where(PaperFill.order_id.in_(order_ids)),
+        ).scalars().all(),
+    )
+    positions_by_order = {position.order_id: position for position in positions}
+    fills_by_order_side = {(fill.order_id, fill.side): fill for fill in fills}
+    latest_reason_by_order: dict[int, str] = {}
+    for row in rows:
+        if row.order_id is not None:
+            latest_reason_by_order[row.order_id] = row.reason or row.event_type
+
+    out: list[OrderLifecycleRow] = []
+    for order in orders:
+        position = positions_by_order.get(order.id)
+        entry = fills_by_order_side.get((order.id, "ENTRY"))
+        exit_fill = fills_by_order_side.get((order.id, "EXIT"))
+        out.append(
+            OrderLifecycleRow(
+                order_id=order.id,
+                ticker=order.ticker,
+                strategy=order.strategy,
+                quantity=order.quantity,
+                order_status=order.status,
+                placed_at=order.placed_at,
+                entry_price=entry.price if entry is not None else None,
+                entry_time=entry.filled_at if entry is not None else order.filled_at,
+                exit_price=exit_fill.price if exit_fill is not None else None,
+                exit_time=(
+                    exit_fill.filled_at
+                    if exit_fill is not None
+                    else (position.closed_at if position else None)
+                ),
+                realized_pnl=(
+                    exit_fill.realized_pnl
+                    if exit_fill is not None
+                    else (position.realized_pnl if position else None)
+                ),
+                latest_audit_reason=latest_reason_by_order.get(order.id),
+            ),
+        )
+    return section_ok(out, "No order lifecycle activity in current cycle")
 
 
 def _load_audit_timeline_section(
