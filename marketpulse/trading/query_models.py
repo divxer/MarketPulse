@@ -300,6 +300,13 @@ def _compute_system_status(
     return "Healthy"
 
 
+def _safe_section(error_title: str, loader):
+    try:
+        return loader()
+    except Exception as exc:
+        return section_error(error_title, type(exc).__name__)
+
+
 def _context_int(context: dict, key: str) -> int | None:
     value = context.get(key)
     if isinstance(value, bool) or value is None:
@@ -692,10 +699,22 @@ def load_paper_trading_dashboard(
     projection = _build_projection_context(db, rows)
     health = _load_health_summary(db, generated_at=generated_at, rows=rows)
     today = generated_at.astimezone(NY).date()
-    critical_events = _load_critical_events_section(db, window, projection)
-    positions = _load_positions_section(db, window, today, rows)
-    order_lifecycles = _load_order_lifecycles_section(db, window, rows)
-    audit_timeline = _load_audit_timeline_section(db, window, projection)
+    critical_events = _safe_section(
+        "Unable to load Critical Events",
+        lambda: _load_critical_events_section(db, window, projection),
+    )
+    positions = _safe_section(
+        "Unable to load Positions",
+        lambda: _load_positions_section(db, window, today, rows),
+    )
+    order_lifecycles = _safe_section(
+        "Unable to load Orders & Fills",
+        lambda: _load_order_lifecycles_section(db, window, rows),
+    )
+    audit_timeline = _safe_section(
+        "Unable to load Audit Timeline",
+        lambda: _load_audit_timeline_section(db, window, projection),
+    )
     system_status = _compute_system_status(
         health=health,
         critical_events=critical_events,

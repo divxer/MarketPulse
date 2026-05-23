@@ -50,3 +50,20 @@ def test_paper_trading_has_no_control_plane_controls(client, monkeypatch):
     assert "Retry" not in response.text
     assert "Kill Switch Toggle" not in response.text
     assert 'type="submit"' not in response.text
+
+
+def test_paper_trading_renders_degraded_positions_section(client, monkeypatch):
+    _login(client, monkeypatch)
+
+    import marketpulse.trading.query_models as qm
+
+    def fail_positions(db, window, today, rows):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(qm, "_load_positions_section", fail_positions)
+    response = client.get("/lab/paper-trading")
+
+    assert response.status_code == 200
+    assert "Degraded" in response.text
+    assert "Unable to load Positions" in response.text
+    assert "Traceback" not in response.text

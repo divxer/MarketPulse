@@ -636,3 +636,22 @@ def test_order_lifecycle_joins_entry_exit_fills_and_latest_cow_audit(db_session)
     assert row.exit_price == Decimal("110.000000")
     assert row.realized_pnl == Decimal("30.000000")
     assert row.latest_audit_reason == "closed"
+
+
+def test_positions_loader_failure_degrades_only_positions(db_session, monkeypatch):
+    import marketpulse.trading.query_models as qm
+
+    def fail_positions(db, window, today, rows):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(qm, "_load_positions_section", fail_positions)
+
+    dashboard = qm.load_paper_trading_dashboard(db_session)
+
+    assert dashboard.system_status == "Degraded"
+    assert dashboard.positions.status == "error"
+    assert dashboard.positions.error_title == "Unable to load Positions"
+    assert dashboard.positions.degraded_reason == "RuntimeError"
+    assert dashboard.critical_events.status == "ok"
+    assert dashboard.order_lifecycles.status == "ok"
+    assert dashboard.audit_timeline.status == "ok"
