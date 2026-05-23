@@ -13,6 +13,10 @@ html, body {
   font-feature-settings: "cv11", "ss01", "tnum";
 }
 
+html {
+  scrollbar-gutter: stable;
+}
+
 .tnum { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
 .mono { font-family: var(--ns-font-mono); }
 .grotesk { font-family: var(--ns-font-headline); }
@@ -1190,6 +1194,8 @@ hr.mp-hr {
   display: grid;
   grid-template-columns: 1fr;
   gap: 10px;
+  min-width: 0;
+  width: 100%;
 }
 .mp-paper-tabs {
   display: inline-flex;
@@ -1213,8 +1219,13 @@ hr.mp-hr {
 .mp-paper-tab-panel.is-hidden {
   display: none;
 }
+.mp-paper-tab-panel {
+  min-width: 0;
+  width: 100%;
+}
 .mp-paper-table-wrap {
   overflow-x: auto;
+  max-width: 100%;
 }
 .mp-table--paper {
   min-width: 920px;
