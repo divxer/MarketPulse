@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 # Allow direct script execution from the repository root.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path[:0] = [str(Path(__file__).resolve().parent.parent)]
 
 from marketpulse.alerts.notifier import (  # noqa: E402
     NoopNotifier,

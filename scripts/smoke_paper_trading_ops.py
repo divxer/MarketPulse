@@ -10,7 +10,7 @@ from pathlib import Path
 import httpx
 
 # Allow direct script execution from the repository root.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path[:0] = [str(Path(__file__).resolve().parent.parent)]
 
 REQUIRED_MARKERS = (
     "Paper Trading · Operations",

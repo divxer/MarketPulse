@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 # Allow direct script execution from the repository root.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path[:0] = [str(Path(__file__).resolve().parent.parent)]
 from scripts._paper_ops_common import count_paper_tables, resolve_db_url, session_from_url
 
 from marketpulse.data.yfinance_client import YFinanceClient  # noqa: E402

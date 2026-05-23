@@ -214,3 +214,45 @@ def test_notification_smoke_send_uses_fixed_smoke_title(monkeypatch):
     assert sent
     assert sent[0][0].startswith("SMOKE TEST — Paper Trading Notifications")
     assert "SMOKE TEST" in sent[0][1]
+
+
+def test_health_cli_does_not_mutate_paper_tables(tmp_path):
+    from marketpulse.db.base import Base
+    from scripts._paper_ops_common import count_paper_tables
+    from scripts.check_paper_trading_health import main
+
+    db_path = tmp_path / "nomutate.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        before = count_paper_tables(session)
+
+    code = main([f"sqlite:///{db_path}", "--skip-price-smoke"])
+
+    with Session(engine) as session:
+        after = count_paper_tables(session)
+    assert code == 0
+    assert after == before
+
+
+def test_notification_smoke_default_does_not_mutate_paper_tables(
+    tmp_path,
+    monkeypatch,
+):
+    from marketpulse.db.base import Base
+    from scripts._paper_ops_common import count_paper_tables
+    from scripts.smoke_notifications import main
+
+    db_path = tmp_path / "notify_nomutate.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(engine)
+    monkeypatch.setenv("MARKETPULSE_DB_URL", f"sqlite:///{db_path}")
+    with Session(engine) as session:
+        before = count_paper_tables(session)
+
+    code = main([])
+
+    with Session(engine) as session:
+        after = count_paper_tables(session)
+    assert code == 0
+    assert after == before
