@@ -230,3 +230,148 @@ def test_section_error_has_degraded_priority(db_session, monkeypatch):
     assert dashboard.system_status == "Degraded"
     assert dashboard.positions.error_title == "Unable to load Positions"
     assert dashboard.positions.degraded_reason == "positions query failed"
+
+
+def test_price_unavailable_three_plus_is_attention_and_visible(db_session):
+    from marketpulse.trading.query_models import load_paper_trading_dashboard
+
+    start = datetime(2026, 5, 23, 21, 30, tzinfo=UTC)
+    _audit(
+        db_session,
+        event_type="TICK_COMPLETED",
+        ts=start,
+        context={"tick_date": "2026-05-23", "status": "completed"},
+    )
+    pu = _audit(
+        db_session,
+        event_type="PRICE_UNAVAILABLE",
+        ts=datetime(2026, 5, 23, 21, 31, tzinfo=UTC),
+        reason="no_price",
+        context={"position_id": 7, "ticker": "AAPL", "attempt_count": 3},
+        order_id=11,
+        strategy="momentum_breakout",
+    )
+    db_session.commit()
+
+    dashboard = load_paper_trading_dashboard(db_session)
+
+    assert dashboard.system_status == "Attention"
+    assert [event.audit_id for event in dashboard.critical_events.data] == [pu.id]
+    assert dashboard.critical_events.data[0].severity == "warning"
+    assert any(row.audit_id == pu.id for row in dashboard.audit_timeline.data.rows)
+
+
+def test_position_closed_recovery_collapses_prior_price_unavailable(db_session):
+    from marketpulse.trading.query_models import load_paper_trading_dashboard
+
+    start = datetime(2026, 5, 23, 21, 30, tzinfo=UTC)
+    _audit(
+        db_session,
+        event_type="TICK_COMPLETED",
+        ts=start,
+        context={"tick_date": "2026-05-23", "status": "completed"},
+    )
+    _audit(
+        db_session,
+        event_type="PRICE_UNAVAILABLE",
+        ts=datetime(2026, 5, 23, 21, 31, tzinfo=UTC),
+        reason="no_price",
+        context={"position_id": 7, "ticker": "AAPL", "attempt_count": 3},
+    )
+    recovered = _audit(
+        db_session,
+        event_type="POSITION_CLOSED",
+        ts=datetime(2026, 5, 23, 21, 32, tzinfo=UTC),
+        reason="closed",
+        context={"position_id": 7, "ticker": "AAPL", "retry_count": 3},
+    )
+    db_session.commit()
+
+    dashboard = load_paper_trading_dashboard(db_session)
+
+    assert dashboard.system_status == "Healthy"
+    assert [event.event_type for event in dashboard.critical_events.data] == [
+        "POSITION_CLOSED",
+    ]
+    assert dashboard.critical_events.data[0].severity == "recovery"
+    assert dashboard.critical_events.data[0].audit_id == recovered.id
+    assert [row.event_type for row in dashboard.audit_timeline.data.rows] == [
+        "PRICE_UNAVAILABLE",
+        "POSITION_CLOSED",
+    ]
+
+
+def test_position_closed_recovery_uses_historical_price_unavailable(db_session):
+    from marketpulse.trading.query_models import load_paper_trading_dashboard
+
+    _audit(
+        db_session,
+        event_type="PRICE_UNAVAILABLE",
+        ts=datetime(2026, 5, 22, 21, 31, tzinfo=UTC),
+        reason="no_price",
+        context={"position_id": 7, "ticker": "AAPL", "attempt_count": 3},
+    )
+    start = datetime(2026, 5, 23, 21, 30, tzinfo=UTC)
+    _audit(
+        db_session,
+        event_type="TICK_COMPLETED",
+        ts=start,
+        context={"tick_date": "2026-05-23", "status": "completed"},
+    )
+    recovered = _audit(
+        db_session,
+        event_type="POSITION_CLOSED",
+        ts=datetime(2026, 5, 23, 21, 32, tzinfo=UTC),
+        reason="closed",
+        context={"position_id": 7, "ticker": "AAPL"},
+    )
+    db_session.commit()
+
+    dashboard = load_paper_trading_dashboard(db_session)
+
+    assert [event.event_type for event in dashboard.critical_events.data] == [
+        "POSITION_CLOSED",
+    ]
+    assert dashboard.critical_events.data[0].severity == "recovery"
+    assert dashboard.critical_events.data[0].audit_id == recovered.id
+
+
+def test_audit_timeline_hides_routine_rows_but_loads_them_for_client_reveal(
+    db_session,
+):
+    from marketpulse.trading.query_models import load_paper_trading_dashboard
+
+    start = datetime(2026, 5, 23, 21, 30, tzinfo=UTC)
+    _audit(
+        db_session,
+        event_type="TICK_COMPLETED",
+        ts=start,
+        context={"tick_date": "2026-05-23", "status": "completed"},
+    )
+    placed = _audit(
+        db_session,
+        event_type="ORDER_PLACED",
+        ts=datetime(2026, 5, 23, 21, 31, tzinfo=UTC),
+        reason="",
+        context={"ticker": "AAPL"},
+    )
+    rejected = _audit(
+        db_session,
+        event_type="ORDER_REJECTED",
+        ts=datetime(2026, 5, 23, 21, 32, tzinfo=UTC),
+        reason="risk_gate_failed",
+        context={"failed_gates": ["daily_loss"], "ticker": "MSFT"},
+    )
+    db_session.commit()
+
+    dashboard = load_paper_trading_dashboard(db_session)
+    timeline = dashboard.audit_timeline.data
+
+    assert timeline.routine_hidden_count == 1
+    assert {row.audit_id for row in timeline.rows} == {placed.id, rejected.id}
+    assert [row.routine for row in timeline.rows if row.audit_id == placed.id] == [
+        True,
+    ]
+    assert [row.routine for row in timeline.rows if row.audit_id == rejected.id] == [
+        False,
+    ]

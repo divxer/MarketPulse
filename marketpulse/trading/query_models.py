@@ -299,13 +299,167 @@ def _compute_system_status(
     return "Healthy"
 
 
+def _context_int(context: dict, key: str) -> int | None:
+    value = context.get(key)
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+def _ticker_from(row: PaperAuditEvent) -> str | None:
+    value = (row.context or {}).get("ticker")
+    return str(value) if value is not None else None
+
+
+def _is_daily_loss_or_failed_gate(row: PaperAuditEvent) -> bool:
+    gates = (row.context or {}).get("failed_gates")
+    return isinstance(gates, list) and bool(gates)
+
+
+def _position_id(row: PaperAuditEvent) -> int | None:
+    return _context_int(row.context or {}, "position_id")
+
+
+@dataclass(frozen=True)
+class ProjectionContext:
+    rows: list[PaperAuditEvent]
+    recovered_positions: set[int]
+    suppressed_price_unavailable_positions: set[int]
+
+
+def _historical_price_unavailable_before_closes(
+    db: Session,
+    close_rows: list[PaperAuditEvent],
+) -> set[int]:
+    if not close_rows:
+        return set()
+    close_ts_by_position = {
+        pid: row.timestamp
+        for row in close_rows
+        if (pid := _position_id(row)) is not None
+    }
+    if not close_ts_by_position:
+        return set()
+
+    position_id_expr = func.json_extract(PaperAuditEvent.context, "$.position_id")
+    pu_rows = db.execute(
+        select(position_id_expr, PaperAuditEvent.timestamp)
+        .where(PaperAuditEvent.event_type == "PRICE_UNAVAILABLE")
+        .where(position_id_expr.in_(sorted(close_ts_by_position)))
+        .where(PaperAuditEvent.timestamp < max(close_ts_by_position.values())),
+    ).all()
+    return {
+        int(position_id)
+        for position_id, pu_timestamp in pu_rows
+        if position_id is not None
+        and pu_timestamp
+        < close_ts_by_position.get(
+            int(position_id),
+            datetime.min.replace(tzinfo=UTC),
+        )
+    }
+
+
+def _recovered_positions(
+    db: Session,
+    rows: list[PaperAuditEvent],
+) -> set[int]:
+    seen_pu: set[int] = set()
+    recovered: set[int] = set()
+    for row in rows:
+        pid = _position_id(row)
+        if pid is None:
+            continue
+        if row.event_type == "PRICE_UNAVAILABLE":
+            seen_pu.add(pid)
+        elif row.event_type == "POSITION_CLOSED" and pid in seen_pu:
+            recovered.add(pid)
+
+    historical_close_rows = [
+        row
+        for row in rows
+        if row.event_type == "POSITION_CLOSED"
+        and (pid := _position_id(row)) is not None
+        and pid not in recovered
+    ]
+    recovered.update(_historical_price_unavailable_before_closes(db, historical_close_rows))
+    return recovered
+
+
+def _build_projection_context(
+    db: Session,
+    rows: list[PaperAuditEvent],
+) -> ProjectionContext:
+    recovered = _recovered_positions(db, rows)
+    return ProjectionContext(
+        rows=rows,
+        recovered_positions=recovered,
+        suppressed_price_unavailable_positions=recovered,
+    )
+
+
+def _severity_for(
+    row: PaperAuditEvent,
+    recovered_positions: set[int],
+) -> Literal["critical", "warning", "recovery", "routine"]:
+    if row.event_type == "ENGINE_INVARIANT_ERROR":
+        return "critical"
+    if row.event_type in {
+        "SCHEDULER_GAP_DETECTED",
+        "KILL_SWITCH_FLIPPED",
+        "KILL_SWITCH_CYCLE_SKIPPED",
+        "TICK_REPROCESSED_COMPLETED",
+    }:
+        return "warning"
+    if row.event_type == "PRICE_UNAVAILABLE":
+        return "warning"
+    if row.event_type == "ORDER_REJECTED" and _is_daily_loss_or_failed_gate(row):
+        return "warning"
+    if row.event_type == "POSITION_CLOSED" and _position_id(row) in recovered_positions:
+        return "recovery"
+    return "routine"
+
+
 def _load_critical_events_section(
     db: Session,
     window: OperationalWindow,
-    rows: list[PaperAuditEvent],
+    projection: ProjectionContext,
 ) -> SectionResult[list[OperationalEvent]]:
-    del db, window, rows
-    return section_ok([], "No operational events in current cycle")
+    del db, window
+    events: list[OperationalEvent] = []
+    for row in projection.rows:
+        pid = _position_id(row)
+        severity = _severity_for(row, projection.recovered_positions)
+        if (
+            row.event_type == "PRICE_UNAVAILABLE"
+            and pid in projection.suppressed_price_unavailable_positions
+        ):
+            continue
+        if severity not in {"critical", "warning", "recovery"}:
+            continue
+        title = row.event_type.replace("_", " ").title()
+        if row.event_type == "PRICE_UNAVAILABLE":
+            attempt = (row.context or {}).get("attempt_count", "?")
+            title = f"Price unavailable ({attempt})"
+        if row.event_type == "POSITION_CLOSED" and severity == "recovery":
+            title = "Position recovered"
+        events.append(
+            OperationalEvent(
+                audit_id=row.id,
+                timestamp=row.timestamp,
+                event_type=row.event_type,
+                severity=severity,
+                title=title,
+                detail=row.reason or "",
+                ticker=_ticker_from(row),
+                strategy=row.strategy,
+            ),
+        )
+    return section_ok(events, "No operational events in current cycle")
 
 
 def _load_positions_section(
@@ -330,25 +484,33 @@ def _load_order_lifecycles_section(
 def _load_audit_timeline_section(
     db: Session,
     window: OperationalWindow,
-    rows: list[PaperAuditEvent],
+    projection: ProjectionContext,
 ) -> SectionResult[AuditTimeline]:
     del db, window
-    timeline_rows = [
-        AuditTimelineRow(
-            audit_id=row.id,
-            timestamp=row.timestamp,
-            event_type=row.event_type,
-            reason=row.reason or "",
-            order_id=row.order_id,
-            ticker=(row.context or {}).get("ticker"),
-            strategy=row.strategy,
-            severity="warning" if row.event_type != "TICK_COMPLETED" else "routine",
-            routine=row.event_type == "TICK_COMPLETED",
+    timeline_rows: list[AuditTimelineRow] = []
+    hidden_count = 0
+    for row in projection.rows:
+        if row.event_type == "TICK_COMPLETED":
+            continue
+        severity = _severity_for(row, projection.recovered_positions)
+        routine = severity == "routine"
+        if routine:
+            hidden_count += 1
+        timeline_rows.append(
+            AuditTimelineRow(
+                audit_id=row.id,
+                timestamp=row.timestamp,
+                event_type=row.event_type,
+                reason=row.reason or "",
+                order_id=row.order_id,
+                ticker=_ticker_from(row),
+                strategy=row.strategy,
+                severity=severity,
+                routine=routine,
+            ),
         )
-        for row in rows
-    ]
     return section_ok(
-        AuditTimeline(rows=timeline_rows, routine_hidden_count=0),
+        AuditTimeline(rows=timeline_rows, routine_hidden_count=hidden_count),
         "No operational events in current cycle",
     )
 
@@ -362,12 +524,13 @@ def load_paper_trading_dashboard(
     generated_at_label = f"Generated at {generated_at.astimezone(NY):%H:%M NY}"
     window = _load_operational_window(db)
     rows = _window_rows(db, window)
+    projection = _build_projection_context(db, rows)
     health = _load_health_summary(db, generated_at=generated_at, rows=rows)
     today = generated_at.astimezone(NY).date()
-    critical_events = _load_critical_events_section(db, window, rows)
+    critical_events = _load_critical_events_section(db, window, projection)
     positions = _load_positions_section(db, window, today, rows)
     order_lifecycles = _load_order_lifecycles_section(db, window, rows)
-    audit_timeline = _load_audit_timeline_section(db, window, rows)
+    audit_timeline = _load_audit_timeline_section(db, window, projection)
     system_status = _compute_system_status(
         health=health,
         critical_events=critical_events,
