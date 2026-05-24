@@ -20,6 +20,20 @@ def classify_broker_environment(port: int) -> BrokerEnvironment:
     return "unknown"
 
 
+def classify_broker_environment_from_account_id(account_id: str) -> BrokerEnvironment:
+    """Phase 7a-Flex classifier. See L21 in design spec.
+
+    Full implementation in T5 — this stub is so T2 tests can import.
+    """
+    import re
+
+    if re.fullmatch(r"DU\d+", account_id):
+        return "paper"
+    if re.fullmatch(r"U\d+", account_id):
+        return "live"
+    return "unknown"
+
+
 @dataclass(frozen=True)
 class BrokerAccount:
     account_id: str
