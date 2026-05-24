@@ -74,7 +74,7 @@ broker-truth snapshot path.
 ### Account safety
 
 - **7b-L25:** 7b requires explicit `--account` for every place/status/cancel command. No automatic account selection.
-- **7b-L26:** 7b refuses live or unknown account classification before calling any order-mutating API.
+- **7b-L26:** Account environment safety is governed by the L30 `DU*` regex check. Any account id failing L30 is refused before calling any order-mutating API, regardless of what other classification systems (e.g. 7a-Flex's `classify_broker_environment_from_account_id`) would return.
 - **7b-L27:** 7b does not honor `MP_IBKR_ALLOW_LIVE` for order placement. Live execution is out of scope regardless of configuration.
 - **7b-L28:** 7b validates that the connected TWS/Gateway `managedAccounts()` includes the requested paper account before place/cancel/status.
 - **7b-L29:** Connection failures, account mismatch, safety validation failures, and broker API failures leave local `broker_order_intent` / `broker_order_event` evidence whenever an intent can be created.
@@ -125,13 +125,15 @@ broker-truth snapshot path.
 - **7b-L64:** `broker_order_intent.status` is a finite DB-constrained enum. Terminal statuses are `completed`, `rejected`, and `failed`.
 - **7b-L65:** `broker_order_event.event_type` is protected by a DB CHECK constraint matching the fixed MVP taxonomy.
 - **7b-L66:** `local_idempotency_key` uniqueness is enforced at the DB layer for `(account_id, action, local_idempotency_key)`, in addition to service-level validation.
-- **7b-L67:** IBKR `orderRef` must stay short enough for broker compatibility. MVP format is `MP-7B-{intent_id}-{short_key}`, where `short_key` is 8-12 characters and the full value is at most 32 characters.
+- **7b-L67:** IBKR `orderRef` must stay short enough for broker compatibility. MVP format is `MP-7B-{intent_id}-{short_key}`, where `short_key` is exactly 8 characters and the full value is at most 32 characters. Reserves headroom for future prefix markers (e.g. environment indicator).
 - **7b-L68:** Adapter waits are bounded. `nextValidId` timeout defaults to 10 seconds; place/status/cancel broker observation timeout defaults to 15 seconds.
 - **7b-L69:** After `placeOrder` is called, 7b waits for at least one interpretable outcome: `staged_to_tws`, `submitted_to_broker`, `rejected`, `error`, or timeout. If `placeOrder` was called but no callback arrives before timeout, the local intent remains `sent`, command result status is `sent`, and an `error` event with `callback_timeout` is appended. If `placeOrder` was never called, the local intent is `failed`.
 - **7b-L70:** MVP idempotency semantics are strict for `place`. `status` and `cancel` child intents should use generated idempotency keys; operator-supplied keys for those actions are not encouraged in MVP.
 - **7b-L71:** `broker_order_event` records an event source: `adapter_callback`, `service_safety`, `cli_validation`, or `timeout`.
 - **7b-L72:** A `transmit=false` staged order path must not emit `filled`. Filled observations are valid only for transmitted broker-side orders.
 - **7b-L73:** Manual smoke documentation must state that `transmit=false` staged orders may not appear in 7a Flex snapshots because they were not submitted/executed at IBKR.
+- **7b-L74:** Adapter uses `threading.Event` (or equivalent bounded synchronization primitive) to coordinate main-thread requests with reader-thread `ibapi` callbacks. No `time.sleep` busy-poll patterns. Every wait must have a deadline.
+- **7b-L75:** `broker_order_intent.status` ∈ {`created`, `sent`, `completed`, `rejected`, `failed`}. The migration enforces this set via DB CHECK constraint, identical in style to L65's `broker_order_event.event_type` enforcement.
 
 ## Data Model
 
@@ -260,7 +262,8 @@ uv run python scripts/ibkr_paper_order.py place \
   --quantity 1 \
   --limit-price 1.00 \
   --transmit true \
-  --confirm-transmit PAPER
+  --confirm-transmit PAPER \
+  --db-url sqlite:///./marketpulse.db   # optional override
 ```
 
 The first acceptance smoke should use `transmit=false`, `quantity=1`, and a limit
@@ -298,6 +301,8 @@ marketpulse/broker/order_repository.py
 marketpulse/broker/order_service.py
 scripts/ibkr_paper_order.py
 ```
+
+**Naming note:** `marketpulse/broker/types.py` (from Phase 7a-Flex) holds **broker-truth snapshot DTOs** (positions, cash, executions read from Flex). The new `marketpulse/broker/order_types.py` holds **order-command DTOs** (place/status/cancel intents and events). Both files must carry module docstrings that explicitly state this division. Future readers should not need to grep imports to know which one to use.
 
 The adapter is callback-driven internally, but callback state does not escape the
 adapter. It emits immutable MarketPulse DTOs that the service persists as events.
@@ -422,6 +427,7 @@ Automated tests use fake clients only:
 - architecture guard: only `ibkr_order_client.py` imports `ibapi`
 - architecture guard: scheduler, `daily_cycle`, web routes, and strategy allocation cannot import the order service
 - architecture guard: forbidden APIs absent outside the approved adapter surface: modify/replace/global cancel/options exercise
+- `order_types.py` and `types.py` carry top-of-file docstrings explicitly distinguishing "broker truth DTOs" vs "order command DTOs"; an architecture test verifies both docstrings exist and reference each other.
 
 Manual acceptance smoke:
 

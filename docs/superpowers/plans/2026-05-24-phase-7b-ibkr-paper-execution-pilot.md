@@ -53,6 +53,17 @@ Do not modify:
 - Create: `marketpulse/broker/order_client.py`
 - Test: `tests/broker/test_order_types.py`
 
+- [ ] **Step 0 (Pre-flight): Verify `ibapi` installs cleanly**
+
+Phase 7a-Flex removed `ibapi` from the dep graph. Before adding it back as a hard dependency, sanity-check that the package still resolves on the local platform:
+
+```bash
+uv add ibapi
+uv run python -c "import ibapi; print(ibapi.__version__)"
+```
+
+Expected: prints a version (e.g. `9.81.1.post1`). If `uv add` fails or import errors, escalate before continuing — `ibapi` is not a normal PyPI package and platform availability can be flaky. Do NOT commit `uv add ibapi` yet; the actual dependency commit happens in Step 1 below as part of the test-driven change.
+
 - [ ] **Step 1: Write failing DTO/settings tests**
 
 Create `tests/broker/test_order_types.py`:
@@ -2020,7 +2031,30 @@ def test_status_and_cancel_require_intent_id():
 def test_cancel_requires_confirm_cancel():
     with pytest.raises(SystemExit):
         cli.build_parser().parse_args(["cancel", "--account", "DU123456", "--intent-id", "1"])
+
+
+def test_db_url_flag_is_honored():
+    args = cli.build_parser().parse_args(
+        [
+            "--db-url",
+            "sqlite:///./override.db",
+            "place",
+            "--account",
+            "DU123456",
+            "--symbol",
+            "AAPL",
+            "--side",
+            "BUY",
+            "--quantity",
+            "1",
+            "--limit-price",
+            "1.00",
+        ]
+    )
+    assert args.db_url == "sqlite:///./override.db"
 ```
+
+The CLI's database-engine construction must use `args.db_url or settings.database_url` (see `_session` helper in Step 3). This mirrors `scripts/sync_ibkr_readonly.py` (7a CLI) for operator parity.
 
 - [ ] **Step 2: Run tests to verify failure**
 
@@ -2219,15 +2253,17 @@ git commit -m "feat(7b): add manual IBKR paper order CLI"
 
 ---
 
-## Task 7: IBKR `ibapi` Adapter
+## Task 7a: IBKR `ibapi` Adapter — Pure Helpers
+
+Split rationale: Task 7 used to be one ~435-line task covering both pure mapping functions and the live `IbkrOrderClient` class with threading. Splitting reduces single-point risk for subagent dispatch. T7a is the no-IBKR-state, no-threading half: tests are deterministic pure unit tests with no fake client and no `ibapi` runtime behavior.
 
 **Files:**
-- Create: `marketpulse/broker/ibkr_order_client.py`
-- Test: `tests/broker/test_ibkr_order_client.py`
+- Create: `marketpulse/broker/ibkr_order_client.py` (pure helpers only at this stage; class skeleton added in T7b)
+- Test: `tests/broker/test_ibkr_order_client.py` (helper tests only at this stage)
 
-- [ ] **Step 1: Write adapter tests with fake app hooks**
+- [ ] **Step 1: Write pure-helper tests**
 
-Create `tests/broker/test_ibkr_order_client.py`:
+Create `tests/broker/test_ibkr_order_client.py` with only the pure-helper test cases:
 
 ```python
 from __future__ import annotations
@@ -2300,7 +2336,7 @@ def test_map_filled_status_to_observational_filled_event():
     assert obs.broker_status == "Filled"
 ```
 
-- [ ] **Step 2: Run adapter tests to verify failure**
+- [ ] **Step 2: Run helper tests to verify failure**
 
 Run:
 
@@ -2310,9 +2346,9 @@ uv run pytest tests/broker/test_ibkr_order_client.py -q
 
 Expected: fail because `ibkr_order_client.py` does not exist.
 
-- [ ] **Step 3: Implement adapter helpers and client skeleton**
+- [ ] **Step 3: Implement pure helpers**
 
-Create `marketpulse/broker/ibkr_order_client.py`:
+Create `marketpulse/broker/ibkr_order_client.py` with module docstring, constants, and only the three pure helpers (`_decimal_or_none`, `_sanitize_raw`, `_map_order_status_event`). The `_IbkrOrderApp` callback class and the `IbkrOrderClient` class with threading are added in T7b — do not include them in this task. Use the corresponding chunk from the full file shown below (top of file through end of `_map_order_status_event`):
 
 ```python
 """IBKR TWS/Gateway order adapter for Phase 7b.
@@ -2410,8 +2446,65 @@ def _map_order_status_event(
         avg_fill_price=avg_fill_price,
         raw=_sanitize_raw(raw),
     )
+```
 
+T7a ends here. The `_IbkrOrderApp` callback class and `IbkrOrderClient` orchestration class shown below are added in T7b. The `ibapi.*` imports listed at the top of the file may either be added now (file imports them but no module-level use yet) or deferred to T7b — pick whichever the test suite tolerates; both are acceptable.
 
+- [ ] **Step 4: Run helper tests**
+
+Run:
+
+```bash
+uv run pytest tests/broker/test_ibkr_order_client.py -q
+```
+
+Expected: helper tests pass. If `ibapi` import fails, re-run `uv lock` and confirm `ibapi` is in `uv.lock`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add marketpulse/broker/ibkr_order_client.py tests/broker/test_ibkr_order_client.py
+git commit -m "feat(7b): IbkrOrderClient pure helpers + DTO mapping"
+```
+
+---
+
+## Task 7b: IBKR `ibapi` Adapter — Client Class
+
+This task adds the live `IbkrOrderClient` class (and its `_IbkrOrderApp` `EWrapper`/`EClient` subclass) on top of the pure helpers landed in T7a. Per spec L74, main-thread/reader-thread coordination uses `threading.Event` (or equivalent bounded primitive) with deadlines on every wait — no `time.sleep` busy-polls.
+
+**Files:**
+- Modify: `marketpulse/broker/ibkr_order_client.py` (add `_IbkrOrderApp` + `IbkrOrderClient` class)
+- Modify: `tests/broker/test_ibkr_order_client.py` (add class-level tests using a fake/mock `ibapi` boundary)
+
+- [ ] **Step 1: Add class-level tests with fake `_IbkrOrderApp`**
+
+Extend `tests/broker/test_ibkr_order_client.py` with tests that exercise `IbkrOrderClient` against a stand-in for `_IbkrOrderApp` (e.g. monkeypatch `_IbkrOrderApp` to a fake exposing `connect`, `isConnected`, `placeOrder`, `cancelOrder`, `managed_accounts`, `next_valid_id`, and an `observations` queue). Cover:
+
+- `__enter__` raises `BrokerOrderConnectionError` after `connect_timeout_seconds` when `isConnected()` stays false.
+- `_validate_account` raises when `managed_accounts` does not include the requested account.
+- `place_lmt_order` returns a `PlaceOrderResult` with `staged_to_tws` for `transmit=False` and `submitted_to_broker` for `transmit=True`.
+- `place_lmt_order` appends an `error` observation with `callback_timeout` when no usable callback arrives before `observation_timeout_seconds`.
+- `cancel_order` returns `staged_cancelled` when `staged=True` and `broker_cancel_requested` otherwise.
+- `fetch_order_status` returns an `error` observation when no current-session state is visible.
+
+Use `threading.Event`-based fakes; do not rely on real `time.sleep` for synchronization.
+
+- [ ] **Step 2: Run class tests to verify failure**
+
+Run:
+
+```bash
+uv run pytest tests/broker/test_ibkr_order_client.py -q
+```
+
+Expected: new class-level tests fail because `_IbkrOrderApp` / `IbkrOrderClient` do not exist yet.
+
+- [ ] **Step 3: Implement `_IbkrOrderApp` and `IbkrOrderClient`**
+
+Append to `marketpulse/broker/ibkr_order_client.py`. Make sure the `ibapi.*` imports (`EClient`, `Contract`, `Order`, `EWrapper`) and `queue`, `threading`, `time` are present at the top of the file. The class machinery uses bounded `threading.Event`-based waits per spec L74 — every wait has a deadline:
+
+```python
 class _IbkrOrderApp(EWrapper, EClient):
     def __init__(self) -> None:
         EClient.__init__(self, self)
@@ -2635,7 +2728,7 @@ class IbkrOrderClient:
         return CancelOrderResult(observations=observations)
 ```
 
-- [ ] **Step 4: Run adapter tests**
+- [ ] **Step 4: Run class tests**
 
 Run:
 
@@ -2643,18 +2736,18 @@ Run:
 uv run pytest tests/broker/test_ibkr_order_client.py -q
 ```
 
-Expected: all adapter helper tests pass. If `ibapi` import fails, re-run `uv lock` and confirm `ibapi` is in `uv.lock`.
+Expected: all adapter tests (helpers from T7a + class tests added in this task) pass. If `ibapi` import fails, re-run `uv lock` and confirm `ibapi` is in `uv.lock`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add marketpulse/broker/ibkr_order_client.py tests/broker/test_ibkr_order_client.py
-git commit -m "feat(7b): add isolated ibapi order adapter"
+git commit -m "feat(7b): IbkrOrderClient connection + place/status/cancel with bounded threading"
 ```
 
 ---
 
-## Task 8: Architecture Guards
+## Task 9: Architecture Guards
 
 **Files:**
 - Create: `tests/architecture/test_phase7b_order_boundary.py`
@@ -2786,7 +2879,7 @@ git commit -m "test(7b): guard broker order boundaries"
 
 ---
 
-## Task 9: Runbook and Manual Smoke Notes
+## Task 10: Runbook and Manual Smoke Notes
 
 **Files:**
 - Create: `docs/operations/ibkr-paper-order-pilot-runbook.md`
@@ -2908,7 +3001,7 @@ git commit -m "docs(7b): add IBKR paper order pilot runbook"
 
 ---
 
-## Task 10: Full Verification and Cleanups
+## Task 11: Full Verification and Cleanups
 
 **Files:**
 - All 7b files
