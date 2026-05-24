@@ -46,6 +46,15 @@ If using Portainer, **escape `$` as `$$`** in any field — docker-compose
 variable substitution will silently truncate otherwise. (Tokens are
 hexadecimal so usually unaffected; this is a generic warning.)
 
+## Security considerations
+
+**Token-in-URL caveat:** IBKR's Flex Web Service accepts the token as a URL
+query parameter (`?t=<token>`). Any HTTP proxy or access log along the
+request path will record it. Avoid running the sync behind a logging HTTP
+proxy, or ensure such access logs are scrubbed / not retained. Keep the
+token in a password manager and rotate it via IBKR Portal if you suspect
+exposure.
+
 ## Manual smoke
 
 ```bash

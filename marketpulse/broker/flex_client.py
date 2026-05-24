@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Final
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -29,6 +30,10 @@ from marketpulse.logging import get_logger
 log = get_logger(__name__)
 
 DEFAULT_BASE_URL: Final = "https://gdcdyn.interactivebrokers.com/Universal/servlet"
+
+# IBKR XML error codes that indicate token/query auth failures. Shared by
+# SendRequest and GetStatement.
+_AUTH_ERROR_CODES: Final = frozenset({"1003", "1011", "1012"})
 
 
 class FlexError(Exception):
@@ -117,6 +122,17 @@ class FlexClient:
             timeout=httpx.Timeout(connect=5, read=30, write=10, pool=5),
         )
 
+    # ---- lifecycle ----
+
+    def close(self) -> None:
+        self._client.close()
+
+    def __enter__(self) -> FlexClient:
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
     # ---- BrokerReadClient ----
 
     def fetch_snapshot(self) -> BrokerSnapshot:
@@ -131,14 +147,15 @@ class FlexClient:
     # ---- internals ----
 
     def _send_request(self) -> str:
+        # Note: IBKR's documented "generation in progress" retry semantics
+        # for SendRequest are not handled here — low frequency in practice;
+        # callers retry the whole sync run if SendRequest itself flakes.
         url = f"{self._base_url}/FlexStatementService.SendRequest"
         params = {"t": self._token, "q": str(self._query_id), "v": "3"}
         try:
             resp = self._client.get(url, params=params)
         except httpx.HTTPError as exc:
             raise FlexHttpError(f"{type(exc).__name__}: {exc}") from exc
-        if resp.status_code >= 500:
-            raise FlexHttpError(f"SendRequest returned HTTP {resp.status_code}")
         if resp.status_code >= 400:
             raise FlexHttpError(f"SendRequest returned HTTP {resp.status_code}")
 
@@ -155,7 +172,7 @@ class FlexClient:
         if status == "Success" and reference:
             self._reference_code = reference
             return reference
-        if error_code in {"1003", "1011", "1012"}:
+        if error_code in _AUTH_ERROR_CODES:
             raise FlexAuthError(f"{error_code}: {error_message}")
         raise FlexSendRequestError(f"{error_code or 'unknown'}: {error_message or status}")
 
@@ -166,8 +183,6 @@ class FlexClient:
             resp = self._client.get(url, params=params)
         except httpx.HTTPError as exc:
             raise FlexHttpError(f"{type(exc).__name__}: {exc}") from exc
-        if resp.status_code >= 500:
-            raise FlexHttpError(f"GetStatement returned HTTP {resp.status_code}")
         if resp.status_code >= 400:
             raise FlexHttpError(f"GetStatement returned HTTP {resp.status_code}")
 
@@ -184,7 +199,7 @@ class FlexClient:
             error_message = (root.findtext("ErrorMessage") or "").strip()
             if status == "Warn":
                 return _PollResult(ready=False, xml=None, reference_code=reference_code)
-            if error_code in {"1003", "1011", "1012"}:
+            if error_code in _AUTH_ERROR_CODES:
                 raise FlexAuthError(f"{error_code}: {error_message}")
             raise FlexStatementError(f"{error_code or 'unknown'}: {error_message or status}")
         return _PollResult(ready=True, xml=body, reference_code=reference_code)
@@ -248,7 +263,12 @@ class FlexClient:
         )
 
     def _select_statement(self, statements: list[ET.Element]) -> ET.Element:
-        """Filter to the configured account_id when set; otherwise return first."""
+        """Filter to the configured account_id when set; otherwise return first.
+
+        When no account_id filter is set and multiple statements are present,
+        we log a WARNING and return the first one — preserves prior behavior,
+        but surfaces the ambiguity in logs for operators.
+        """
         if self._account_id:
             for st in statements:
                 if st.get("accountId") == self._account_id:
@@ -257,23 +277,30 @@ class FlexClient:
                 f"Configured account {self._account_id} not in report; "
                 f"available: {[s.get('accountId') for s in statements]}"
             )
+        if len(statements) > 1:
+            log.warning(
+                "flex_multi_account_no_filter",
+                available=[s.get("accountId") for s in statements],
+                selected=statements[0].get("accountId"),
+            )
         return statements[0]
 
     @staticmethod
     def _parse_when_generated(value: str | None) -> datetime:
         """Parse 'YYYYMMDD;HHMMSS' format (NY local) into UTC datetime.
 
-        Falls back to current UTC if value missing or unparseable.
+        Falls back to current UTC if value missing or unparseable; emits a
+        WARNING log on fallback so operators see drift in captured_at.
         """
         if not value:
+            log.warning("flex_when_generated_parse_failed", value=value)
             return datetime.now(UTC)
         try:
-            from zoneinfo import ZoneInfo
-
             date_part, time_part = value.split(";")
             local = datetime.strptime(f"{date_part}{time_part}", "%Y%m%d%H%M%S")
             return local.replace(tzinfo=ZoneInfo("America/New_York")).astimezone(UTC)
         except (ValueError, IndexError):
+            log.warning("flex_when_generated_parse_failed", value=value)
             return datetime.now(UTC)
 
     @staticmethod

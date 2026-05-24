@@ -39,3 +39,30 @@ def test_no_production_module_imports_ibapi():
             ):
                 offenders.append(f"{path}: from {node.module} import ...")
     assert not offenders, "ibapi must not be imported in production code:\n" + "\n".join(offenders)
+
+
+def test_no_gateway_references_in_compose_files():
+    """Phase 7a-Flex removed the ib-gateway sidecar — compose files must
+    not resurrect any Gateway service / image / env-var references."""
+    import re
+
+    repo_root = Path(__file__).resolve().parents[2]
+    compose_files = [
+        repo_root / "docker-compose.cn.yml",
+        repo_root / "docker-compose.prod.yml",
+    ]
+    pattern = re.compile(
+        r"gnzsnz/ib-gateway|ib-gateway:|TWS_USERID|TWS_PASSWORD|"
+        r"IBKR_HOST|IBKR_PORT|IBKR_CLIENT_ID",
+        re.IGNORECASE,
+    )
+    offenders: list[str] = []
+    for path in compose_files:
+        if not path.exists():
+            continue
+        for lineno, line in enumerate(path.read_text().splitlines(), 1):
+            if pattern.search(line):
+                offenders.append(f"{path.name}:{lineno}: {line.strip()}")
+    assert not offenders, (
+        "Gateway references must not appear in compose files:\n" + "\n".join(offenders)
+    )

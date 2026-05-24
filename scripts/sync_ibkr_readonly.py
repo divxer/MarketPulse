@@ -70,16 +70,15 @@ def _config(args: argparse.Namespace) -> tuple[FlexSyncConfig, str]:
 
 def _run(args: argparse.Namespace) -> SyncResult:
     config, db_url = _config(args)
-    client = FlexClient(
+    engine = create_engine(db_url)
+    with FlexClient(
         token=config.token,
         query_id=config.query_id,
         account_id=config.account_id,
         base_url=config.base_url,
         poll_interval_seconds=config.poll_interval_seconds,
         max_wait_seconds=config.max_wait_seconds,
-    )
-    engine = create_engine(db_url)
-    with Session(engine) as session:
+    ) as client, Session(engine) as session:
         result = run_readonly_sync(session, client=client, config=config, now=datetime.now(UTC))
         session.commit()
         return result

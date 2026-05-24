@@ -218,6 +218,23 @@ class TestParser:
         # First statement wins; precise semantics documented in parser docstring
         assert snap.account_id.startswith("DU")
 
+    def test_multi_account_no_filter_logs_warning(self, capsys):
+        # structlog default config writes to stdout via PrintLogger; capsys
+        # captures it. We assert the WARNING-level event key is emitted.
+        snap = self._parse("multi_account.xml")
+        out = capsys.readouterr().out
+        assert snap.account_id.startswith("DU")
+        assert "flex_multi_account_no_filter" in out
+
+    def test_malformed_when_generated_logs_warning(self, capsys):
+        from marketpulse.broker.flex_client import FlexClient
+
+        result = FlexClient._parse_when_generated("not-a-date")
+        out = capsys.readouterr().out
+        # Fallback returned a tz-aware UTC datetime
+        assert result.tzinfo is not None
+        assert "flex_when_generated_parse_failed" in out
+
 
 class TestFetchSnapshotIntegration:
     def test_full_path_send_then_poll_then_parse(self):
@@ -238,6 +255,25 @@ class TestFetchSnapshotIntegration:
         snap = client.fetch_snapshot()
         assert snap.account_id == "DU1234567"
         assert client.reference_code == "1234567890"
+
+    def test_flex_client_context_manager_closes(self):
+        transport = _mock_transport(
+            [
+                httpx.Response(200, content=_fixture("send_request_success.xml")),
+                httpx.Response(200, content=_fixture("full_paper.xml")),
+            ]
+        )
+        with FlexClient(
+            token="t",
+            query_id=1,
+            transport=transport,
+            poll_interval_seconds=0,
+            max_wait_seconds=10,
+        ) as client:
+            snap = client.fetch_snapshot()
+            assert snap.account_id == "DU1234567"
+        # After exit, underlying httpx.Client is closed
+        assert client._client.is_closed
 
     def test_reference_code_preserved_on_timeout(self):
         in_progress = _fixture("err_generation_in_progress.xml")
