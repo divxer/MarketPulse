@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FlexQueryResponse queryName="MarketPulse_7a" type="AF">
+  <FlexStatements count="2">
+    <FlexStatement accountId="DU1234567" fromDate="20241219" toDate="20241220" period="LastBusinessDay" whenGenerated="20241220;113000">
+      <AccountInformation accountId="DU1234567" accountType="DEMO" customerType="INDIVIDUAL" baseCurrency="USD" netLiquidationValue="100000.00" buyingPower="400000.00" maintenanceMarginReq="0.00" excessLiquidity="100000.00"/>
+      <CashReport>
+        <CashReportCurrency accountId="DU1234567" currency="USD" endingCash="50000.00" endingSettledCash="50000.00" accruedInterest="0.00"/>
+      </CashReport>
+    </FlexStatement>
+    <FlexStatement accountId="DU7654321" fromDate="20241219" toDate="20241220" period="LastBusinessDay" whenGenerated="20241220;113000">
+      <AccountInformation accountId="DU7654321" accountType="DEMO" customerType="INDIVIDUAL" baseCurrency="USD" netLiquidationValue="200000.00" buyingPower="800000.00" maintenanceMarginReq="0.00" excessLiquidity="200000.00"/>
+      <CashReport>
+        <CashReportCurrency accountId="DU7654321" currency="USD" endingCash="80000.00" endingSettledCash="80000.00" accruedInterest="0.00"/>
+      </CashReport>
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>

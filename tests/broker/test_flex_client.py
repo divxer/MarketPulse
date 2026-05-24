@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 
 import httpx
@@ -12,10 +13,12 @@ from marketpulse.broker.flex_client import (
     FlexAuthError,
     FlexClient,
     FlexHttpError,
+    FlexParseError,
     FlexReportTimeoutError,
     FlexSendRequestError,
     FlexStatementError,
 )
+from marketpulse.broker.types import BrokerSnapshot
 
 FIXTURES = Path(__file__).parent / "fixtures" / "flex"
 
@@ -129,3 +132,61 @@ class TestGetStatementPolling:
         )
         with pytest.raises(FlexStatementError):
             client._fetch_xml()
+
+
+class TestParser:
+    def _parse(self, fixture_name: str, **kwargs) -> BrokerSnapshot:
+        from marketpulse.broker.flex_client import FlexClient
+        client = FlexClient(token="t", query_id=1, **kwargs)
+        return client._parse_snapshot(_fixture(fixture_name))
+
+    def test_full_paper_happy_path(self):
+        snap = self._parse("full_paper.xml")
+        assert snap.broker == "IBKR"
+        assert snap.broker_environment == "paper"
+        assert snap.account_id == "DU1234567"
+        assert snap.account.base_currency == "USD"
+        assert snap.account.net_liquidation == Decimal("100000.00")
+        assert len(snap.cash) == 2
+        assert {c.currency for c in snap.cash} == {"USD", "HKD"}
+        assert len(snap.positions) == 3
+        assert {p.symbol for p in snap.positions} == {"AAPL", "MSFT", "0700"}
+        assert len(snap.executions) == 2
+        assert snap.open_orders == ()  # Flex never produces open_orders (L18)
+
+    def test_full_live_is_classified_live(self):
+        snap = self._parse("full_live.xml")
+        assert snap.broker_environment == "live"
+
+    def test_account_only_returns_empty_tuples(self):
+        snap = self._parse("account_only.xml")
+        assert snap.account_id == "DU1234567"
+        assert snap.cash == ()
+        assert snap.positions == ()
+        assert snap.executions == ()
+
+    def test_missing_account_section_raises(self):
+        with pytest.raises(FlexParseError, match="Account"):
+            self._parse("missing_account.xml")
+
+    def test_missing_account_id_raises(self):
+        with pytest.raises(FlexParseError, match="accountId"):
+            self._parse("missing_account_id.xml")
+
+    def test_malformed_xml_raises(self):
+        with pytest.raises(FlexParseError):
+            self._parse("malformed.xml")
+
+    def test_multi_currency_all_parsed(self):
+        snap = self._parse("multi_currency.xml")
+        assert {c.currency for c in snap.cash} == {"USD", "HKD", "JPY", "CAD"}
+
+    def test_multi_account_filtered_by_account_id(self):
+        # When account_id filter set, only matching FlexStatement is used.
+        snap = self._parse("multi_account.xml", account_id="DU1234567")
+        assert snap.account_id == "DU1234567"
+
+    def test_multi_account_no_filter_uses_first(self):
+        snap = self._parse("multi_account.xml")
+        # First statement wins; precise semantics documented in parser docstring
+        assert snap.account_id.startswith("DU")

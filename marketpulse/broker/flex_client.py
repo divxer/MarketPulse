@@ -10,13 +10,19 @@ from __future__ import annotations
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from typing import Final
 
 import httpx
 
 from marketpulse.broker.types import (
+    BrokerAccount,
+    BrokerCash,
+    BrokerExecution,
+    BrokerPosition,
     BrokerSnapshot,
-    classify_broker_environment_from_account_id,  # noqa: F401 — used by T2 parser
+    classify_broker_environment_from_account_id,
 )
 from marketpulse.logging import get_logger
 
@@ -198,6 +204,141 @@ class FlexClient:
             if self._poll_interval > 0:
                 time.sleep(self._poll_interval)
 
-    def _parse_snapshot(self, xml: bytes) -> BrokerSnapshot:  # pragma: no cover
-        # Implemented in Task 2.
-        raise NotImplementedError
+    def _parse_snapshot(self, xml: bytes) -> BrokerSnapshot:
+        """Parse a Flex Activity report into a BrokerSnapshot.
+
+        Per L21: AccountInformation is REQUIRED; CashReport, OpenPositions
+        and Trades are OPTIONAL (absence yields empty tuples, not errors).
+        Per L18: open_orders is always (); Activity Flex does not produce
+        open orders.
+
+        When ``account_id`` is set on the client, the matching FlexStatement
+        is selected; otherwise the first FlexStatement is used.
+        """
+        try:
+            root = ET.fromstring(xml)
+        except ET.ParseError as exc:
+            raise FlexParseError(f"Flex XML not parseable: {exc}") from exc
+
+        statements = root.findall(".//FlexStatement")
+        if not statements:
+            raise FlexParseError("FlexStatement element not found")
+
+        statement = self._select_statement(statements)
+        account_el = statement.find("AccountInformation")
+        if account_el is None:
+            raise FlexParseError("AccountInformation section is required (L21)")
+        account_id = (account_el.get("accountId") or "").strip()
+        if not account_id:
+            raise FlexParseError("AccountInformation/accountId must be non-empty")
+
+        captured_at = self._parse_when_generated(statement.get("whenGenerated"))
+        environment = classify_broker_environment_from_account_id(account_id)
+
+        return BrokerSnapshot(
+            broker="IBKR",
+            broker_environment=environment,
+            account_id=account_id,
+            captured_at=captured_at,
+            account=self._parse_account(account_el, account_id),
+            cash=self._parse_cash(statement, account_id),
+            positions=self._parse_positions(statement, account_id),
+            open_orders=(),  # L18: Flex Activity never produces open orders
+            executions=self._parse_executions(statement, account_id),
+        )
+
+    def _select_statement(self, statements: list[ET.Element]) -> ET.Element:
+        """Filter to the configured account_id when set; otherwise return first."""
+        if self._account_id:
+            for st in statements:
+                if st.get("accountId") == self._account_id:
+                    return st
+            raise FlexAccountMismatchError(
+                f"Configured account {self._account_id} not in report; "
+                f"available: {[s.get('accountId') for s in statements]}"
+            )
+        return statements[0]
+
+    @staticmethod
+    def _parse_when_generated(value: str | None) -> datetime:
+        """Parse 'YYYYMMDD;HHMMSS' format (NY local) into UTC datetime.
+
+        Falls back to current UTC if value missing or unparseable.
+        """
+        if not value:
+            return datetime.now(UTC)
+        try:
+            from zoneinfo import ZoneInfo
+            date_part, time_part = value.split(";")
+            local = datetime.strptime(f"{date_part}{time_part}", "%Y%m%d%H%M%S")
+            return local.replace(tzinfo=ZoneInfo("America/New_York")).astimezone(UTC)
+        except (ValueError, IndexError):
+            return datetime.now(UTC)
+
+    @staticmethod
+    def _decimal(value: str | None) -> Decimal | None:
+        if value is None or value == "":
+            return None
+        try:
+            return Decimal(value)
+        except InvalidOperation:
+            return None
+
+    def _parse_account(self, el: ET.Element, account_id: str) -> BrokerAccount:
+        return BrokerAccount(
+            account_id=account_id,
+            account_type=el.get("accountType"),
+            base_currency=el.get("baseCurrency"),
+            net_liquidation=self._decimal(el.get("netLiquidationValue")),
+            buying_power=self._decimal(el.get("buyingPower")),
+            maintenance_margin=self._decimal(el.get("maintenanceMarginReq")),
+            excess_liquidity=self._decimal(el.get("excessLiquidity")),
+        )
+
+    def _parse_cash(self, statement: ET.Element, account_id: str) -> tuple[BrokerCash, ...]:
+        rows: list[BrokerCash] = []
+        for el in statement.findall(".//CashReportCurrency"):
+            rows.append(BrokerCash(
+                account_id=account_id,
+                currency=el.get("currency") or "",
+                cash_balance=self._decimal(el.get("endingCash")),
+                settled_cash=self._decimal(el.get("endingSettledCash")),
+                accrued_interest=self._decimal(el.get("accruedInterest")),
+            ))
+        return tuple(rows)
+
+    def _parse_positions(
+        self, statement: ET.Element, account_id: str,
+    ) -> tuple[BrokerPosition, ...]:
+        rows: list[BrokerPosition] = []
+        for el in statement.findall(".//OpenPosition"):
+            qty = self._decimal(el.get("position")) or Decimal(0)
+            rows.append(BrokerPosition(
+                account_id=account_id,
+                symbol=el.get("symbol") or "",
+                asset_class=el.get("assetCategory"),
+                quantity=qty,
+                avg_cost=self._decimal(el.get("costBasisPrice")),
+                market_price=self._decimal(el.get("markPrice")),
+                market_value=self._decimal(el.get("positionValue")),
+                unrealized_pnl=self._decimal(el.get("fifoPnlUnrealized")),
+                realized_pnl=self._decimal(el.get("realizedPnl")),
+            ))
+        return tuple(rows)
+
+    def _parse_executions(
+        self, statement: ET.Element, account_id: str,
+    ) -> tuple[BrokerExecution, ...]:
+        rows: list[BrokerExecution] = []
+        for el in statement.findall(".//Trade"):
+            rows.append(BrokerExecution(
+                account_id=account_id,
+                broker_exec_id=el.get("tradeID") or "",
+                broker_order_id=el.get("ibOrderID"),
+                symbol=el.get("symbol"),
+                side=(el.get("buySell") or "").upper() or None,
+                quantity=self._decimal(el.get("quantity")),
+                price=self._decimal(el.get("tradePrice")),
+                executed_at=self._parse_when_generated(el.get("dateTime")),
+            ))
+        return tuple(rows)
