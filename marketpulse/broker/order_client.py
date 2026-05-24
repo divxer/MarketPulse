@@ -12,9 +12,9 @@ from typing import Protocol
 
 from marketpulse.broker.order_types import (
     BrokerOrderRequest,
-    CancelOrderResult,
-    OrderStatusResult,
+    CancelResult,
     PlaceResult,
+    StatusResult,
 )
 
 
@@ -28,8 +28,8 @@ class BrokerOrderClient(Protocol):
 
     def place_lmt_order(
         self,
-        *,
         request: BrokerOrderRequest,
+        *,
         intent_id: int,
         order_ref: str,
     ) -> PlaceResult: ...
@@ -37,14 +37,14 @@ class BrokerOrderClient(Protocol):
     def fetch_order_status(
         self,
         *,
-        account_id: str,
         broker_order_id: str,
-    ) -> OrderStatusResult: ...
+        account_id: str,
+    ) -> StatusResult: ...
 
     def cancel_order(
         self,
         *,
-        account_id: str,
         broker_order_id: str,
-        staged: bool,
-    ) -> CancelOrderResult: ...
+        account_id: str,
+        was_transmitted: bool,
+    ) -> CancelResult: ...

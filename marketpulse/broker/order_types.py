@@ -198,13 +198,39 @@ PlaceOrderResult = PlaceResult
 
 
 @dataclass(frozen=True)
-class OrderStatusResult:
+class StatusResult:
+    """Adapter-returned summary of a ``reqOpenOrders``/``reqAllOpenOrders`` call.
+
+    ``success`` records whether the adapter observed the order state at all in
+    the current TWS session (L62). ``managed_accounts`` is captured so the
+    service can cross-check the account if needed; the bulk of the information
+    flows through ``observations``, which are appended verbatim to
+    ``broker_order_event``.
+    """
+
+    success: bool
+    managed_accounts: tuple[str, ...]
     observations: tuple[BrokerOrderObservation, ...]
 
 
 @dataclass(frozen=True)
-class CancelOrderResult:
+class CancelResult:
+    """Adapter-returned summary of a ``cancelOrder`` (or staged-cancel) call.
+
+    For ``was_transmitted=False`` (staged orders) the adapter returns
+    ``staged_cancelled`` observations (L63); for ``was_transmitted=True`` it
+    returns ``broker_cancel_requested`` + ``cancelled`` (or
+    ``order_status_seen``) as the broker confirms cancellation.
+    """
+
+    success: bool
+    managed_accounts: tuple[str, ...]
     observations: tuple[BrokerOrderObservation, ...]
+
+
+# Legacy aliases for callers that still import the older names.
+OrderStatusResult = StatusResult
+CancelOrderResult = CancelResult
 
 
 # --- Error hierarchy -------------------------------------------------------

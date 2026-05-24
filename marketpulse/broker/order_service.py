@@ -34,6 +34,7 @@ T5 (status/cancel) and T6 (CLI) will extend this module.
 
 from __future__ import annotations
 
+import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -44,6 +45,7 @@ from marketpulse.broker.order_client import BrokerOrderClient
 from marketpulse.broker.order_repository import (
     append_event,
     create_intent,
+    get_intent_by_id,
     get_intent_by_idempotency_key,
     set_broker_ids,
     transition_status,
@@ -59,6 +61,7 @@ from marketpulse.broker.order_types import (
     OrderCallbackTimeoutError,
     OrderConnectionError,
     OrderDuplicateError,
+    OrderSafetyError,
     PlaceResult,
     build_order_ref,
     classify_order_account,
@@ -66,6 +69,8 @@ from marketpulse.broker.order_types import (
 from marketpulse.db.models import BrokerOrderEvent, BrokerOrderIntent
 
 _ACTION_PLACE = "place"
+_ACTION_STATUS = "status_check"
+_ACTION_CANCEL = "cancel"
 _BROKER = "IBKR"
 
 
@@ -371,3 +376,329 @@ def _process_success(
     transition_status(session, intent_id=intent.id, new_status="sent")
     transition_status(session, intent_id=intent.id, new_status="completed")
     return PlaceCommandResult(intent=intent, events=tuple(events), status="completed")
+
+
+# ---------------------------------------------------------------------------
+# Status / Cancel — child-intent provenance flows (T5)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class StatusCommandResult:
+    """Service-level summary of one fetch-status command (L46).
+
+    ``intent`` is the *child* ``status_check`` intent (the parent place intent
+    is reachable via ``intent.parent_intent_id``).
+    """
+
+    intent: BrokerOrderIntent
+    events: tuple[BrokerOrderEvent, ...]
+    status: IntentStatus
+
+
+@dataclass(frozen=True)
+class CancelCommandResult:
+    """Service-level summary of one cancel-order command (L45).
+
+    ``intent`` is the *child* ``cancel`` intent.
+    """
+
+    intent: BrokerOrderIntent
+    events: tuple[BrokerOrderEvent, ...]
+    status: IntentStatus
+
+
+def _generate_child_key(*, prefix: str, parent_intent_id: int) -> str:
+    """Build a generated idempotency key for a status/cancel child intent (L70).
+
+    Shape: ``{prefix}-{parent_intent_id}-{8 hex chars}``. Mirrors the
+    ``MP-7B-{id}-{short_key}`` style of ``build_order_ref`` so logs read
+    consistently.
+    """
+
+    suffix = secrets.token_hex(4)  # 8 hex chars
+    return f"{prefix}-{parent_intent_id}-{suffix}"
+
+
+def _validate_place_parent(intent: BrokerOrderIntent) -> None:
+    if intent.action != _ACTION_PLACE:
+        raise OrderSafetyError(
+            f"intent {intent.id} has action {intent.action!r}; "
+            "fetch_status/cancel_order require a place intent (L42)"
+        )
+
+
+def fetch_status(
+    session: Session,
+    *,
+    client: BrokerOrderClient,
+    intent_id: int,
+) -> StatusCommandResult:
+    """Drive a status-check command for a known place intent (L46/L62).
+
+    Algorithm:
+
+    1. Load the parent place intent. ``LookupError`` propagates if missing
+       (L15: only locally known intents are eligible).
+    2. Refuse if ``intent.action != "place"`` (L42).
+    3. Create a child ``status_check`` intent with a *generated* idempotency
+       key (L70) and ``parent_intent_id=intent_id`` (L46).
+    4. If the parent lacks ``broker_order_id`` (place failed before broker
+       assigned an id, L44): append ``safety_rejected`` to the child, transition
+       to ``rejected``, return.
+    5. Otherwise call ``client.fetch_order_status`` and translate exceptions /
+       observations into events on the child, ending in
+       ``completed`` / ``failed`` / ``sent`` (callback timeout, L69).
+    """
+
+    place = get_intent_by_id(session, intent_id)
+    _validate_place_parent(place)
+
+    now = _now()
+    child_key = _generate_child_key(prefix="status", parent_intent_id=intent_id)
+    child_context: dict[str, Any] = {
+        "parent_intent_id": intent_id,
+        "parent_broker_order_id": place.broker_order_id,
+        "parent_account_id": place.account_id,
+    }
+    child = create_intent(
+        session,
+        action=_ACTION_STATUS,
+        broker=_BROKER,
+        broker_environment=place.broker_environment,
+        account_id=place.account_id,
+        local_idempotency_key=child_key,
+        context=child_context,
+        parent_intent_id=intent_id,
+        created_at=now,
+    )
+
+    # L44 — parent never received a broker_order_id; status is not eligible.
+    if not place.broker_order_id:
+        message = (
+            f"parent intent {intent_id} lacks broker_order_id; "
+            "not eligible for status (L44)"
+        )
+        event = _record_event(
+            session,
+            intent_id=child.id,
+            event_type="safety_rejected",
+            event_source="service_safety",
+            observed_at=now,
+            message=message,
+        )
+        transition_status(session, intent_id=child.id, new_status="rejected")
+        return StatusCommandResult(intent=child, events=(event,), status="rejected")
+
+    # Broker call.
+    try:
+        result = client.fetch_order_status(
+            broker_order_id=place.broker_order_id,
+            account_id=place.account_id,
+        )
+    except OrderAccountMismatchError as exc:
+        event = _record_event(
+            session,
+            intent_id=child.id,
+            event_type="account_mismatch",
+            event_source="adapter_callback",
+            message=str(exc) or "managedAccounts mismatch",
+        )
+        transition_status(session, intent_id=child.id, new_status="failed")
+        return StatusCommandResult(intent=child, events=(event,), status="failed")
+    except OrderConnectionError as exc:
+        event = _record_event(
+            session,
+            intent_id=child.id,
+            event_type="connection_failed",
+            event_source="adapter_callback",
+            message=str(exc) or "TWS/Gateway connection failed",
+        )
+        transition_status(session, intent_id=child.id, new_status="failed")
+        return StatusCommandResult(intent=child, events=(event,), status="failed")
+    except OrderCallbackTimeoutError as exc:
+        message = f"callback_timeout: {exc!s}" if str(exc) else "callback_timeout"
+        event = _record_event(
+            session,
+            intent_id=child.id,
+            event_type="error",
+            event_source="timeout",
+            message=message,
+        )
+        # L69: callback never arrived — we can't prove the broker side, so park
+        # the child at ``sent`` for forensic visibility.
+        transition_status(session, intent_id=child.id, new_status="sent")
+        return StatusCommandResult(intent=child, events=(event,), status="sent")
+    except OrderBrokerCallError as exc:
+        event = _record_event(
+            session,
+            intent_id=child.id,
+            event_type="error",
+            event_source="adapter_callback",
+            message=str(exc) or "broker error during status fetch",
+        )
+        transition_status(session, intent_id=child.id, new_status="failed")
+        return StatusCommandResult(intent=child, events=(event,), status="failed")
+
+    return _process_status_or_cancel_success(
+        session,
+        child=child,
+        observations=result.observations,
+        kind="status",
+    )
+
+
+def cancel_order(
+    session: Session,
+    *,
+    client: BrokerOrderClient,
+    intent_id: int,
+    confirm_cancel: bool = False,
+) -> CancelCommandResult:
+    """Drive a cancel-order command for a known place intent (L45/L63).
+
+    Fail-closed gate: without ``confirm_cancel=True`` we raise BEFORE creating
+    a child intent (L21). This keeps a stray CLI call from leaving spurious
+    provenance.
+
+    Algorithm:
+
+    1. Refuse if ``confirm_cancel`` is False (L21).
+    2. Load parent place intent. ``LookupError`` propagates if missing.
+    3. Refuse if parent action != "place" (L42).
+    4. Create child ``cancel`` intent with generated key (L70).
+    5. If parent lacks ``broker_order_id``: ``safety_rejected`` + ``rejected``.
+    6. Otherwise call ``client.cancel_order(..., was_transmitted=place.transmit)``.
+       The adapter chooses ``staged_cancelled`` (transmit=False, L63) vs
+       ``broker_cancel_requested`` + ``cancelled`` (transmit=True).
+    7. Translate exceptions/observations into events on the child.
+    """
+
+    if not confirm_cancel:
+        raise OrderSafetyError(
+            "cancel_order requires confirm_cancel=True (L21); refusing "
+            "before creating any provenance"
+        )
+
+    place = get_intent_by_id(session, intent_id)
+    _validate_place_parent(place)
+
+    now = _now()
+    child_key = _generate_child_key(prefix="cancel", parent_intent_id=intent_id)
+    child_context: dict[str, Any] = {
+        "parent_intent_id": intent_id,
+        "parent_broker_order_id": place.broker_order_id,
+        "parent_account_id": place.account_id,
+        "parent_transmit": bool(place.transmit),
+    }
+    child = create_intent(
+        session,
+        action=_ACTION_CANCEL,
+        broker=_BROKER,
+        broker_environment=place.broker_environment,
+        account_id=place.account_id,
+        local_idempotency_key=child_key,
+        context=child_context,
+        parent_intent_id=intent_id,
+        created_at=now,
+    )
+
+    if not place.broker_order_id:
+        message = (
+            f"parent intent {intent_id} lacks broker_order_id; "
+            "not eligible for cancel (L44)"
+        )
+        event = _record_event(
+            session,
+            intent_id=child.id,
+            event_type="safety_rejected",
+            event_source="service_safety",
+            observed_at=now,
+            message=message,
+        )
+        transition_status(session, intent_id=child.id, new_status="rejected")
+        return CancelCommandResult(intent=child, events=(event,), status="rejected")
+
+    try:
+        result = client.cancel_order(
+            broker_order_id=place.broker_order_id,
+            account_id=place.account_id,
+            was_transmitted=bool(place.transmit),
+        )
+    except OrderAccountMismatchError as exc:
+        event = _record_event(
+            session,
+            intent_id=child.id,
+            event_type="account_mismatch",
+            event_source="adapter_callback",
+            message=str(exc) or "managedAccounts mismatch",
+        )
+        transition_status(session, intent_id=child.id, new_status="failed")
+        return CancelCommandResult(intent=child, events=(event,), status="failed")
+    except OrderConnectionError as exc:
+        event = _record_event(
+            session,
+            intent_id=child.id,
+            event_type="connection_failed",
+            event_source="adapter_callback",
+            message=str(exc) or "TWS/Gateway connection failed",
+        )
+        transition_status(session, intent_id=child.id, new_status="failed")
+        return CancelCommandResult(intent=child, events=(event,), status="failed")
+    except OrderCallbackTimeoutError as exc:
+        message = f"callback_timeout: {exc!s}" if str(exc) else "callback_timeout"
+        event = _record_event(
+            session,
+            intent_id=child.id,
+            event_type="error",
+            event_source="timeout",
+            message=message,
+        )
+        transition_status(session, intent_id=child.id, new_status="sent")
+        return CancelCommandResult(intent=child, events=(event,), status="sent")
+    except OrderBrokerCallError as exc:
+        event = _record_event(
+            session,
+            intent_id=child.id,
+            event_type="error",
+            event_source="adapter_callback",
+            message=str(exc) or "broker error during cancel",
+        )
+        transition_status(session, intent_id=child.id, new_status="failed")
+        return CancelCommandResult(intent=child, events=(event,), status="failed")
+
+    return _process_status_or_cancel_success(
+        session,
+        child=child,
+        observations=result.observations,
+        kind="cancel",
+    )
+
+
+def _process_status_or_cancel_success(
+    session: Session,
+    *,
+    child: BrokerOrderIntent,
+    observations: tuple[BrokerOrderObservation, ...],
+    kind: str,
+) -> StatusCommandResult | CancelCommandResult:
+    """Persist observations on a status/cancel child and mark it completed."""
+
+    events: list[BrokerOrderEvent] = []
+    for observation in observations:
+        events.append(
+            _record_event(
+                session,
+                intent_id=child.id,
+                event_type=observation.event_type,
+                event_source="adapter_callback",
+                observation=observation,
+            )
+        )
+    transition_status(session, intent_id=child.id, new_status="sent")
+    transition_status(session, intent_id=child.id, new_status="completed")
+    if kind == "status":
+        return StatusCommandResult(
+            intent=child, events=tuple(events), status="completed"
+        )
+    return CancelCommandResult(intent=child, events=tuple(events), status="completed")
