@@ -17,6 +17,86 @@ def test_paper_models_have_expected_tablenames():
     assert PaperAuditEvent.__tablename__ == "paper_audit_event"
 
 
+def test_broker_snapshot_models_have_expected_tablenames():
+    from marketpulse.db.models import (
+        BrokerAccountSnapshot,
+        BrokerCashSnapshot,
+        BrokerExecutionSnapshot,
+        BrokerOpenOrderSnapshot,
+        BrokerPositionSnapshot,
+        BrokerSyncRun,
+    )
+
+    assert BrokerSyncRun.__tablename__ == "broker_sync_run"
+    assert BrokerAccountSnapshot.__tablename__ == "broker_account_snapshot"
+    assert BrokerCashSnapshot.__tablename__ == "broker_cash_snapshot"
+    assert BrokerPositionSnapshot.__tablename__ == "broker_position_snapshot"
+    assert BrokerOpenOrderSnapshot.__tablename__ == "broker_open_order_snapshot"
+    assert BrokerExecutionSnapshot.__tablename__ == "broker_execution_snapshot"
+
+
+def test_broker_snapshot_models_use_decimal_numeric_columns():
+    from sqlalchemy import Numeric, inspect
+
+    from marketpulse.db.models import (
+        BrokerAccountSnapshot,
+        BrokerCashSnapshot,
+        BrokerExecutionSnapshot,
+        BrokerOpenOrderSnapshot,
+        BrokerPositionSnapshot,
+    )
+
+    decimal_columns = {
+        BrokerAccountSnapshot: {
+            "net_liquidation",
+            "buying_power",
+            "maintenance_margin",
+            "excess_liquidity",
+        },
+        BrokerCashSnapshot: {"cash_balance", "settled_cash", "accrued_interest"},
+        BrokerPositionSnapshot: {
+            "quantity",
+            "avg_cost",
+            "market_price",
+            "market_value",
+            "unrealized_pnl",
+            "realized_pnl",
+        },
+        BrokerOpenOrderSnapshot: {"quantity", "limit_price"},
+        BrokerExecutionSnapshot: {"quantity", "price"},
+    }
+
+    for model, column_names in decimal_columns.items():
+        columns = {column.name: column for column in inspect(model).columns}
+        for column_name in column_names:
+            column_type = columns[column_name].type
+            assert isinstance(column_type, Numeric)
+            assert column_type.precision == 18
+            assert column_type.scale == 6
+
+
+def test_broker_snapshot_rows_have_account_and_capture_columns():
+    from sqlalchemy import inspect
+
+    from marketpulse.db.models import (
+        BrokerAccountSnapshot,
+        BrokerCashSnapshot,
+        BrokerExecutionSnapshot,
+        BrokerOpenOrderSnapshot,
+        BrokerPositionSnapshot,
+    )
+
+    for model in (
+        BrokerAccountSnapshot,
+        BrokerCashSnapshot,
+        BrokerPositionSnapshot,
+        BrokerOpenOrderSnapshot,
+        BrokerExecutionSnapshot,
+    ):
+        cols = {column.name for column in inspect(model).columns}
+        assert {"sync_run_id", "account_id", "broker_environment", "captured_at"} <= cols
+
+
 def test_paper_order_has_allocation_date_column():
     """6a-L5 / lock xxxiii companion: paper_order distinguishes
     event_time (AI saw it), allocation_date (allocator decision day),
