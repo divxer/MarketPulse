@@ -78,6 +78,26 @@ class Settings(BaseSettings):
         ge=0,
     )
 
+    # Phase 7b IBKR paper order pilot — TWS/Gateway connection settings.
+    ibkr_order_host: str = Field("127.0.0.1", alias="IBKR_ORDER_HOST")
+    ibkr_order_port: int = Field(7497, alias="IBKR_ORDER_PORT", ge=1, le=65535)
+    ibkr_order_client_id: int = Field(72, alias="IBKR_ORDER_CLIENT_ID", ge=0)
+    ibkr_order_connect_timeout_seconds: int = Field(
+        10,
+        alias="IBKR_ORDER_CONNECT_TIMEOUT_SECONDS",
+        ge=1,
+    )
+    ibkr_order_next_valid_id_timeout_seconds: int = Field(
+        10,
+        alias="IBKR_ORDER_NEXT_VALID_ID_TIMEOUT_SECONDS",
+        ge=1,
+    )
+    ibkr_order_observation_timeout_seconds: int = Field(
+        15,
+        alias="IBKR_ORDER_OBSERVATION_TIMEOUT_SECONDS",
+        ge=1,
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

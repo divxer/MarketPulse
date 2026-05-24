@@ -1,12 +1,16 @@
-"""Phase 7a-Flex boundary: no production module imports ibapi.
+"""Phase 7a-Flex / 7b boundary: ``ibapi`` import allow-list.
 
-The original Phase 7a (gnzsnz/ib-gateway + ibapi) had an ALLOW-LIST: only
-``marketpulse/broker/ibkr_client.py`` was permitted to import ``ibapi``.
-Phase 7a-Flex removed that adapter entirely; the boundary is now a
-DENY-LIST: ``ibapi`` must not appear in any production import.
+- Original Phase 7a: ``ibkr_client.py`` was the only permitted importer.
+- Phase 7a-Flex: removed that adapter; boundary became a DENY-LIST.
+- Phase 7b: the order pilot reintroduces a single permitted importer,
+  ``marketpulse/broker/ibkr_order_client.py``, holding the TWS/Gateway
+  order adapter (L33 of the 7b plan). All other production modules are
+  still forbidden from importing ``ibapi``.
 
 We keep the file name to preserve git history; the docstring documents
-the boundary evolution.
+the boundary evolution. ``test_phase7b_order_boundary.py`` (T7b) adds a
+narrower allow-list assertion that only `ibkr_order_client.py` may use
+ibapi.
 """
 # Layer: architecture
 
@@ -17,14 +21,28 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2] / "marketpulse"
 
+# Phase 7b: the order-pilot adapter is the single permitted ``ibapi`` importer.
+# Any other module must remain ibapi-free.
+_IBAPI_IMPORT_ALLOWLIST: frozenset[str] = frozenset(
+    {"marketpulse/broker/ibkr_order_client.py"}
+)
+
 
 def _python_files() -> list[Path]:
     return [p for p in ROOT.rglob("*.py") if "__pycache__" not in p.parts]
 
 
+def _is_allowlisted(path: Path) -> bool:
+    repo_root = ROOT.parent
+    rel = path.relative_to(repo_root).as_posix()
+    return rel in _IBAPI_IMPORT_ALLOWLIST
+
+
 def test_no_production_module_imports_ibapi():
     offenders: list[str] = []
     for path in _python_files():
+        if _is_allowlisted(path):
+            continue
         try:
             tree = ast.parse(path.read_text())
         except SyntaxError:
