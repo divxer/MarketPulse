@@ -14,16 +14,16 @@ SyncStatus = Literal["started", "completed", "failed"]
 Transport = Literal["flex"]
 
 
-_PAPER_RE = re.compile(r"^DU\d+$")
+_PAPER_RE = re.compile(r"^DU[A-Z]*\d+$")
 _LIVE_RE = re.compile(r"^U\d+$")
 
 
 def classify_broker_environment_from_account_id(account_id: str | None) -> BrokerEnvironment:
     """Classify environment from IBKR account ID prefix (L21).
 
-    DU<digits>     → paper
-    U<digits>      → live
-    anything else  → unknown   (treated like live by the brake; never falls through)
+    DU<optional letters><digits>  → paper   (e.g. DU1234567, DUE411848, DUH123456)
+    U<digits>                     → live
+    anything else                 → unknown (treated like live by the brake; never falls through)
     """
     if not account_id:
         return "unknown"

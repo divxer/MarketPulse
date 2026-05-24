@@ -152,7 +152,7 @@ production caller will use it after 7a-Flex). Behavior:
 
 | Account ID pattern | Environment |
 |---|---|
-| `DU` followed by digits | `paper` |
+| `DU` + optional uppercase letters + digits (e.g. `DU1234567`, `DUE411848`, `DUH123456`) | `paper` |
 | `U` followed by digits (no other letters) | `live` |
 | anything else | `unknown` |
 

@@ -6,7 +6,7 @@ container, no VNC, no 2FA at request time.
 
 ## Preconditions
 
-- IBKR account with paper trading enabled (DU<digits>) or live account if `MP_IBKR_ALLOW_LIVE=true`.
+- IBKR account with paper trading enabled (DU<optional letters><digits>, e.g. `DU1234567` or `DUE411848`) or live account if `MP_IBKR_ALLOW_LIVE=true`.
 - Activity Flex Query created in IBKR Portal (one-time setup, below).
 - Flex Token issued and recorded (one-time setup, below).
 - Outbound HTTPS to `gdcdyn.interactivebrokers.com` reachable from MarketPulse runtime.
