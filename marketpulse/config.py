@@ -68,10 +68,14 @@ class Settings(BaseSettings):
         alias="IBKR_FLEX_BASE_URL",
     )
     ibkr_flex_poll_interval_seconds: int = Field(
-        5, alias="IBKR_FLEX_POLL_INTERVAL_SECONDS", ge=0,
+        5,
+        alias="IBKR_FLEX_POLL_INTERVAL_SECONDS",
+        ge=0,
     )
     ibkr_flex_max_wait_seconds: int = Field(
-        60, alias="IBKR_FLEX_MAX_WAIT_SECONDS", ge=0,
+        60,
+        alias="IBKR_FLEX_MAX_WAIT_SECONDS",
+        ge=0,
     )
 
 

@@ -66,7 +66,8 @@ def run_readonly_sync(
     started_at = (now or datetime.now(UTC)).astimezone(UTC)
     initial_environment: BrokerEnvironment = (
         classify_broker_environment_from_account_id(config.account_id)
-        if config.account_id else "unknown"
+        if config.account_id
+        else "unknown"
     )
     run = create_started_run(
         session,

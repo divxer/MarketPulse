@@ -102,8 +102,8 @@ def test_cli_omits_reference_code_when_absent(monkeypatch, capsys):
 
 
 def test_cli_config_prefers_args_over_settings(monkeypatch):
-    from scripts import sync_ibkr_readonly as cli
     from marketpulse.config import get_settings
+    from scripts import sync_ibkr_readonly as cli
 
     _set_required_env(monkeypatch)
     monkeypatch.setenv("IBKR_FLEX_TOKEN", "env-tok")
@@ -115,15 +115,24 @@ def test_cli_config_prefers_args_over_settings(monkeypatch):
     monkeypatch.setenv("IBKR_FLEX_MAX_WAIT_SECONDS", "60")
     monkeypatch.setenv("MP_IBKR_ALLOW_LIVE", "false")
 
-    args = cli.build_parser().parse_args([
-        "--token", "arg-tok",
-        "--query-id", "222",
-        "--base-url", "https://arg-base.example/servlet",
-        "--account-id", "DUARG",
-        "--poll-interval-seconds", "3",
-        "--max-wait-seconds", "30",
-        "--db-url", "sqlite:///arg.db",
-    ])
+    args = cli.build_parser().parse_args(
+        [
+            "--token",
+            "arg-tok",
+            "--query-id",
+            "222",
+            "--base-url",
+            "https://arg-base.example/servlet",
+            "--account-id",
+            "DUARG",
+            "--poll-interval-seconds",
+            "3",
+            "--max-wait-seconds",
+            "30",
+            "--db-url",
+            "sqlite:///arg.db",
+        ]
+    )
     config, db_url = cli._config(args)
 
     assert config.token == "arg-tok"
@@ -137,8 +146,8 @@ def test_cli_config_prefers_args_over_settings(monkeypatch):
 
 
 def test_cli_missing_token_exits(monkeypatch):
-    from scripts import sync_ibkr_readonly as cli
     from marketpulse.config import get_settings
+    from scripts import sync_ibkr_readonly as cli
 
     _set_required_env(monkeypatch)
     monkeypatch.delenv("IBKR_FLEX_TOKEN", raising=False)
@@ -154,8 +163,8 @@ def test_cli_missing_token_exits(monkeypatch):
 
 
 def test_cli_missing_query_id_exits(monkeypatch):
-    from scripts import sync_ibkr_readonly as cli
     from marketpulse.config import get_settings
+    from scripts import sync_ibkr_readonly as cli
 
     _set_required_env(monkeypatch)
     monkeypatch.setenv("IBKR_FLEX_TOKEN", "tok")

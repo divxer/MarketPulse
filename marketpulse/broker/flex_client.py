@@ -269,6 +269,7 @@ class FlexClient:
             return datetime.now(UTC)
         try:
             from zoneinfo import ZoneInfo
+
             date_part, time_part = value.split(";")
             local = datetime.strptime(f"{date_part}{time_part}", "%Y%m%d%H%M%S")
             return local.replace(tzinfo=ZoneInfo("America/New_York")).astimezone(UTC)
@@ -298,47 +299,57 @@ class FlexClient:
     def _parse_cash(self, statement: ET.Element, account_id: str) -> tuple[BrokerCash, ...]:
         rows: list[BrokerCash] = []
         for el in statement.findall(".//CashReportCurrency"):
-            rows.append(BrokerCash(
-                account_id=account_id,
-                currency=el.get("currency") or "",
-                cash_balance=self._decimal(el.get("endingCash")),
-                settled_cash=self._decimal(el.get("endingSettledCash")),
-                accrued_interest=self._decimal(el.get("accruedInterest")),
-            ))
+            rows.append(
+                BrokerCash(
+                    account_id=account_id,
+                    currency=el.get("currency") or "",
+                    cash_balance=self._decimal(el.get("endingCash")),
+                    settled_cash=self._decimal(el.get("endingSettledCash")),
+                    accrued_interest=self._decimal(el.get("accruedInterest")),
+                )
+            )
         return tuple(rows)
 
     def _parse_positions(
-        self, statement: ET.Element, account_id: str,
+        self,
+        statement: ET.Element,
+        account_id: str,
     ) -> tuple[BrokerPosition, ...]:
         rows: list[BrokerPosition] = []
         for el in statement.findall(".//OpenPosition"):
             qty = self._decimal(el.get("position")) or Decimal(0)
-            rows.append(BrokerPosition(
-                account_id=account_id,
-                symbol=el.get("symbol") or "",
-                asset_class=el.get("assetCategory"),
-                quantity=qty,
-                avg_cost=self._decimal(el.get("costBasisPrice")),
-                market_price=self._decimal(el.get("markPrice")),
-                market_value=self._decimal(el.get("positionValue")),
-                unrealized_pnl=self._decimal(el.get("fifoPnlUnrealized")),
-                realized_pnl=self._decimal(el.get("realizedPnl")),
-            ))
+            rows.append(
+                BrokerPosition(
+                    account_id=account_id,
+                    symbol=el.get("symbol") or "",
+                    asset_class=el.get("assetCategory"),
+                    quantity=qty,
+                    avg_cost=self._decimal(el.get("costBasisPrice")),
+                    market_price=self._decimal(el.get("markPrice")),
+                    market_value=self._decimal(el.get("positionValue")),
+                    unrealized_pnl=self._decimal(el.get("fifoPnlUnrealized")),
+                    realized_pnl=self._decimal(el.get("realizedPnl")),
+                )
+            )
         return tuple(rows)
 
     def _parse_executions(
-        self, statement: ET.Element, account_id: str,
+        self,
+        statement: ET.Element,
+        account_id: str,
     ) -> tuple[BrokerExecution, ...]:
         rows: list[BrokerExecution] = []
         for el in statement.findall(".//Trade"):
-            rows.append(BrokerExecution(
-                account_id=account_id,
-                broker_exec_id=el.get("tradeID") or "",
-                broker_order_id=el.get("ibOrderID"),
-                symbol=el.get("symbol"),
-                side=(el.get("buySell") or "").upper() or None,
-                quantity=self._decimal(el.get("quantity")),
-                price=self._decimal(el.get("tradePrice")),
-                executed_at=self._parse_when_generated(el.get("dateTime")),
-            ))
+            rows.append(
+                BrokerExecution(
+                    account_id=account_id,
+                    broker_exec_id=el.get("tradeID") or "",
+                    broker_order_id=el.get("ibOrderID"),
+                    symbol=el.get("symbol"),
+                    side=(el.get("buySell") or "").upper() or None,
+                    quantity=self._decimal(el.get("quantity")),
+                    price=self._decimal(el.get("tradePrice")),
+                    executed_at=self._parse_when_generated(el.get("dateTime")),
+                )
+            )
         return tuple(rows)

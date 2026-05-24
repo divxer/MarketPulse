@@ -27,6 +27,7 @@ def test_settings_requires_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_notifier_recap_enabled_default_true(monkeypatch) -> None:
     monkeypatch.delenv("NOTIFIER_RECAP_ENABLED", raising=False)
     from marketpulse.config import get_settings
+
     get_settings.cache_clear()
     s = get_settings()
     assert s.notifier_recap_enabled is True
@@ -35,6 +36,7 @@ def test_notifier_recap_enabled_default_true(monkeypatch) -> None:
 def test_notifier_recap_enabled_can_disable(monkeypatch) -> None:
     monkeypatch.setenv("NOTIFIER_RECAP_ENABLED", "false")
     from marketpulse.config import get_settings
+
     get_settings.cache_clear()
     assert get_settings().notifier_recap_enabled is False
 
@@ -42,6 +44,7 @@ def test_notifier_recap_enabled_can_disable(monkeypatch) -> None:
 def test_public_base_url_default_empty(monkeypatch) -> None:
     monkeypatch.delenv("PUBLIC_BASE_URL", raising=False)
     from marketpulse.config import get_settings
+
     get_settings.cache_clear()
     assert get_settings().public_base_url == ""
 

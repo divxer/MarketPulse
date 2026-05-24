@@ -100,7 +100,7 @@ class BrokerSnapshot:
     account: BrokerAccount
     cash: tuple[BrokerCash, ...]
     positions: tuple[BrokerPosition, ...]
-    open_orders: tuple[BrokerOpenOrder, ...]   # always () under Flex transport (L18)
+    open_orders: tuple[BrokerOpenOrder, ...]  # always () under Flex transport (L18)
     executions: tuple[BrokerExecution, ...]
 
 

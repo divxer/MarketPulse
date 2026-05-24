@@ -34,9 +34,8 @@ def test_no_production_module_imports_ibapi():
                 for alias in node.names:
                     if alias.name == "ibapi" or alias.name.startswith("ibapi."):
                         offenders.append(f"{path}: import {alias.name}")
-            elif isinstance(node, ast.ImportFrom):
-                if node.module == "ibapi" or (node.module or "").startswith("ibapi."):
-                    offenders.append(f"{path}: from {node.module} import ...")
-    assert not offenders, (
-        "ibapi must not be imported in production code:\n" + "\n".join(offenders)
-    )
+            elif isinstance(node, ast.ImportFrom) and (
+                node.module == "ibapi" or (node.module or "").startswith("ibapi.")
+            ):
+                offenders.append(f"{path}: from {node.module} import ...")
+    assert not offenders, "ibapi must not be imported in production code:\n" + "\n".join(offenders)

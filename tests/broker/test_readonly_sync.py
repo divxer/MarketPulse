@@ -47,6 +47,7 @@ class StubClient:
 
 # ---- fixtures ----
 
+
 @pytest.fixture
 def session_factory():
     """Returns a callable producing an in-memory SQLite session.
@@ -118,10 +119,9 @@ def _paper_config(**overrides) -> FlexSyncConfig:
 
 # ---- baseline state-machine tests ----
 
+
 class TestSyncStateMachine:
-    def test_sync_completed_writes_snapshot_and_completed_run(
-        self, session_factory, make_snapshot
-    ):
+    def test_sync_completed_writes_snapshot_and_completed_run(self, session_factory, make_snapshot):
         client = StubClient(snapshot=make_snapshot("DU123"), reference_code="REF42")
         config = _paper_config(account_id="DU123")
         with session_factory() as session:
@@ -149,9 +149,7 @@ class TestSyncStateMachine:
             assert run.context["selected_account_id"] == "DU123"
             assert run.context["reference_code"] == "REF42"
 
-    def test_connection_failure_writes_failed_run_without_snapshots(
-        self, session_factory
-    ):
+    def test_connection_failure_writes_failed_run_without_snapshots(self, session_factory):
         client = StubClient(error=ConnectionError("down"))
         config = _paper_config(account_id=None)
         with session_factory() as session:
@@ -173,9 +171,7 @@ class TestSyncStateMachine:
             assert run.completed_at >= started_at
             assert run.started_at == started_at
 
-    def test_multiple_account_ambiguity_from_client_writes_failed_run(
-        self, session_factory
-    ):
+    def test_multiple_account_ambiguity_from_client_writes_failed_run(self, session_factory):
         client = StubClient(
             error=RuntimeError("IBKR returned 2 accounts; configure IBKR_ACCOUNT_ID")
         )
@@ -197,6 +193,7 @@ class TestSyncStateMachine:
 
 
 # ---- Phase 7a-Flex brake tests ----
+
 
 class TestFlexBrakes:
     def test_live_account_refused(self, session_factory, make_snapshot):
@@ -245,9 +242,7 @@ class TestFlexBrakes:
         reference_code on the FlexReportTimeoutError must surface in both
         the SyncResult and broker_sync_run.context."""
         client = StubClient(
-            error=FlexReportTimeoutError(
-                "Flex report not ready after 0s", reference_code="ABC"
-            )
+            error=FlexReportTimeoutError("Flex report not ready after 0s", reference_code="ABC")
         )
         config = _paper_config(account_id=None, allow_live=False)
         with session_factory() as session:
