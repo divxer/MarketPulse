@@ -105,7 +105,13 @@ services:
   # via Jts.ini — most settings are picked up on first boot, but
   # Read-Only API must be verified by hand.
   ib-gateway:
-    image: ghcr.io/gnzsnz/ib-gateway:stable
+    # China-friendly mirror of ghcr.io/gnzsnz/ib-gateway:stable. The
+    # 1ms.run mirror routes through mainland China CDN, so pulls take
+    # seconds instead of timing out. Override via Portainer env var if
+    # the mirror is down: set IB_GATEWAY_IMAGE=ghcr.io/gnzsnz/ib-gateway:stable
+    # in the stack and the marketpulse VPN/proxy will handle the upstream
+    # pull (slower but reliable).
+    image: ${IB_GATEWAY_IMAGE:-ghcr.1ms.run/gnzsnz/ib-gateway:stable}
     pull_policy: always
     container_name: ib-gateway
     restart: unless-stopped
