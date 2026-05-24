@@ -14,7 +14,7 @@ from marketpulse.broker.order_types import (
     BrokerOrderRequest,
     CancelOrderResult,
     OrderStatusResult,
-    PlaceOrderResult,
+    PlaceResult,
 )
 
 
@@ -32,7 +32,7 @@ class BrokerOrderClient(Protocol):
         request: BrokerOrderRequest,
         intent_id: int,
         order_ref: str,
-    ) -> PlaceOrderResult: ...
+    ) -> PlaceResult: ...
 
     def fetch_order_status(
         self,

@@ -15,10 +15,9 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 
 # --- Type aliases ----------------------------------------------------------
 
@@ -157,11 +156,14 @@ class BrokerOrderRequest:
 
 @dataclass(frozen=True)
 class BrokerOrderObservation:
-    """One immutable event captured while driving a broker intent."""
+    """One adapter-callback observation about a broker intent.
+
+    Holds the event-shaped payload an adapter saw while driving an intent;
+    ``event_source`` and ``observed_at`` are stamped by the service when
+    translating an observation into a persisted ``broker_order_event`` row.
+    """
 
     event_type: EventType
-    event_source: EventSource
-    observed_at: datetime
     broker_order_id: str | None = None
     broker_perm_id: str | None = None
     broker_status: str | None = None
@@ -169,14 +171,30 @@ class BrokerOrderObservation:
     remaining_quantity: Decimal | None = None
     avg_fill_price: Decimal | None = None
     message: str | None = None
-    raw: dict | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
-class PlaceOrderResult:
-    broker_order_id: str
-    order_ref: str
+class PlaceResult:
+    """Adapter-returned summary of a placeOrder attempt.
+
+    ``placeorder_called`` records whether ``EClient.placeOrder`` was actually
+    invoked. The service uses this to decide whether a callback timeout should
+    leave the intent in ``sent`` (placeOrder was called) or ``failed`` (the
+    request never reached the broker — for example because nextValidId never
+    arrived).
+    """
+
+    placeorder_called: bool
+    broker_order_id: str | None
+    broker_perm_id: str | None
+    managed_accounts: tuple[str, ...]
     observations: tuple[BrokerOrderObservation, ...]
+
+
+# Legacy alias for tests/clients that still reference the older name; the
+# 7b place flow now returns ``PlaceResult``.
+PlaceOrderResult = PlaceResult
 
 
 @dataclass(frozen=True)
@@ -217,7 +235,17 @@ class OrderBrokerCallError(OrderError):
 
 
 class OrderCallbackTimeoutError(OrderError):
-    """Expected broker callback did not arrive before the bounded timeout."""
+    """Expected broker callback did not arrive before the bounded timeout.
+
+    ``placeorder_called`` lets the service decide the terminal status: if the
+    adapter timed out before ``placeOrder`` was issued the intent is ``failed``
+    (no broker mutation), otherwise it stays ``sent`` (we asked TWS to act and
+    cannot prove that it didn't — L69).
+    """
+
+    def __init__(self, message: str = "", *, placeorder_called: bool = False) -> None:
+        super().__init__(message)
+        self.placeorder_called = placeorder_called
 
 
 class OrderStateTransitionError(OrderError):
