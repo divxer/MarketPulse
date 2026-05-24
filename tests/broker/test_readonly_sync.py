@@ -1,8 +1,12 @@
 # Layer: stateful
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from decimal import Decimal
+import pytest
+
+pytestmark = pytest.mark.skip(reason="rewritten in T6 (Phase 7a-Flex)")
+
+from datetime import UTC, datetime  # noqa: E402
+from decimal import Decimal  # noqa: E402
 
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session

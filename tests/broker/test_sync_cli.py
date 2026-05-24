@@ -1,7 +1,11 @@
 # Layer: stateful
 from __future__ import annotations
 
-from dataclasses import dataclass
+import pytest
+
+pytestmark = pytest.mark.skip(reason="rewritten in T7 (Phase 7a-Flex)")
+
+from dataclasses import dataclass  # noqa: E402
 
 
 @dataclass

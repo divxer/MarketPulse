@@ -1,7 +1,8 @@
-"""Pure broker truth DTOs for read-only sync capture."""
+"""Pure broker truth DTOs for read-only sync capture (Phase 7a-Flex)."""
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -10,26 +11,25 @@ from typing import Literal
 BrokerName = Literal["IBKR"]
 BrokerEnvironment = Literal["paper", "live", "unknown"]
 SyncStatus = Literal["started", "completed", "failed"]
+Transport = Literal["flex"]
 
 
-def classify_broker_environment(port: int) -> BrokerEnvironment:
-    if port == 7497:
-        return "paper"
-    if port == 7496:
-        return "live"
-    return "unknown"
+_PAPER_RE = re.compile(r"^DU\d+$")
+_LIVE_RE = re.compile(r"^U\d+$")
 
 
-def classify_broker_environment_from_account_id(account_id: str) -> BrokerEnvironment:
-    """Phase 7a-Flex classifier. See L21 in design spec.
+def classify_broker_environment_from_account_id(account_id: str | None) -> BrokerEnvironment:
+    """Classify environment from IBKR account ID prefix (L21).
 
-    Full implementation in T5 — this stub is so T2 tests can import.
+    DU<digits>     → paper
+    U<digits>      → live
+    anything else  → unknown   (treated like live by the brake; never falls through)
     """
-    import re
-
-    if re.fullmatch(r"DU\d+", account_id):
+    if not account_id:
+        return "unknown"
+    if _PAPER_RE.match(account_id):
         return "paper"
-    if re.fullmatch(r"U\d+", account_id):
+    if _LIVE_RE.match(account_id):
         return "live"
     return "unknown"
 
@@ -100,20 +100,23 @@ class BrokerSnapshot:
     account: BrokerAccount
     cash: tuple[BrokerCash, ...]
     positions: tuple[BrokerPosition, ...]
-    open_orders: tuple[BrokerOpenOrder, ...]
+    open_orders: tuple[BrokerOpenOrder, ...]   # always () under Flex transport (L18)
     executions: tuple[BrokerExecution, ...]
 
 
 @dataclass(frozen=True)
 class SyncResult:
+    """Phase 7a-Flex result. transport-discriminated shape (L20)."""
+
     sync_run_id: int
     broker: BrokerName
     broker_environment: BrokerEnvironment
     account_id: str | None
     status: SyncStatus
-    host: str
-    port: int
-    client_id: int
+    transport: Transport
+    endpoint: str
+    query_id: int | None
+    reference_code: str | None = None
     account_snapshots: int = 0
     cash_rows: int = 0
     positions: int = 0
