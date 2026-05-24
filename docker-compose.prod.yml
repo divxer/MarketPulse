@@ -95,8 +95,13 @@ services:
       TWOFA_TIMEOUT_ACTION: restart
       AUTO_RESTART_TIME: "23:00"
       RELOGIN_AFTER_TWOFA_TIMEOUT: "yes"
-    volumes:
-      - ib_gateway_data:/home/ibgateway
+    # NOTE: do NOT mount /home/ibgateway (bind OR named volume). See the
+    # corresponding comment in docker-compose.cn.yml for the rationale —
+    # the image entrypoint lives at /home/ibgateway/scripts/run.sh; a
+    # named volume that auto-populates from the image works on some
+    # docker versions but not others, and the failure mode (exec: no
+    # such file) is opaque. We don't need persistence: IBC re-logs in
+    # from env on every boot; READ_ONLY_API is re-applied.
     healthcheck:
       test: ["CMD-SHELL", "nc -z localhost 4002 || exit 1"]
       interval: 60s
@@ -106,4 +111,3 @@ services:
 
 volumes:
   marketpulse_data:
-  ib_gateway_data:

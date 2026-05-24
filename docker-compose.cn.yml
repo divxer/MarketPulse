@@ -129,8 +129,15 @@ services:
       TWOFA_TIMEOUT_ACTION: restart
       AUTO_RESTART_TIME: "23:00"
       RELOGIN_AFTER_TWOFA_TIMEOUT: "yes"
-    volumes:
-      - /volume1/docker/ib-gateway:/home/ibgateway
+    # NOTE: do NOT bind-mount /home/ibgateway. The image ships its
+    # entrypoint script at /home/ibgateway/scripts/run.sh; mounting an
+    # empty host directory there hides the script and the container fails
+    # to start with "exec /home/ibgateway/scripts/run.sh: no such file or
+    # directory". Persistence is not required for this role: IBC re-logs
+    # in fresh on every boot from TWS_USERID / TWS_PASSWORD env, READ_ONLY_API
+    # is re-applied on every boot, Jts.ini regenerates. If future phases
+    # need persistence (custom IBC config, captured Jts dialogs), mount a
+    # narrow subpath instead — never /home/ibgateway itself.
     healthcheck:
       # Check if the TWS API socket is listening. Gateway takes ~30s to
       # fully start (login + cold cache). 60s start_period.
