@@ -44,3 +44,41 @@ def test_public_base_url_default_empty(monkeypatch) -> None:
     from marketpulse.config import get_settings
     get_settings.cache_clear()
     assert get_settings().public_base_url == ""
+
+
+def test_ibkr_settings_defaults_to_paper_readonly(monkeypatch):
+    monkeypatch.setenv("APP_PASSWORD_HASH", "x")
+    monkeypatch.setenv("SESSION_SECRET", "x" * 16)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    from marketpulse.config import Settings
+
+    s = Settings(_env_file=None)
+
+    assert s.ibkr_host == "127.0.0.1"
+    assert s.ibkr_port == 7497
+    assert s.ibkr_client_id == 71
+    assert s.ibkr_account_id == ""
+    assert s.ibkr_connect_timeout_seconds == 10
+    assert s.ibkr_allow_live is False
+
+
+def test_ibkr_settings_accept_env_overrides(monkeypatch):
+    monkeypatch.setenv("APP_PASSWORD_HASH", "x")
+    monkeypatch.setenv("SESSION_SECRET", "x" * 16)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    monkeypatch.setenv("IBKR_HOST", "ib-gateway")
+    monkeypatch.setenv("IBKR_PORT", "4002")
+    monkeypatch.setenv("IBKR_CLIENT_ID", "72")
+    monkeypatch.setenv("IBKR_ACCOUNT_ID", "DU1234567")
+    monkeypatch.setenv("IBKR_CONNECT_TIMEOUT_SECONDS", "3")
+    monkeypatch.setenv("MP_IBKR_ALLOW_LIVE", "true")
+    from marketpulse.config import Settings
+
+    s = Settings(_env_file=None)
+
+    assert s.ibkr_host == "ib-gateway"
+    assert s.ibkr_port == 4002
+    assert s.ibkr_client_id == 72
+    assert s.ibkr_account_id == "DU1234567"
+    assert s.ibkr_connect_timeout_seconds == 3
+    assert s.ibkr_allow_live is True
