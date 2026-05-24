@@ -368,6 +368,33 @@ def test_fetch_snapshot_maps_open_orders_and_executions():
     assert e.price == Decimal("149.5")
 
 
+def test_fetch_snapshot_raises_timeout_when_end_event_never_fires():
+    from marketpulse.broker.ibkr_client import IbkrTimeoutError
+
+    class StalledReader(FakeIbReader):
+        def reqAccountUpdates(self, subscribe: bool, account: str) -> None:  # noqa: N802
+            # Subscribe is acknowledged but we deliberately never set
+            # account_download_end_event, simulating TWS going silent
+            # after the request. The adapter should time out.
+            if not subscribe:
+                self.unsubscribed_account = account
+
+    reader = StalledReader(
+        managed_accounts=["DU123"],
+        account_values_to_return=[("BaseCurrency", "USD", "")],
+    )
+    client = _make_client(reader, timeout_seconds=1)
+
+    try:
+        client.fetch_snapshot()
+    except IbkrTimeoutError as exc:
+        assert "accountDownloadEnd" in str(exc)
+    else:
+        raise AssertionError("missing end-event should raise IbkrTimeoutError")
+
+    assert reader.disconnected is True
+
+
 def test_fatal_error_callback_aborts_fetch_snapshot():
     from marketpulse.broker.ibkr_client import IbkrApiError
 

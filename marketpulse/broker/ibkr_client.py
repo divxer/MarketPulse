@@ -60,6 +60,20 @@ IBKR_UNSET_DOUBLE = Decimal("1.7976931348623157E308")
 # notices) are informational and ignored.
 _FATAL_ERROR_FLOOR = 1100
 
+# Known-fatal IBKR error codes below the 1100 floor. These signal real
+# connection / authentication / protocol problems that should surface
+# immediately rather than falling through to a timeout. Codes >= 1100
+# (e.g. 1100 connectivity lost) are always fatal regardless.
+_FATAL_SUB_1100_ERROR_CODES = frozenset({
+    502,    # Couldn't connect to TWS
+    504,    # Not connected
+    1300,   # Socket port has been reset and is now in use
+    10182,  # Failed to request live updates (no subscription)
+})
+
+# Unique reqId for reqExecutions; do not collide with future long-lived reqIds.
+_EXEC_REQ_ID = 9001
+
 
 def _decimal_or_none(value: Any) -> Decimal | None:
     if value is None:
@@ -244,7 +258,7 @@ class _IbReader(EWrapper, EClient):
         errorString: str,  # noqa: N803
         advancedOrderRejectJson: str = "",  # noqa: N803
     ) -> None:
-        if errorCode >= _FATAL_ERROR_FLOOR:
+        if errorCode >= _FATAL_ERROR_FLOOR or errorCode in _FATAL_SUB_1100_ERROR_CODES:
             self.fatal_error = IbkrApiError(f"IBKR error {errorCode}: {errorString}")
             # Unblock anything that's currently waiting.
             self.ready_event.set()
@@ -297,6 +311,13 @@ class IbkrReadClient:
     # --- public ----------------------------------------------------------
 
     def fetch_snapshot(self) -> BrokerSnapshot:
+        """Fetch a full broker snapshot.
+
+        Single-shot per call -- the adapter performs one full connect /
+        fetch / disconnect cycle. Calling ``fetch_snapshot`` multiple
+        times on the same instance is supported, but each call rebuilds
+        internal state.
+        """
         captured_at = datetime.now(UTC)
         client = self._client_factory()
         reader_thread: threading.Thread | None = None
@@ -387,7 +408,7 @@ class IbkrReadClient:
     def _fetch_executions(
         self, client: _IbReader, account_id: str
     ) -> tuple[BrokerExecution, ...]:
-        req_id = 9001
+        req_id = _EXEC_REQ_ID
         filt = ExecutionFilter()
         filt.acctCode = account_id
         if self.execution_window_start is not None:
