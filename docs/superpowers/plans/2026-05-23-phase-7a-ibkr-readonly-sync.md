@@ -713,13 +713,20 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import get_protocol_members
 
 
 def test_broker_read_client_protocol_only_exposes_fetch_snapshot():
+    # NOTE: `typing.get_protocol_members` requires Python 3.13+. Project
+    # runs Python 3.12, so we use a __dict__ filter that achieves the
+    # same invariant: assert the Protocol's surface is exactly the
+    # methods we expect, catching any silent additions.
     from marketpulse.broker.read_client import BrokerReadClient
 
-    assert get_protocol_members(BrokerReadClient) == frozenset({"fetch_snapshot"})
+    members = {
+        name for name in BrokerReadClient.__dict__
+        if not name.startswith("_")
+    }
+    assert members == {"fetch_snapshot"}
 
 
 def test_broker_snapshot_is_pure_dataclass():
