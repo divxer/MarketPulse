@@ -9,7 +9,7 @@ container, no VNC, no 2FA at request time.
 - IBKR account with paper trading enabled (DU<optional letters><digits>, e.g. `DU1234567` or `DUE411848`) or live account if `MP_IBKR_ALLOW_LIVE=true`.
 - Activity Flex Query created in IBKR Portal (one-time setup, below).
 - Flex Token issued and recorded (one-time setup, below).
-- Outbound HTTPS to `gdcdyn.interactivebrokers.com` reachable from MarketPulse runtime.
+- Outbound HTTPS to `gdcdyn.interactivebrokers.com` reachable from MarketPulse runtime. When deployed behind a forwarding HTTP proxy (e.g. Clash/Mihomo on a NAS), IBKR Flex hosts must be in `NO_PROXY` so requests go direct — the compose defaults (`docker-compose.cn.yml`, `docker-compose.prod.yml`) already include `.interactivebrokers.com` plus explicit `gdcdyn`/`ndcdyn` hostnames (httpx does not recognize `*.domain.com` wildcards, so both forms are listed).
 
 ## One-time setup: IBKR Portal
 

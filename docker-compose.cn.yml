@@ -63,16 +63,22 @@ services:
       ALERT_DEBOUNCE_MINUTES: ${ALERT_DEBOUNCE_MINUTES:-60}
       # Outbound HTTP proxy (e.g. for reaching Anthropic API from regions where
       # it's blocked). Leave empty to disable. NO_PROXY bypasses for hosts that
-      # are already China-friendly (Tencent quote/kline) or local.
+      # are already China-friendly (Tencent quote/kline) or local, plus the
+      # IBKR Flex Web Service endpoints — when deployed behind Clash/Mihomo on
+      # a NAS, Flex requests routed through overseas exit nodes exceed httpx's
+      # 5s connect+TLS timeout, breaking the Phase 7a-Flex readonly sync.
       #
-      # httpx (used by TencentClient) does NOT recognize the `*.domain.com`
-      # wildcard — its httpcore proxy resolver only matches leading-dot suffix
-      # or explicit hostnames. With the wildcard, Tencent calls get routed
-      # through Clash/Mihomo to overseas exit nodes and Tencent's CDN
-      # terminates the TLS handshake (SSL UNEXPECTED_EOF_WHILE_READING).
+      # httpx (used by TencentClient and the Flex client) does NOT recognize
+      # the `*.domain.com` wildcard — its httpcore proxy resolver only matches
+      # leading-dot suffix or explicit hostnames. With the wildcard, Tencent
+      # calls get routed through Clash/Mihomo to overseas exit nodes and
+      # Tencent's CDN terminates the TLS handshake (SSL
+      # UNEXPECTED_EOF_WHILE_READING). For IBKR we list both the leading-dot
+      # suffix (.interactivebrokers.com) AND the explicit gdcdyn/ndcdyn hosts
+      # for belt-and-suspenders coverage.
       HTTP_PROXY: ${HTTP_PROXY:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}
-      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,.gtimg.cn,qt.gtimg.cn,web.ifzq.gtimg.cn}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,.gtimg.cn,qt.gtimg.cn,web.ifzq.gtimg.cn,.interactivebrokers.com,gdcdyn.interactivebrokers.com,ndcdyn.interactivebrokers.com}
       # Phase 7a-Flex IBKR read-only sync via Flex Web Service (HTTPS+XML).
       # No Gateway sidecar — snapshots are pulled directly from IBKR's
       # Flex endpoint. See docs/operations/ibkr-readonly-sync-runbook.md
