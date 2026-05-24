@@ -68,6 +68,20 @@ class Settings(BaseSettings):
     )
     ibkr_allow_live: bool = Field(False, alias="MP_IBKR_ALLOW_LIVE")
 
+    # Phase 7a-Flex IBKR read-only sync via Flex Web Service.
+    ibkr_flex_token: str = Field("", alias="IBKR_FLEX_TOKEN")
+    ibkr_flex_query_id: int = Field(0, alias="IBKR_FLEX_QUERY_ID", ge=0)
+    ibkr_flex_base_url: str = Field(
+        "https://gdcdyn.interactivebrokers.com/Universal/servlet",
+        alias="IBKR_FLEX_BASE_URL",
+    )
+    ibkr_flex_poll_interval_seconds: int = Field(
+        5, alias="IBKR_FLEX_POLL_INTERVAL_SECONDS", ge=0,
+    )
+    ibkr_flex_max_wait_seconds: int = Field(
+        60, alias="IBKR_FLEX_MAX_WAIT_SECONDS", ge=0,
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

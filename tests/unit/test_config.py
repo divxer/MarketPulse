@@ -82,3 +82,23 @@ def test_ibkr_settings_accept_env_overrides(monkeypatch):
     assert s.ibkr_account_id == "DU1234567"
     assert s.ibkr_connect_timeout_seconds == 3
     assert s.ibkr_allow_live is True
+
+
+def test_flex_settings_have_sane_defaults(monkeypatch):
+    monkeypatch.setenv("APP_PASSWORD_HASH", "x")
+    monkeypatch.setenv("SESSION_SECRET", "x" * 16)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    monkeypatch.delenv("IBKR_FLEX_TOKEN", raising=False)
+    monkeypatch.delenv("IBKR_FLEX_QUERY_ID", raising=False)
+    monkeypatch.delenv("IBKR_FLEX_BASE_URL", raising=False)
+    monkeypatch.delenv("IBKR_FLEX_POLL_INTERVAL_SECONDS", raising=False)
+    monkeypatch.delenv("IBKR_FLEX_MAX_WAIT_SECONDS", raising=False)
+    from marketpulse.config import Settings
+
+    s = Settings(_env_file=None)
+
+    assert s.ibkr_flex_token == ""
+    assert s.ibkr_flex_query_id == 0
+    assert s.ibkr_flex_poll_interval_seconds == 5
+    assert s.ibkr_flex_max_wait_seconds == 60
+    assert "interactivebrokers.com" in s.ibkr_flex_base_url
