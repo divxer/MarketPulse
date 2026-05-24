@@ -11,17 +11,30 @@ T7b adds the ``IbkrOrderClient`` class with ``EClient``/``EWrapper`` machinery,
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import math
+import threading
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from ibapi.client import EClient
 from ibapi.contract import Contract
 from ibapi.order import Order
+from ibapi.wrapper import EWrapper
 
-from marketpulse.broker.order_types import BrokerOrderObservation
+from marketpulse.broker.order_types import (
+    BrokerOrderObservation,
+    BrokerOrderRequest,
+    CancelResult,
+    OrderAccountMismatchError,
+    OrderCallbackTimeoutError,
+    OrderConnectionError,
+    PlaceResult,
+    StatusResult,
+)
 
 # --- Sensitive-key redaction list -----------------------------------------
 
@@ -255,3 +268,396 @@ def _build_order(
     order.transmit = transmit
     order.orderRef = order_ref
     return order
+
+
+# --- _IbkrOrderApp -------------------------------------------------------
+#
+# Module-private callback target. This is the ONLY place where ``ibapi`` types
+# are exposed; it never leaves the adapter (L37). ``IbkrOrderClient`` owns the
+# instance for the duration of a single command and disposes of it before
+# returning a DTO result.
+
+
+class _IbkrOrderApp(EWrapper, EClient):
+    """Callback target for one ``IbkrOrderClient`` command.
+
+    All synchronization uses ``threading.Event`` (L74); no callback uses
+    ``time.sleep``. The reader thread (``EClient.run``) populates fields and
+    triggers events; the main thread drains them after each bounded ``wait``.
+    """
+
+    def __init__(self) -> None:
+        EClient.__init__(self, self)
+        self.next_valid_id_event = threading.Event()
+        self.next_valid_id: int | None = None
+        self.managed_accounts_event = threading.Event()
+        self.managed_accounts: tuple[str, ...] = ()
+        self.observation_event = threading.Event()
+        self.observations: list[BrokerOrderObservation] = []
+        self.errors: list[dict[str, Any]] = []
+        self.broker_order_id: str | None = None
+        self.broker_perm_id: str | None = None
+
+    # --- ibapi EWrapper callbacks ----------------------------------------
+    def nextValidId(self, orderId: int) -> None:  # noqa: N802 — ibapi name
+        self.next_valid_id = int(orderId)
+        self.next_valid_id_event.set()
+
+    def managedAccounts(self, accountsList: str) -> None:  # noqa: N802
+        self.managed_accounts = tuple(
+            a.strip() for a in accountsList.split(",") if a.strip()
+        )
+        self.managed_accounts_event.set()
+
+    def orderStatus(  # noqa: N802
+        self,
+        orderId,
+        status,
+        filled,
+        remaining,
+        avgFillPrice,
+        permId,
+        parentId=0,
+        lastFillPrice=0,
+        clientId=0,
+        whyHeld="",
+        mktCapPrice=0,
+    ) -> None:
+        obs = _map_order_status_event(
+            observed_at=datetime.now(UTC),
+            broker_order_id=str(orderId),
+            status=str(status),
+            filled=filled,
+            remaining=remaining,
+            avg_fill_price=avgFillPrice,
+            perm_id=str(permId) if permId else None,
+            raw={
+                "orderId": orderId,
+                "status": status,
+                "filled": str(filled),
+                "remaining": str(remaining),
+                "avgFillPrice": str(avgFillPrice),
+                "permId": permId,
+                "parentId": parentId,
+                "whyHeld": whyHeld,
+            },
+        )
+        self.observations.append(obs)
+        self.broker_order_id = str(orderId)
+        if permId:
+            self.broker_perm_id = str(permId)
+        self.observation_event.set()
+
+    def openOrder(  # noqa: N802
+        self, orderId, contract, order, orderState
+    ) -> None:
+        self.observations.append(
+            BrokerOrderObservation(
+                event_type="open_order_seen",
+                broker_order_id=str(orderId),
+                broker_status=getattr(orderState, "status", None),
+                raw=_sanitize_raw(
+                    {
+                        "orderId": orderId,
+                        "status": getattr(orderState, "status", None),
+                    }
+                ),
+            )
+        )
+        self.observation_event.set()
+
+    def error(  # noqa: N802
+        self, reqId, errorCode, errorString, *args, **kwargs
+    ) -> None:
+        self.errors.append(
+            {
+                "reqId": reqId,
+                "errorCode": errorCode,
+                "errorString": errorString,
+            }
+        )
+        # Don't set observation_event — main thread decides fatality.
+
+
+# --- IbkrOrderClient -----------------------------------------------------
+
+
+class IbkrOrderClient:
+    """Public broker order adapter for the Phase 7b paper pilot.
+
+    Exposes ONLY the three Protocol methods (L35): ``place_lmt_order``,
+    ``fetch_order_status``, ``cancel_order``. Connection + reader thread are
+    started fresh per command and torn down before return, so no ibapi state
+    is shared with orchestration (L37). All waits are bounded with
+    ``threading.Event`` deadlines (L74); ``OrderCallbackTimeoutError``
+    distinguishes pre- vs post-``placeOrder`` to drive the service-side
+    status decision (L69).
+    """
+
+    def __init__(
+        self,
+        *,
+        host: str,
+        port: int,
+        client_id: int,
+        account_id: str,
+        connect_timeout_seconds: int = 10,
+        next_valid_id_timeout_seconds: int = 10,
+        observation_timeout_seconds: int = 15,
+        app_factory: Any = None,
+    ) -> None:
+        self._host = host
+        self._port = port
+        self._client_id = client_id
+        self._account_id = account_id
+        self._connect_timeout = connect_timeout_seconds
+        self._next_valid_id_timeout = next_valid_id_timeout_seconds
+        self._observation_timeout = observation_timeout_seconds
+        self._app_factory = app_factory or _IbkrOrderApp
+
+    # --- private helpers --------------------------------------------------
+
+    def _connect_and_validate(self) -> _IbkrOrderApp:
+        """Connect, start reader, wait for ``managedAccounts``, validate account.
+
+        Raises ``OrderConnectionError`` for any connect-time failure or if the
+        ``managedAccounts`` callback never arrives; raises
+        ``OrderAccountMismatchError`` if the connected accounts don't include
+        ``self._account_id`` (L40 safety — never proceed to placeOrder against
+        an account the broker hasn't confirmed it manages for this session).
+        """
+
+        app = self._app_factory()
+        try:
+            app.connect(self._host, self._port, self._client_id)
+        except Exception as exc:
+            raise OrderConnectionError(
+                f"failed to connect to {self._host}:{self._port}: {exc}"
+            ) from exc
+
+        reader = threading.Thread(
+            target=app.run, daemon=True, name="ibkr-order-reader"
+        )
+        reader.start()
+
+        if not app.managed_accounts_event.wait(self._connect_timeout):
+            with contextlib.suppress(Exception):
+                app.disconnect()
+            raise OrderConnectionError(
+                "managedAccounts callback did not arrive before timeout"
+            )
+
+        if self._account_id not in app.managed_accounts:
+            with contextlib.suppress(Exception):
+                app.disconnect()
+            raise OrderAccountMismatchError(
+                f"requested account {self._account_id!r} not in managed "
+                f"accounts {app.managed_accounts!r}"
+            )
+        return app
+
+    @staticmethod
+    def _safe_disconnect(app: _IbkrOrderApp) -> None:
+        with contextlib.suppress(Exception):
+            app.disconnect()
+
+    # --- BrokerOrderClient Protocol --------------------------------------
+
+    def place_lmt_order(
+        self,
+        request: BrokerOrderRequest,
+        *,
+        intent_id: int,
+        order_ref: str,
+    ) -> PlaceResult:
+        app = self._connect_and_validate()
+        try:
+            # Step 1: get a fresh order id.
+            app.reqIds(-1)
+            if not app.next_valid_id_event.wait(self._next_valid_id_timeout):
+                raise OrderCallbackTimeoutError(
+                    "nextValidId callback did not arrive before timeout",
+                    placeorder_called=False,
+                )
+            assert app.next_valid_id is not None
+            order_id = app.next_valid_id
+
+            contract = _build_contract(request.symbol, request.asset_class)
+            order = _build_order(
+                side=request.side,
+                quantity=request.quantity,
+                order_type=request.order_type,
+                limit_price=request.limit_price,
+                transmit=request.transmit,
+                order_ref=order_ref,
+            )
+
+            # Reset before issuing the place so the wait below only sees
+            # callbacks caused by this placeOrder.
+            app.observation_event.clear()
+            app.placeOrder(order_id, contract, order)
+
+            if not request.transmit:
+                # L41: staged_to_tws — IBKR may never callback for a staged
+                # order, so synthesize the observation and short-circuit.
+                app.observations.append(
+                    BrokerOrderObservation(
+                        event_type="staged_to_tws",
+                        broker_order_id=str(order_id),
+                        broker_status="Staged",
+                        raw={
+                            "order_id": order_id,
+                            "transmit": False,
+                            "order_ref": order_ref,
+                        },
+                        message="staged in TWS, not submitted to broker",
+                    )
+                )
+                app.broker_order_id = str(order_id)
+                return PlaceResult(
+                    placeorder_called=True,
+                    broker_order_id=app.broker_order_id,
+                    broker_perm_id=app.broker_perm_id,
+                    managed_accounts=app.managed_accounts,
+                    observations=tuple(app.observations),
+                )
+
+            # transmit=True: wait for the first orderStatus/openOrder callback.
+            if not app.observation_event.wait(self._observation_timeout):
+                raise OrderCallbackTimeoutError(
+                    "orderStatus callback did not arrive before timeout",
+                    placeorder_called=True,
+                )
+
+            # L41: synthesize submitted_to_broker if absent so the service
+            # always sees the canonical "we asked TWS to send it" marker.
+            has_submitted = any(
+                o.event_type == "submitted_to_broker" for o in app.observations
+            )
+            if not has_submitted:
+                app.observations.insert(
+                    0,
+                    BrokerOrderObservation(
+                        event_type="submitted_to_broker",
+                        broker_order_id=str(order_id),
+                        raw={
+                            "order_id": order_id,
+                            "transmit": True,
+                            "order_ref": order_ref,
+                        },
+                        message="placeOrder returned",
+                    ),
+                )
+            if app.broker_order_id is None:
+                app.broker_order_id = str(order_id)
+
+            return PlaceResult(
+                placeorder_called=True,
+                broker_order_id=app.broker_order_id,
+                broker_perm_id=app.broker_perm_id,
+                managed_accounts=app.managed_accounts,
+                observations=tuple(app.observations),
+            )
+        finally:
+            self._safe_disconnect(app)
+
+    def fetch_order_status(
+        self,
+        *,
+        broker_order_id: str,
+        account_id: str,
+    ) -> StatusResult:
+        if account_id != self._account_id:
+            raise OrderAccountMismatchError(
+                f"requested account {account_id!r} != client account "
+                f"{self._account_id!r}"
+            )
+        app = self._connect_and_validate()
+        try:
+            app.observation_event.clear()
+            # L62: current-session-only visibility — ask for currently-open
+            # orders. If the broker has no state for this order in this
+            # session, observations stays empty and ``success`` is still True.
+            app.reqOpenOrders()
+            app.observation_event.wait(self._observation_timeout)
+            matching = tuple(
+                o for o in app.observations if o.broker_order_id == broker_order_id
+            )
+            return StatusResult(
+                success=True,
+                managed_accounts=app.managed_accounts,
+                observations=matching,
+            )
+        finally:
+            self._safe_disconnect(app)
+
+    def cancel_order(
+        self,
+        *,
+        broker_order_id: str,
+        account_id: str,
+        was_transmitted: bool,
+    ) -> CancelResult:
+        if account_id != self._account_id:
+            raise OrderAccountMismatchError(
+                f"requested account {account_id!r} != client account "
+                f"{self._account_id!r}"
+            )
+        app = self._connect_and_validate()
+        try:
+            if not was_transmitted:
+                # L63: staged-cancelled — never reached the broker.
+                obs = BrokerOrderObservation(
+                    event_type="staged_cancelled",
+                    broker_order_id=broker_order_id,
+                    raw={
+                        "broker_order_id": broker_order_id,
+                        "was_transmitted": False,
+                    },
+                    message="staged order cancelled locally",
+                )
+                return CancelResult(
+                    success=True,
+                    managed_accounts=app.managed_accounts,
+                    observations=(obs,),
+                )
+
+            app.observation_event.clear()
+            try:
+                cancel_arg = int(broker_order_id)
+            except (TypeError, ValueError) as exc:
+                raise OrderAccountMismatchError(
+                    f"broker_order_id {broker_order_id!r} is not numeric"
+                ) from exc
+
+            # ibapi's cancelOrder may take 1 or 2 positional args depending
+            # on version; the fake test app accepts variadic.
+            try:
+                app.cancelOrder(cancel_arg, "")
+            except TypeError:
+                app.cancelOrder(cancel_arg)
+
+            request_obs = BrokerOrderObservation(
+                event_type="broker_cancel_requested",
+                broker_order_id=broker_order_id,
+                raw={
+                    "broker_order_id": broker_order_id,
+                    "was_transmitted": True,
+                },
+                message="cancelOrder called",
+            )
+            if not app.observation_event.wait(self._observation_timeout):
+                raise OrderCallbackTimeoutError(
+                    "cancel orderStatus callback did not arrive before timeout",
+                    placeorder_called=False,
+                )
+            broker_observations = tuple(
+                o for o in app.observations if o.broker_order_id == broker_order_id
+            )
+            return CancelResult(
+                success=True,
+                managed_accounts=app.managed_accounts,
+                observations=(request_obs,) + broker_observations,
+            )
+        finally:
+            self._safe_disconnect(app)

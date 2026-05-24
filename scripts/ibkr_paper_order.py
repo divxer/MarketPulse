@@ -97,15 +97,38 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _build_client() -> BrokerOrderClient:
-    """Build the real broker client. Wired by T7b; raises until then.
+def _build_client(account_id: str | None = None) -> BrokerOrderClient:
+    """Build the real broker client.
 
-    Tests inject a fake by monkeypatching this function.
+    ``account_id`` is required for the real wiring (the adapter validates that
+    TWS' ``managedAccounts`` includes this account before any place/cancel
+    call). The default-``None`` arg is preserved for backwards compatibility
+    with tests that monkeypatch ``_build_client`` without a binding;
+    invoking the real wiring without an account raises ``SystemExit``.
     """
 
-    raise SystemExit(
-        "IbkrOrderClient not yet wired (T7b). Tests must monkeypatch "
-        "scripts.ibkr_paper_order._build_client."
+    if not account_id:
+        raise SystemExit(
+            "IbkrOrderClient requires --account; pass account_id "
+            "explicitly when constructing _build_client outside tests."
+        )
+    # Lazy import to keep the ``ibapi`` dependency out of test import paths
+    # that monkeypatch this function before any real call.
+    from marketpulse.broker.ibkr_order_client import IbkrOrderClient
+
+    settings = get_settings()
+    return IbkrOrderClient(
+        host=settings.ibkr_order_host,
+        port=settings.ibkr_order_port,
+        client_id=settings.ibkr_order_client_id,
+        account_id=account_id,
+        connect_timeout_seconds=settings.ibkr_order_connect_timeout_seconds,
+        next_valid_id_timeout_seconds=(
+            settings.ibkr_order_next_valid_id_timeout_seconds
+        ),
+        observation_timeout_seconds=(
+            settings.ibkr_order_observation_timeout_seconds
+        ),
     )
 
 
@@ -132,7 +155,7 @@ def _do_place(args: argparse.Namespace, session: Session) -> int:
         local_idempotency_key=key,
         transmit=(args.transmit == "true"),
     )
-    client = _build_client()
+    client = _build_client(args.account)
     result = order_service.place_order(
         session,
         client=client,
@@ -145,7 +168,7 @@ def _do_place(args: argparse.Namespace, session: Session) -> int:
 
 
 def _do_status(args: argparse.Namespace, session: Session) -> int:
-    client = _build_client()
+    client = _build_client(args.account)
     result = order_service.fetch_status(
         session, client=client, intent_id=args.intent_id
     )
@@ -157,7 +180,7 @@ def _do_status(args: argparse.Namespace, session: Session) -> int:
 def _do_cancel(args: argparse.Namespace, session: Session) -> int:
     if not args.confirm_cancel:
         raise SystemExit("--confirm-cancel required (L21)")
-    client = _build_client()
+    client = _build_client(args.account)
     result = order_service.cancel_order(
         session,
         client=client,

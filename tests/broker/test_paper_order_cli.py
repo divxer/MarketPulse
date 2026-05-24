@@ -107,7 +107,7 @@ def cli(monkeypatch, tmp_path):
 
 
 def _install_client(monkeypatch, cli_mod, client: FakeOrderClient) -> None:
-    monkeypatch.setattr(cli_mod, "_build_client", lambda: client)
+    monkeypatch.setattr(cli_mod, "_build_client", lambda *a, **kw: client)
 
 
 def _place_argv(db_url, **overrides):
