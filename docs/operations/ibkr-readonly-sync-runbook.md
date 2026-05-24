@@ -11,6 +11,28 @@ It does not place, modify, cancel, reconcile, or drive paper trading state.
 - Default paper port is `7497`.
 - Known live port `7496` is blocked unless `MP_IBKR_ALLOW_LIVE=true`.
 
+### Read-Only API enforcement (TWS-side, required)
+
+The MarketPulse Phase 7a adapter uses Interactive Brokers' official
+`ibapi` Python SDK. Unlike the older community `ib_insync` library,
+`ibapi` has **no client-side `readonly=True` flag** on `connect()`.
+Read-only enforcement therefore lives in TWS / IB Gateway itself:
+
+1. Open **TWS → File → Global Configuration → API → Precautions**.
+2. Tick **"Read-Only API"**.
+3. Click **OK / Apply**.
+
+With that checkbox enabled, TWS refuses any order-placement, cancel,
+or modify request that arrives on the API socket — even if a buggy or
+malicious client were to send one. The MarketPulse adapter also never
+calls any mutating `ibapi` method (architecture guard test
+`test_no_ibkr_mutating_api_names_in_production_or_scripts` enforces
+this in CI), giving us defense in depth: TWS-side hard stop **plus**
+codebase-side absence.
+
+Operators must verify the checkbox is set each time TWS is reinstalled
+or its config is reset, as it does not persist across fresh installs.
+
 ## Environment
 
 ```bash
