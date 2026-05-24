@@ -60,3 +60,21 @@ def test_paper_notifications_independent_of_recap_enabled(monkeypatch):
 
     assert settings.paper_notifications_enabled is False
     assert settings.notifier_recap_enabled is True
+
+
+def test_ibkr_allow_live_parses_truthy_strings(monkeypatch):
+    """Lock pydantic-settings boolean parsing for MP_IBKR_ALLOW_LIVE.
+
+    The live-port guard depends on Settings reliably parsing common
+    string env values into booleans. Lock "1", "true", "false".
+    """
+    monkeypatch.setenv("APP_PASSWORD_HASH", "x")
+    monkeypatch.setenv("SESSION_SECRET", "0123456789abcdef")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+
+    for value in ("1", "true"):
+        monkeypatch.setenv("MP_IBKR_ALLOW_LIVE", value)
+        assert _fresh_settings().ibkr_allow_live is True, value
+
+    monkeypatch.setenv("MP_IBKR_ALLOW_LIVE", "false")
+    assert _fresh_settings().ibkr_allow_live is False

@@ -16,6 +16,9 @@ from marketpulse.broker.repository import (
     persist_snapshot_rows,
 )
 from marketpulse.broker.types import BrokerEnvironment, SyncResult, classify_broker_environment
+from marketpulse.logging import get_logger
+
+log = get_logger(__name__)
 
 NY = ZoneInfo("America/New_York")
 
@@ -125,20 +128,29 @@ def run_readonly_sync(
             **counts,
         )
     except Exception as exc:
-        mark_run_failed(
-            session,
-            sync_run_id=run.id,
-            completed_at=started_at,
-            error_type=type(exc).__name__,
-            error_message=str(exc),
-            context_patch=_base_context(
-                config,
-                selected_account_id=None,
-                window_start=window_start,
-                window_end=window_end,
-            ),
-        )
-        session.flush()
+        try:
+            mark_run_failed(
+                session,
+                sync_run_id=run.id,
+                completed_at=datetime.now(UTC),
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+                context_patch=_base_context(
+                    config,
+                    selected_account_id=None,
+                    window_start=window_start,
+                    window_end=window_end,
+                ),
+            )
+            session.flush()
+        except Exception as commit_exc:  # noqa: BLE001
+            log.warning(
+                "broker_sync_mark_run_failed_failed",
+                original_error_type=type(exc).__name__,
+                original_error=str(exc),
+                commit_error_type=type(commit_exc).__name__,
+                commit_error=str(commit_exc),
+            )
         return SyncResult(
             sync_run_id=run.id,
             broker="IBKR",
