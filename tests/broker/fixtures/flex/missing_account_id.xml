@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FlexQueryResponse queryName="MarketPulse_7a" type="AF">
+  <FlexStatements count="1">
+    <FlexStatement accountId="" fromDate="20241219" toDate="20241220" period="LastBusinessDay" whenGenerated="20241220;113000">
+      <AccountInformation accountId="" accountType="DEMO" customerType="INDIVIDUAL" baseCurrency="USD" netLiquidationValue="100000.00" buyingPower="400000.00" maintenanceMarginReq="0.00" excessLiquidity="100000.00"/>
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>

@@ -1,5 +1,10 @@
 # Phase 7a - IBKR Paper Account Read-Only Sync Design
 
+> **SUPERSEDED 2026-05-24:** the IB Gateway sidecar / ibapi transport in this spec
+> was replaced by IBKR Flex Web Service in
+> [Phase 7a-Flex](2026-05-24-phase-7a-flex-readonly-sync-design.md). This document
+> is kept for historical reference; do not implement from it.
+
 **Status:** Draft locked for implementation planning  
 **Author:** Codex + Harvey, 2026-05-23  
 **Spec-type:** sub-project under Phase 7 broker integration  

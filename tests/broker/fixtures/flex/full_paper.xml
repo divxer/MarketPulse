@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FlexQueryResponse queryName="MarketPulse_7a" type="AF">
+  <FlexStatements count="1">
+    <FlexStatement accountId="DU1234567" fromDate="20241219" toDate="20241220" period="LastBusinessDay" whenGenerated="20241220;113000">
+      <AccountInformation accountId="DU1234567" accountType="DEMO" customerType="INDIVIDUAL" baseCurrency="USD" netLiquidationValue="100000.00" buyingPower="400000.00" maintenanceMarginReq="0.00" excessLiquidity="100000.00"/>
+      <CashReport>
+        <CashReportCurrency accountId="DU1234567" currency="USD" endingCash="50000.00" endingSettledCash="50000.00" accruedInterest="0.00"/>
+        <CashReportCurrency accountId="DU1234567" currency="HKD" endingCash="0.00" endingSettledCash="0.00" accruedInterest="0.00"/>
+      </CashReport>
+      <OpenPositions>
+        <OpenPosition accountId="DU1234567" symbol="AAPL" assetCategory="STK" position="100" costBasisPrice="170.50" markPrice="175.20" positionValue="17520.00" fifoPnlUnrealized="470.00" realizedPnl="0.00"/>
+        <OpenPosition accountId="DU1234567" symbol="MSFT" assetCategory="STK" position="50" costBasisPrice="380.00" markPrice="395.10" positionValue="19755.00" fifoPnlUnrealized="755.00" realizedPnl="0.00"/>
+        <OpenPosition accountId="DU1234567" symbol="0700" assetCategory="STK" position="200" costBasisPrice="380.50" markPrice="395.00" positionValue="79000.00" fifoPnlUnrealized="2900.00" realizedPnl="0.00"/>
+      </OpenPositions>
+      <Trades>
+        <Trade accountId="DU1234567" tradeID="9876543210" ibOrderID="ORD001" symbol="AAPL" assetCategory="STK" buySell="BUY" quantity="100" tradePrice="170.50" dateTime="20241219;143015"/>
+        <Trade accountId="DU1234567" tradeID="9876543211" ibOrderID="ORD002" symbol="MSFT" assetCategory="STK" buySell="BUY" quantity="50" tradePrice="380.00" dateTime="20241219;143108"/>
+      </Trades>
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>

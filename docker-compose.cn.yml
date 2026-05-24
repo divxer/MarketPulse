@@ -72,83 +72,21 @@ services:
       # terminates the TLS handshake (SSL UNEXPECTED_EOF_WHILE_READING).
       HTTP_PROXY: ${HTTP_PROXY:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}
-      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,.gtimg.cn,qt.gtimg.cn,web.ifzq.gtimg.cn,ib-gateway}
-      # Phase 7a IBKR read-only sync. ib-gateway service below provides the
-      # paper-account socket on port 4002. With these defaults the CLI
-      # `uv run python scripts/sync_ibkr_readonly.py` works without args.
-      IBKR_HOST: ${IBKR_HOST:-ib-gateway}
-      IBKR_PORT: ${IBKR_PORT:-4002}
-      IBKR_CLIENT_ID: ${IBKR_CLIENT_ID:-71}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,.gtimg.cn,qt.gtimg.cn,web.ifzq.gtimg.cn}
+      # Phase 7a-Flex IBKR read-only sync via Flex Web Service (HTTPS+XML).
+      # No Gateway sidecar — snapshots are pulled directly from IBKR's
+      # Flex endpoint. See docs/operations/ibkr-readonly-sync-runbook.md
+      # for the one-time IBKR Portal setup.
+      IBKR_FLEX_TOKEN: ${IBKR_FLEX_TOKEN:-}
+      IBKR_FLEX_QUERY_ID: ${IBKR_FLEX_QUERY_ID:-}
+      IBKR_FLEX_BASE_URL: ${IBKR_FLEX_BASE_URL:-https://gdcdyn.interactivebrokers.com/Universal/servlet}
+      IBKR_FLEX_POLL_INTERVAL_SECONDS: ${IBKR_FLEX_POLL_INTERVAL_SECONDS:-5}
+      IBKR_FLEX_MAX_WAIT_SECONDS: ${IBKR_FLEX_MAX_WAIT_SECONDS:-60}
       IBKR_ACCOUNT_ID: ${IBKR_ACCOUNT_ID:-}
-      IBKR_CONNECT_TIMEOUT_SECONDS: ${IBKR_CONNECT_TIMEOUT_SECONDS:-10}
       MP_IBKR_ALLOW_LIVE: ${MP_IBKR_ALLOW_LIVE:-false}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
       interval: 30s
       timeout: 5s
       start_period: 20s
-      retries: 3
-
-  # Phase 7a IBKR read-only broker truth capture. Headless IB Gateway with
-  # IBC auto-login. paper mode by default — 4002 is the IB Gateway paper
-  # port (TWS paper is 7497; we use Gateway, not TWS, because Gateway is
-  # designed for 7x24 server-side automation).
-  #
-  # CRITICAL one-time setup after first boot (VNC into 192.168.50.29:5900):
-  #   1. TWS API → Settings → ✅ Enable ActiveX and Socket Clients
-  #   2. TWS API → Settings → Socket Port = 4002
-  #   3. TWS API → Precautions → ✅ Read-Only API (defense-in-depth)
-  #   4. TWS API → Settings → Trusted IPs → add the marketpulse container's
-  #      docker IP (or leave empty if same network)
-  #
-  # The image accepts a SettingsUpdateMode env var that auto-applies these
-  # via Jts.ini — most settings are picked up on first boot, but
-  # Read-Only API must be verified by hand.
-  ib-gateway:
-    # China-friendly mirror of ghcr.io/gnzsnz/ib-gateway:stable. The
-    # 1ms.run mirror routes through mainland China CDN, so pulls take
-    # seconds instead of timing out. Override via Portainer env var if
-    # the mirror is down: set IB_GATEWAY_IMAGE=ghcr.io/gnzsnz/ib-gateway:stable
-    # in the stack and the marketpulse VPN/proxy will handle the upstream
-    # pull (slower but reliable).
-    image: ${IB_GATEWAY_IMAGE:-ghcr.1ms.run/gnzsnz/ib-gateway:stable}
-    pull_policy: always
-    container_name: ib-gateway
-    restart: unless-stopped
-    ports:
-      # VNC for first-boot GUI configuration. Bind to LAN IP (NAS local
-      # network only); do NOT expose to the public internet. Connect from
-      # your Mac with: open vnc://192.168.50.29:5900
-      - "192.168.50.29:5900:5900"
-      # API socket: only exposed within the compose network. marketpulse
-      # talks to ib-gateway:4002 via docker DNS — no host port bind needed.
-    environment:
-      TWS_USERID: ${IBKR_USERNAME}            # IBKR paper account username
-      TWS_PASSWORD: ${IBKR_PASSWORD}          # IBKR paper account password
-      TRADING_MODE: ${IBKR_TRADING_MODE:-paper}
-      READ_ONLY_API: ${IBKR_READ_ONLY_API:-yes}
-      VNC_SERVER_PASSWORD: ${VNC_SERVER_PASSWORD}
-      TZ: America/New_York
-      # IBC auto-restart at 23:00 NY to recover before the daily 23:55
-      # IBKR-side forced logout. Avoids the "Gateway was disconnected
-      # overnight" failure mode.
-      TWOFA_TIMEOUT_ACTION: restart
-      AUTO_RESTART_TIME: "23:00"
-      RELOGIN_AFTER_TWOFA_TIMEOUT: "yes"
-    # NOTE: do NOT bind-mount /home/ibgateway. The image ships its
-    # entrypoint script at /home/ibgateway/scripts/run.sh; mounting an
-    # empty host directory there hides the script and the container fails
-    # to start with "exec /home/ibgateway/scripts/run.sh: no such file or
-    # directory". Persistence is not required for this role: IBC re-logs
-    # in fresh on every boot from TWS_USERID / TWS_PASSWORD env, READ_ONLY_API
-    # is re-applied on every boot, Jts.ini regenerates. If future phases
-    # need persistence (custom IBC config, captured Jts dialogs), mount a
-    # narrow subpath instead — never /home/ibgateway itself.
-    healthcheck:
-      # Check if the TWS API socket is listening. Gateway takes ~30s to
-      # fully start (login + cold cache). 60s start_period.
-      test: ["CMD-SHELL", "nc -z localhost 4002 || exit 1"]
-      interval: 60s
-      timeout: 10s
-      start_period: 60s
       retries: 3

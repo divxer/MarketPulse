@@ -60,53 +60,23 @@ services:
       # gtimg.cn requests bypass any HTTP_PROXY/Clash route and go direct.
       # Without this, Tencent calls get sent through overseas exit nodes
       # and Tencent's CDN closes the TLS connection mid-handshake.
-      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,.gtimg.cn,qt.gtimg.cn,web.ifzq.gtimg.cn,ib-gateway}
-      # Phase 7a IBKR read-only sync. See docker-compose.cn.yml for the
-      # full ib-gateway service rationale + one-time GUI setup checklist.
-      IBKR_HOST: ${IBKR_HOST:-ib-gateway}
-      IBKR_PORT: ${IBKR_PORT:-4002}
-      IBKR_CLIENT_ID: ${IBKR_CLIENT_ID:-71}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,.gtimg.cn,qt.gtimg.cn,web.ifzq.gtimg.cn}
+      # Phase 7a-Flex IBKR read-only sync via Flex Web Service (HTTPS+XML).
+      # No Gateway sidecar — snapshots are pulled directly from IBKR's
+      # Flex endpoint. See docs/operations/ibkr-readonly-sync-runbook.md
+      # for the one-time IBKR Portal setup.
+      IBKR_FLEX_TOKEN: ${IBKR_FLEX_TOKEN:-}
+      IBKR_FLEX_QUERY_ID: ${IBKR_FLEX_QUERY_ID:-}
+      IBKR_FLEX_BASE_URL: ${IBKR_FLEX_BASE_URL:-https://gdcdyn.interactivebrokers.com/Universal/servlet}
+      IBKR_FLEX_POLL_INTERVAL_SECONDS: ${IBKR_FLEX_POLL_INTERVAL_SECONDS:-5}
+      IBKR_FLEX_MAX_WAIT_SECONDS: ${IBKR_FLEX_MAX_WAIT_SECONDS:-60}
       IBKR_ACCOUNT_ID: ${IBKR_ACCOUNT_ID:-}
-      IBKR_CONNECT_TIMEOUT_SECONDS: ${IBKR_CONNECT_TIMEOUT_SECONDS:-10}
       MP_IBKR_ALLOW_LIVE: ${MP_IBKR_ALLOW_LIVE:-false}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
       interval: 30s
       timeout: 5s
       start_period: 20s
-      retries: 3
-
-  # Phase 7a IBKR read-only broker truth capture. Same as cn.yml; see
-  # that file's comment block for the full setup checklist.
-  ib-gateway:
-    image: ghcr.io/gnzsnz/ib-gateway:stable
-    pull_policy: always
-    container_name: ib-gateway
-    restart: unless-stopped
-    ports:
-      - "${IB_GATEWAY_VNC_BIND:-0.0.0.0:5900}:5900"
-    environment:
-      TWS_USERID: ${IBKR_USERNAME}
-      TWS_PASSWORD: ${IBKR_PASSWORD}
-      TRADING_MODE: ${IBKR_TRADING_MODE:-paper}
-      READ_ONLY_API: ${IBKR_READ_ONLY_API:-yes}
-      VNC_SERVER_PASSWORD: ${VNC_SERVER_PASSWORD}
-      TZ: America/New_York
-      TWOFA_TIMEOUT_ACTION: restart
-      AUTO_RESTART_TIME: "23:00"
-      RELOGIN_AFTER_TWOFA_TIMEOUT: "yes"
-    # NOTE: do NOT mount /home/ibgateway (bind OR named volume). See the
-    # corresponding comment in docker-compose.cn.yml for the rationale —
-    # the image entrypoint lives at /home/ibgateway/scripts/run.sh; a
-    # named volume that auto-populates from the image works on some
-    # docker versions but not others, and the failure mode (exec: no
-    # such file) is opaque. We don't need persistence: IBC re-logs in
-    # from env on every boot; READ_ONLY_API is re-applied.
-    healthcheck:
-      test: ["CMD-SHELL", "nc -z localhost 4002 || exit 1"]
-      interval: 60s
-      timeout: 10s
-      start_period: 60s
       retries: 3
 
 volumes:

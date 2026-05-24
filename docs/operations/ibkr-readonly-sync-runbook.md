@@ -1,138 +1,61 @@
-# IBKR Read-Only Sync Runbook
+# IBKR Read-Only Sync Runbook (Phase 7a-Flex)
 
-Phase 7a captures IBKR broker truth into append-only `broker_*` snapshot tables.
-It does not place, modify, cancel, reconcile, or drive paper trading state.
+Phase 7a-Flex captures IBKR broker truth via the official Flex Web Service
+into the append-only `broker_*` snapshot tables. No daemon, no Gateway
+container, no VNC, no 2FA at request time.
 
 ## Preconditions
 
-- IBKR TWS or IB Gateway is running.
-- Paper trading API access is enabled.
-- Socket API port is reachable from the MarketPulse runtime.
-- Default Gateway paper port is `4002` (TWS paper is `7497`).
-- Known live ports `4001` (Gateway) / `7496` (TWS) are blocked unless `MP_IBKR_ALLOW_LIVE=true`.
+- IBKR account with paper trading enabled (DU<digits>) or live account if `MP_IBKR_ALLOW_LIVE=true`.
+- Activity Flex Query created in IBKR Portal (one-time setup, below).
+- Flex Token issued and recorded (one-time setup, below).
+- Outbound HTTPS to `gdcdyn.interactivebrokers.com` reachable from MarketPulse runtime.
 
-## Recommended deployment: IB Gateway in Docker (production)
+## One-time setup: IBKR Portal
 
-The production stack on the NAS runs **IB Gateway** (not TWS) as a
-sidecar container alongside `marketpulse`. Gateway is the headless,
-lightweight flavor designed for 7×24 server-side automation. The
-compose files (`docker-compose.cn.yml`, `docker-compose.prod.yml`)
-define both services on a shared docker network; `marketpulse` talks
-to `ib-gateway:4002` via docker DNS — no host port bind needed for
-the API socket.
+### 1. Create the Activity Flex Query
 
-### 1. Pre-flight: get an IBKR paper account
+1. Log in to <https://www.interactivebrokers.com> → **Reports** → **Flex Queries**.
+2. **Activity Flex Query** → "Create" (or pencil-edit an existing one).
+3. Name it `MarketPulse_7a_ReadOnly_Snapshot`.
+4. Period: `Last Business Day` (or `Today`).
+5. Format: `XML`, Date format `yyyy-MM-dd`, Time format `HH:mm:ss`.
+6. **Sections** — tick exactly these (others are optional, see "Section drift"):
+   - **Account Information** (REQUIRED)
+   - **Cash Report** → tick "All currencies"
+   - **Open Positions**
+   - **Trades** → tick at least "Executions"
+7. Save. Note the **Query ID** (a 6-digit integer).
 
-- Sign up at <https://www.interactivebrokers.com> → "Open Account" → paper trading.
-- Paper accounts are **free** and require no deposit.
-- Your paper account ID starts with `DU` (e.g. `DU1234567`).
-- Paper has a **separate password** from your live account; IBKR forces you to set it on first paper login.
+### 2. Issue a Flex Token
 
-### 2. Populate `.env` on the NAS
+1. Reports → Flex Queries → top right gear → **Token Renewal** (or "Get Current Token").
+2. Generate token. **Save it in a password manager** — IBKR does not let you re-display existing tokens.
+3. Tokens do not expire on a fixed schedule but can be revoked manually.
 
-The Portainer stack reads variables from a `.env` file (or its
-"Environment variables" panel). The minimum required for `ib-gateway`
-to boot:
+### 3. Populate `.env` / Portainer env
 
 ```env
-IBKR_USERNAME=<paper account username>
-IBKR_PASSWORD=<paper account password>
+IBKR_FLEX_TOKEN=<64-char token>
+IBKR_FLEX_QUERY_ID=<6-digit query id>
 IBKR_ACCOUNT_ID=DUxxxxxxx
-IBKR_TRADING_MODE=paper
-IBKR_READ_ONLY_API=yes
-IB_GATEWAY_VNC_BIND=192.168.50.29:5900
-VNC_SERVER_PASSWORD=<6–8 char VNC password — NOT your IBKR password>
-```
-
-Full env reference is in `.env.example`. Never commit `.env` to git.
-
-### 3. Deploy the updated stack via Portainer
-
-1. Portainer → Stacks → marketpulse → Update.
-2. Confirm the env panel has all the new IBKR_* and VNC_* keys.
-3. Pull and recreate. First boot of `ib-gateway` takes ~30–60s (login + cold cache).
-4. `docker ps` should show both `marketpulse` and `ib-gateway` as `Up` and `healthy`.
-
-### 4. First-boot GUI verification (one-time, via VNC)
-
-IBC auto-logs in and toggles most settings, but verify Read-Only API
-and Trusted IPs the first time. From your Mac:
-
-```bash
-open vnc://192.168.50.29:5900
-```
-
-Enter the `VNC_SERVER_PASSWORD` from `.env`. Then in the IB Gateway window:
-
-1. **Configure → Settings → API → Settings**
-   - ✅ Enable ActiveX and Socket Clients
-   - Socket port = `4002` (paper)
-   - Master API client ID: leave blank
-2. **Configure → Settings → API → Precautions**
-   - ✅ **Read-Only API** (defense in depth on top of our adapter's static guard)
-3. **Configure → Settings → API → Trusted IPs**
-   - Leave empty — only the docker network can reach the socket
-4. Click **OK**. Config persists across restarts because `/home/ibgateway` is a volume.
-
-Disconnect VNC. You normally never need it again.
-
-### 5. Verify end-to-end
-
-```bash
-sudo docker exec marketpulse uv run python scripts/sync_ibkr_readonly.py
-```
-
-Expected on success: `status: completed` + row counts. Then check the snapshot tables:
-
-```bash
-sudo docker exec marketpulse uv run python -c "
-import sqlite3
-con = sqlite3.connect('/data/marketpulse.db')
-for tbl in ('broker_sync_run', 'broker_account_snapshot',
-            'broker_position_snapshot', 'broker_cash_snapshot'):
-    n = con.execute(f'SELECT COUNT(*) FROM {tbl}').fetchone()[0]
-    print(f'{tbl}: {n}')"
-```
-
-Each non-zero count confirms the pipeline is working.
-
-### Read-Only API enforcement (TWS-side, required)
-
-The MarketPulse Phase 7a adapter uses Interactive Brokers' official
-`ibapi` Python SDK. Unlike the older community `ib_insync` library,
-`ibapi` has **no client-side `readonly=True` flag** on `connect()`.
-Read-only enforcement therefore lives in TWS / IB Gateway itself:
-
-1. Open **TWS → File → Global Configuration → API → Precautions**.
-2. Tick **"Read-Only API"**.
-3. Click **OK / Apply**.
-
-With that checkbox enabled, TWS refuses any order-placement, cancel,
-or modify request that arrives on the API socket — even if a buggy or
-malicious client were to send one. The MarketPulse adapter also never
-calls any mutating `ibapi` method (architecture guard test
-`test_no_ibkr_mutating_api_names_in_production_or_scripts` enforces
-this in CI), giving us defense in depth: TWS-side hard stop **plus**
-codebase-side absence.
-
-Operators must verify the checkbox is set each time TWS is reinstalled
-or its config is reset, as it does not persist across fresh installs.
-
-## Environment
-
-```bash
-IBKR_HOST=127.0.0.1
-IBKR_PORT=7497
-IBKR_CLIENT_ID=71
-IBKR_ACCOUNT_ID=DUxxxxxxx
-IBKR_CONNECT_TIMEOUT_SECONDS=10
 MP_IBKR_ALLOW_LIVE=false
 ```
 
-`IBKR_ACCOUNT_ID` is recommended. If it is unset and IBKR returns multiple
-accounts, the sync fails closed and writes no snapshot rows.
+If using Portainer, **escape `$` as `$$`** in any field — docker-compose
+variable substitution will silently truncate otherwise. (Tokens are
+hexadecimal so usually unaffected; this is a generic warning.)
 
-## Manual Smoke
+## Security considerations
+
+**Token-in-URL caveat:** IBKR's Flex Web Service accepts the token as a URL
+query parameter (`?t=<token>`). Any HTTP proxy or access log along the
+request path will record it. Avoid running the sync behind a logging HTTP
+proxy, or ensure such access logs are scrubbed / not retained. Keep the
+token in a password manager and rotate it via IBKR Portal if you suspect
+exposure.
+
+## Manual smoke
 
 ```bash
 uv run python scripts/sync_ibkr_readonly.py
@@ -141,64 +64,96 @@ uv run python scripts/sync_ibkr_readonly.py
 Successful output:
 
 ```text
-sync_run_id: 123
+sync_run_id: 1
 broker: IBKR
 broker_environment: paper
-account: DUxxxxxxx
-host: 127.0.0.1
-port: 7497
-client_id: 71
+account: DU1234567
+transport: flex
+endpoint: https://gdcdyn.interactivebrokers.com/Universal/servlet
+query_id: 123456
+reference_code: 1234567890
 status: completed
 account snapshots: 1
 cash rows: 2
 positions: 5
-open orders: 0
+open orders: 0 (not available via Flex Activity)
 executions: 3
 ```
 
 Failed output:
 
 ```text
-sync_run_id: 124
+sync_run_id: 2
 broker: IBKR
-broker_environment: unknown
+broker_environment: paper
 account: unknown
-host: 127.0.0.1
-port: 7497
-client_id: 71
+transport: flex
+endpoint: https://gdcdyn.interactivebrokers.com/Universal/servlet
+query_id: 123456
+reference_code: 9876543210
 status: failed
-error_type: ConnectionError
-error_message: ...
+error_type: FlexReportTimeoutError
+error_message: Flex report not ready after 60s
 ```
 
-A failed real IBKR smoke is a valid diagnostic outcome if it leaves a failed
-`broker_sync_run` with `error_type`, `error_message`, and context.
-
-## Inspect Latest Run
+Note `reference_code` is printed on every run where `SendRequest` succeeded
+— even on failure. To manually re-fetch:
 
 ```bash
-sqlite3 data/marketpulse.db \
-  "select id, started_at, completed_at, broker_environment, account_id, status, error_type, error_message from broker_sync_run order by id desc limit 5;"
+curl "https://gdcdyn.interactivebrokers.com/Universal/servlet/FlexStatementService.GetStatement?t=<TOKEN>&q=<REFERENCE_CODE>&v=3"
 ```
 
-## Interrupted Runs
+## Error diagnosis
 
-`broker_sync_run(status='started')` that remains started long after the CLI
-exited means the process was interrupted before it could mark completed or
-failed. Do not edit the row manually. Capture logs and rerun the CLI.
+| error_type | Meaning | Operator action |
+|---|---|---|
+| `FlexHttpError` | DNS / TLS / 5xx / timeout at transport layer | Check network reachability; retry; check IBKR status page |
+| `FlexAuthError` | Token rejected (code 1003/1011/1012) | Re-issue token in Portal; update env |
+| `FlexSendRequestError` | SendRequest XML had non-auth error | Check Query ID; check token has access to that query |
+| `FlexReportTimeoutError` | Polling exhausted `IBKR_FLEX_MAX_WAIT_SECONDS` | Raise `IBKR_FLEX_MAX_WAIT_SECONDS` or wait and re-run with reference code |
+| `FlexStatementError` | GetStatement returned error after ready (e.g. expired reference) | Re-run from scratch |
+| `FlexParseError` | XML malformed or Account section missing | Check Query in Portal has Account Information ticked |
+| `FlexAccountMismatchError` | Report contains different account than `IBKR_ACCOUNT_ID` | Either unset `IBKR_ACCOUNT_ID` or fix it |
+| `LiveAccountRefusedError` | Account is not classified `paper` | Set `MP_IBKR_ALLOW_LIVE=true` if intentional |
+| `AccountMismatchError` | Configured `IBKR_ACCOUNT_ID` ≠ snapshot's account | Same as `FlexAccountMismatchError` |
 
-## Execution Snapshot Semantics
+## Inspecting recent runs
 
-7a executions are best-effort rows for the configured execution window
-(NY trading-day midnight through sync capture time). They are not a complete
-historical execution archive.
+```bash
+sqlite3 data/marketpulse.db <<'SQL'
+SELECT id, started_at, completed_at, broker_environment, account_id,
+       status, error_type, json_extract(context, '$.reference_code') AS ref
+FROM broker_sync_run
+ORDER BY id DESC
+LIMIT 5;
+SQL
+```
 
-## What 7a Never Does
+## Section drift
 
-- No order placement.
-- No order modification.
-- No order cancellation.
-- No scheduler or daemon.
+The Flex Query is configured in IBKR Portal, not in code. If you uncheck a
+section:
+
+- **Account Information**: missing → `FlexParseError`. Fix by re-ticking.
+- **Cash Report / Open Positions / Trades**: missing → 0 rows recorded with no error. Intentional.
+
+The parser will not hard-fail on missing optional sections, so you can
+narrow the Query to just Account + Positions for example without breaking
+the sync.
+
+## What 7a-Flex never does
+
+- No order placement / modification / cancellation.
+- No realtime quote streaming.
+- No scheduler or daemon — operator runs the CLI manually or via cron.
 - No web-triggered sync.
-- No writes to `paper_*`.
+- No writes to `paper_*` tables.
 - No paper-vs-broker reconciliation.
+- No open-order capture (Flex Activity reports do not include working orders).
+
+## Phase 7b/7c
+
+The Gateway-based write path (order placement, real-time book) is Phase 7b
+and uses a separately-chosen transport (likely ibeam + Client Portal Web API
+or IBKR's TWS API via a re-introduced sidecar). Phase 7a-Flex does not
+constrain that choice.

@@ -56,17 +56,27 @@ class Settings(BaseSettings):
         alias="MP_PAPER_NOTIFICATIONS_ENABLED",
     )
 
-    # Phase 7a IBKR read-only sync settings. Defaults target IBKR paper TWS/Gateway.
-    ibkr_host: str = Field("127.0.0.1", alias="IBKR_HOST")
-    ibkr_port: int = Field(7497, alias="IBKR_PORT", ge=1, le=65535)
-    ibkr_client_id: int = Field(71, alias="IBKR_CLIENT_ID", ge=0)
+    # Phase 7a-Flex IBKR settings (account_id + live-brake shared with Flex).
     ibkr_account_id: str = Field("", alias="IBKR_ACCOUNT_ID")
-    ibkr_connect_timeout_seconds: int = Field(
-        10,
-        alias="IBKR_CONNECT_TIMEOUT_SECONDS",
-        ge=1,
-    )
     ibkr_allow_live: bool = Field(False, alias="MP_IBKR_ALLOW_LIVE")
+
+    # Phase 7a-Flex IBKR read-only sync via Flex Web Service.
+    ibkr_flex_token: str = Field("", alias="IBKR_FLEX_TOKEN")
+    ibkr_flex_query_id: int = Field(0, alias="IBKR_FLEX_QUERY_ID", ge=0)
+    ibkr_flex_base_url: str = Field(
+        "https://gdcdyn.interactivebrokers.com/Universal/servlet",
+        alias="IBKR_FLEX_BASE_URL",
+    )
+    ibkr_flex_poll_interval_seconds: int = Field(
+        5,
+        alias="IBKR_FLEX_POLL_INTERVAL_SECONDS",
+        ge=0,
+    )
+    ibkr_flex_max_wait_seconds: int = Field(
+        60,
+        alias="IBKR_FLEX_MAX_WAIT_SECONDS",
+        ge=0,
+    )
 
 
 @lru_cache(maxsize=1)

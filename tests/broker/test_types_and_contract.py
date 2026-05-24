@@ -4,6 +4,13 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import pytest
+
+from marketpulse.broker.types import (
+    SyncResult,
+    classify_broker_environment_from_account_id,
+)
+
 
 def test_broker_read_client_protocol_only_exposes_fetch_snapshot():
     from marketpulse.broker.read_client import BrokerReadClient
@@ -11,7 +18,8 @@ def test_broker_read_client_protocol_only_exposes_fetch_snapshot():
     # Use __dict__ instead of typing.get_protocol_members so the test stays
     # compatible with Python 3.12 while still catching Protocol surface drift.
     own_methods = {
-        key for key, value in BrokerReadClient.__dict__.items()
+        key
+        for key, value in BrokerReadClient.__dict__.items()
         if callable(value) and not key.startswith("_")
     }
     assert own_methods == {"fetch_snapshot"}
@@ -57,9 +65,40 @@ def test_broker_snapshot_is_pure_dataclass():
     assert snapshot.cash[0].cash_balance == Decimal("1000.00")
 
 
-def test_classify_broker_environment_blocks_known_live_port():
-    from marketpulse.broker.types import classify_broker_environment
+class TestClassifier:
+    @pytest.mark.parametrize(
+        "aid,expected",
+        [
+            ("DU1234567", "paper"),
+            ("DU99999999", "paper"),
+            ("U1234567", "live"),
+            ("U1", "live"),
+            ("", "unknown"),
+            (None, "unknown"),
+            ("FOO123", "unknown"),
+            ("DUabc", "unknown"),
+            ("DU", "unknown"),
+            ("UA1234", "unknown"),
+        ],
+    )
+    def test_classifier(self, aid, expected):
+        assert classify_broker_environment_from_account_id(aid) == expected
 
-    assert classify_broker_environment(7497) == "paper"
-    assert classify_broker_environment(7496) == "live"
-    assert classify_broker_environment(4002) == "unknown"
+
+def test_sync_result_has_transport_shape():
+    sr = SyncResult(
+        sync_run_id=1,
+        broker="IBKR",
+        broker_environment="paper",
+        account_id="DU1",
+        status="completed",
+        transport="flex",
+        endpoint="https://gdcdyn.interactivebrokers.com/Universal/servlet",
+        query_id=123,
+        reference_code="ref",
+    )
+    assert sr.transport == "flex"
+    assert sr.query_id == 123
+    assert not hasattr(sr, "host")  # L20: removed
+    assert not hasattr(sr, "port")
+    assert not hasattr(sr, "client_id")
