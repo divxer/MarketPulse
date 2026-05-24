@@ -25,20 +25,25 @@ def _python_files(root: Path) -> list[Path]:
     return [p for p in root.rglob("*.py") if "__pycache__" not in p.parts]
 
 
-def test_only_ibkr_client_imports_ib_insync():
+def test_only_ibkr_client_imports_ib_sdk():
+    """The IBKR SDK must be fenced to ibkr_client.py. We use `ib_async`
+    (active fork of the unmaintained `ib_insync`); both module names
+    are banned outside the adapter so a future regression that imports
+    either one is caught immediately."""
+    banned_modules = {"ib_async", "ib_insync"}
     offenders: list[str] = []
     for path in [*_python_files(PROD), *_python_files(Path("tests"))]:
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
             if (
                 isinstance(node, ast.Import)
-                and any(alias.name == "ib_insync" for alias in node.names)
+                and any(alias.name in banned_modules for alias in node.names)
                 and path != IBKR_CLIENT
             ):
                 offenders.append(str(path))
             if (
                 isinstance(node, ast.ImportFrom)
-                and node.module == "ib_insync"
+                and node.module in banned_modules
                 and path != IBKR_CLIENT
             ):
                 offenders.append(str(path))

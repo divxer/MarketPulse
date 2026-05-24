@@ -23,7 +23,7 @@ dependencies = [
     "tenacity>=9.0",
     "markdown>=3.7",
     "exchange_calendars>=4.5,<5.0",
-    "ib-insync>=0.9.86",
+    "ib_async>=2.0",
 ]
 
 [dependency-groups]

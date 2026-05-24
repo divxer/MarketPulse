@@ -1,6 +1,10 @@
 """IBKR read-only adapter.
 
-This is the only Phase 7a module allowed to import ib_insync.
+This is the only Phase 7a module allowed to import the IBKR Python SDK.
+We use `ib_async` (https://github.com/ib-api-reloaded/ib_async), the
+actively-maintained fork of the unmaintained `ib_insync` library.
+API surface is identical — same module names, same classes — so the
+swap is a one-line import change.
 """
 
 from __future__ import annotations
@@ -10,7 +14,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from ib_insync import IB, ExecutionFilter
+from ib_async import IB, ExecutionFilter
 
 from marketpulse.broker.types import (
     BrokerAccount,
