@@ -127,7 +127,7 @@ broker-truth snapshot path.
 - **7b-L66:** `local_idempotency_key` uniqueness is enforced at the DB layer for `(account_id, action, local_idempotency_key)`, in addition to service-level validation.
 - **7b-L67:** IBKR `orderRef` must stay short enough for broker compatibility. MVP format is `MP-7B-{intent_id}-{short_key}`, where `short_key` is 8-12 characters and the full value is at most 32 characters.
 - **7b-L68:** Adapter waits are bounded. `nextValidId` timeout defaults to 10 seconds; place/status/cancel broker observation timeout defaults to 15 seconds.
-- **7b-L69:** After `placeOrder` is called, 7b waits for at least one interpretable outcome: `staged_to_tws`, `submitted_to_broker`, `rejected`, `error`, or timeout. If `placeOrder` was called but no callback arrives before timeout, the local intent remains `sent` and an `error` event with `callback_timeout` is appended. If `placeOrder` was never called, the local intent is `failed`.
+- **7b-L69:** After `placeOrder` is called, 7b waits for at least one interpretable outcome: `staged_to_tws`, `submitted_to_broker`, `rejected`, `error`, or timeout. If `placeOrder` was called but no callback arrives before timeout, the local intent remains `sent`, command result status is `sent`, and an `error` event with `callback_timeout` is appended. If `placeOrder` was never called, the local intent is `failed`.
 - **7b-L70:** MVP idempotency semantics are strict for `place`. `status` and `cancel` child intents should use generated idempotency keys; operator-supplied keys for those actions are not encouraged in MVP.
 - **7b-L71:** `broker_order_event` records an event source: `adapter_callback`, `service_safety`, `cli_validation`, or `timeout`.
 - **7b-L72:** A `transmit=false` staged order path must not emit `filled`. Filled observations are valid only for transmitted broker-side orders.
@@ -164,7 +164,9 @@ One row represents an operator command issued through the 7b CLI.
 
 `status` is intentionally local. It does not mean "IBKR order status". The DB
 constraint allows only `created`, `sent`, `completed`, `rejected`, and `failed`.
-The terminal values are `completed`, `rejected`, and `failed`.
+The terminal values are `completed`, `rejected`, and `failed`; `sent` is a
+non-terminal ambiguous state meaning the write API was called but final broker
+interpretation was not proven during the bounded observation window.
 
 The DB also enforces duplicate protection for local command provenance:
 
@@ -372,7 +374,7 @@ Examples:
 | Connected accounts do not include requested account | failed intent | `account_mismatch` | No |
 | `nextValidId` never arrives | failed intent | `error` | No |
 | `placeOrder` raises/returns error | failed or rejected intent | `error` or `rejected` | Attempted |
-| `placeOrder` called but no callback before timeout | sent intent | `error` with `callback_timeout` | Attempted |
+| `placeOrder` called but no callback before timeout | sent intent and sent result | `error` with `callback_timeout` | Attempted |
 | Status/cancel target lacks `broker_order_id` | failed child intent | `safety_rejected` | No |
 
 No automatic retry, reconnect loop, replay, modification, force close, or
