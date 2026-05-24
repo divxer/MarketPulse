@@ -71,6 +71,9 @@ class TestClassifier:
         [
             ("DU1234567", "paper"),
             ("DU99999999", "paper"),
+            ("DUE411848", "paper"),
+            ("DUH1234567", "paper"),
+            ("DUAB1234", "paper"),
             ("U1234567", "live"),
             ("U1", "live"),
             ("", "unknown"),
@@ -79,6 +82,7 @@ class TestClassifier:
             ("DUabc", "unknown"),
             ("DU", "unknown"),
             ("UA1234", "unknown"),
+            ("UE1234", "unknown"),
         ],
     )
     def test_classifier(self, aid, expected):
