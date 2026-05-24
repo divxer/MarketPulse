@@ -55,12 +55,18 @@ services:
       ALERT_DEBOUNCE_MINUTES: ${ALERT_DEBOUNCE_MINUTES:-60}
       HTTP_PROXY: ${HTTP_PROXY:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}
-      # httpx (used by TencentClient) does NOT recognize the `*.domain.com`
-      # wildcard. Use leading-dot suffix + explicit hostnames so Tencent
-      # gtimg.cn requests bypass any HTTP_PROXY/Clash route and go direct.
-      # Without this, Tencent calls get sent through overseas exit nodes
-      # and Tencent's CDN closes the TLS connection mid-handshake.
-      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,.gtimg.cn,qt.gtimg.cn,web.ifzq.gtimg.cn}
+      # httpx (used by TencentClient and the IBKR Flex client) does NOT
+      # recognize the `*.domain.com` wildcard. Use leading-dot suffix +
+      # explicit hostnames so Tencent gtimg.cn requests bypass any
+      # HTTP_PROXY/Clash route and go direct. Without this, Tencent calls
+      # get sent through overseas exit nodes and Tencent's CDN closes the
+      # TLS connection mid-handshake.
+      #
+      # IBKR Flex endpoints (.interactivebrokers.com, gdcdyn/ndcdyn) are
+      # listed for the same reason: when deployed behind Clash/Mihomo on a
+      # NAS, Flex requests routed through overseas exit nodes exceed httpx's
+      # 5s connect+TLS timeout and the Phase 7a-Flex readonly sync fails.
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,.gtimg.cn,qt.gtimg.cn,web.ifzq.gtimg.cn,.interactivebrokers.com,gdcdyn.interactivebrokers.com,ndcdyn.interactivebrokers.com}
       # Phase 7a-Flex IBKR read-only sync via Flex Web Service (HTTPS+XML).
       # No Gateway sidecar — snapshots are pulled directly from IBKR's
       # Flex endpoint. See docs/operations/ibkr-readonly-sync-runbook.md
