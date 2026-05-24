@@ -178,6 +178,7 @@ def test_paper_trading_uses_compact_ops_console_layout(client, monkeypatch):
     _login(client, monkeypatch)
     response = client.get("/lab/paper-trading")
 
+    assert "max-w-[2400px]" in response.text
     assert "mp-paper-ops" in response.text
     assert "mp-paper-kpis" in response.text
     assert "mp-paper-primary-row" in response.text

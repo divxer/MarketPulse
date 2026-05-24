@@ -18,6 +18,15 @@ def test_phase5e_taxonomy_hook_rejects_untagged_test(pytester) -> None:
     # the hook.
     import pathlib
     project_root = pathlib.Path(__file__).parent.parent.parent
+    pytester.makefile(
+        ".toml",
+        pyproject=textwrap.dedent(
+            """
+            [tool.pytest.ini_options]
+            asyncio_default_fixture_loop_scope = "function"
+            """
+        ),
+    )
     pytester.makepyfile(
         conftest=textwrap.dedent(
             f"""
