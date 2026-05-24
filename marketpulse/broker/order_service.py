@@ -182,13 +182,18 @@ def place_order(
        * success: persist broker IDs, copy each ``observation`` into an
          ``adapter_callback`` event, transition to ``completed``.
 
-    ``confirm_transmit`` is reserved for the CLI; the service trusts that the
-    caller already gated ``request.transmit=True`` behind operator
-    confirmation. The flag is accepted so the CLI in T6 can pass it through
-    without a signature change.
+    ``confirm_transmit`` is enforced at the service level (L20): a request
+    with ``request.transmit=True`` must be paired with ``confirm_transmit=True``
+    or we raise ``OrderSafetyError`` BEFORE any DB writes — symmetric with
+    ``cancel_order``'s ``confirm_cancel`` brake. The CLI maps
+    ``--confirm-transmit PAPER`` to ``True`` and passes it through.
     """
 
-    del confirm_transmit  # reserved for CLI gating; service trusts the caller (L17 commentary).
+    if request.transmit and not confirm_transmit:
+        raise OrderSafetyError(
+            "place_order with transmit=True requires confirm_transmit=True (L20); "
+            "refusing before creating any provenance"
+        )
 
     now = _now()
     env = classify_order_account(request.account_id)
@@ -196,9 +201,9 @@ def place_order(
     # --- (1) Account safety gate (L26/L30) --------------------------------
     if env != "paper":
         # Intent must still exist so the safety refusal leaves a record
-        # (L17 + L48). We persist with ``broker_environment="paper"`` to
-        # satisfy the CHECK constraint — the rejection event itself is the
-        # canonical record that the request was *not* honored.
+        # (L17 + L48). Persist the *actual* classification (``live`` /
+        # ``unknown``) for forensic accuracy — the CHECK constraint allows
+        # ``paper``/``live``/``unknown`` (see Alembic 0013).
         message = (
             f"refusing non-paper account for 7b order pilot: "
             f"account_id={request.account_id!r} classified as {env!r}"
@@ -207,7 +212,7 @@ def place_order(
             session,
             action=_ACTION_PLACE,
             broker=_BROKER,
-            broker_environment="paper",
+            broker_environment=env,
             account_id=request.account_id,
             local_idempotency_key=request.local_idempotency_key,
             context={**_request_context_snapshot(request), "refusal": message},

@@ -187,7 +187,10 @@ def _seed_place_intent(
         ),
     )
     result = place_order(
-        session, client=client, request=_request(transmit=transmit, key=key)
+        session,
+        client=client,
+        request=_request(transmit=transmit, key=key),
+        confirm_transmit=transmit,
     )
     session.commit()
     intent = session.get(BrokerOrderIntent, result.intent.id)

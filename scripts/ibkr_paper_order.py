@@ -137,6 +137,21 @@ def _gen_idempotency_key() -> str:
     return f"place-{ts}-{secrets.token_hex(4)}"
 
 
+def _print_connect_banner() -> None:
+    """Emit a one-line "connecting to TWS" banner on stderr.
+
+    Goes to stderr so stdout stays parseable (the result-printer writes
+    key:value lines on stdout).
+    """
+
+    settings = get_settings()
+    print(
+        f"connecting to TWS at {settings.ibkr_order_host}:{settings.ibkr_order_port} "
+        f"(client_id={settings.ibkr_order_client_id})",
+        file=sys.stderr,
+    )
+
+
 def _do_place(args: argparse.Namespace, session: Session) -> int:
     if args.transmit == "true" and args.confirm_transmit != "PAPER":
         raise SystemExit(
@@ -155,6 +170,7 @@ def _do_place(args: argparse.Namespace, session: Session) -> int:
         local_idempotency_key=key,
         transmit=(args.transmit == "true"),
     )
+    _print_connect_banner()
     client = _build_client(args.account)
     result = order_service.place_order(
         session,
@@ -168,6 +184,7 @@ def _do_place(args: argparse.Namespace, session: Session) -> int:
 
 
 def _do_status(args: argparse.Namespace, session: Session) -> int:
+    _print_connect_banner()
     client = _build_client(args.account)
     result = order_service.fetch_status(
         session, client=client, intent_id=args.intent_id
@@ -180,6 +197,7 @@ def _do_status(args: argparse.Namespace, session: Session) -> int:
 def _do_cancel(args: argparse.Namespace, session: Session) -> int:
     if not args.confirm_cancel:
         raise SystemExit("--confirm-cancel required (L21)")
+    _print_connect_banner()
     client = _build_client(args.account)
     result = order_service.cancel_order(
         session,

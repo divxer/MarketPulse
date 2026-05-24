@@ -417,8 +417,12 @@ class IbkrOrderClient:
 
     # --- private helpers --------------------------------------------------
 
-    def _connect_and_validate(self) -> _IbkrOrderApp:
+    def _connect_and_validate(self) -> tuple[_IbkrOrderApp, threading.Thread]:
         """Connect, start reader, wait for ``managedAccounts``, validate account.
+
+        Returns ``(app, reader)`` — the caller MUST pass ``reader`` to
+        ``_safe_disconnect`` so the reader thread is joined on tear-down (no
+        leaked daemon threads in long-running processes).
 
         Raises ``OrderConnectionError`` for any connect-time failure or if the
         ``managedAccounts`` callback never arrives; raises
@@ -441,25 +445,27 @@ class IbkrOrderClient:
         reader.start()
 
         if not app.managed_accounts_event.wait(self._connect_timeout):
-            with contextlib.suppress(Exception):
-                app.disconnect()
+            self._safe_disconnect(app, reader)
             raise OrderConnectionError(
                 "managedAccounts callback did not arrive before timeout"
             )
 
         if self._account_id not in app.managed_accounts:
-            with contextlib.suppress(Exception):
-                app.disconnect()
+            self._safe_disconnect(app, reader)
             raise OrderAccountMismatchError(
                 f"requested account {self._account_id!r} not in managed "
                 f"accounts {app.managed_accounts!r}"
             )
-        return app
+        return app, reader
 
     @staticmethod
-    def _safe_disconnect(app: _IbkrOrderApp) -> None:
+    def _safe_disconnect(
+        app: _IbkrOrderApp, reader: threading.Thread | None = None
+    ) -> None:
         with contextlib.suppress(Exception):
             app.disconnect()
+        if reader is not None:
+            reader.join(timeout=2.0)
 
     # --- BrokerOrderClient Protocol --------------------------------------
 
@@ -470,7 +476,7 @@ class IbkrOrderClient:
         intent_id: int,
         order_ref: str,
     ) -> PlaceResult:
-        app = self._connect_and_validate()
+        app, reader = self._connect_and_validate()
         try:
             # Step 1: get a fresh order id.
             app.reqIds(-1)
@@ -559,7 +565,7 @@ class IbkrOrderClient:
                 observations=tuple(app.observations),
             )
         finally:
-            self._safe_disconnect(app)
+            self._safe_disconnect(app, reader)
 
     def fetch_order_status(
         self,
@@ -572,7 +578,7 @@ class IbkrOrderClient:
                 f"requested account {account_id!r} != client account "
                 f"{self._account_id!r}"
             )
-        app = self._connect_and_validate()
+        app, reader = self._connect_and_validate()
         try:
             app.observation_event.clear()
             # L62: current-session-only visibility — ask for currently-open
@@ -589,7 +595,7 @@ class IbkrOrderClient:
                 observations=matching,
             )
         finally:
-            self._safe_disconnect(app)
+            self._safe_disconnect(app, reader)
 
     def cancel_order(
         self,
@@ -603,7 +609,7 @@ class IbkrOrderClient:
                 f"requested account {account_id!r} != client account "
                 f"{self._account_id!r}"
             )
-        app = self._connect_and_validate()
+        app, reader = self._connect_and_validate()
         try:
             if not was_transmitted:
                 # L63: staged-cancelled — never reached the broker.
@@ -660,4 +666,4 @@ class IbkrOrderClient:
                 observations=(request_obs,) + broker_observations,
             )
         finally:
-            self._safe_disconnect(app)
+            self._safe_disconnect(app, reader)

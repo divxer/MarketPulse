@@ -38,6 +38,7 @@ from marketpulse.broker.order_types import (
     OrderCallbackTimeoutError,
     OrderConnectionError,
     OrderDuplicateError,
+    OrderSafetyError,
     PlaceResult,
 )
 from marketpulse.db.base import Base
@@ -186,7 +187,12 @@ def test_happy_path_transmit_true_records_submitted_and_persists_perm_id():
         )
     )
 
-    result = place_order(session, client=client, request=_request(transmit=True, key="tx-1"))
+    result = place_order(
+        session,
+        client=client,
+        request=_request(transmit=True, key="tx-1"),
+        confirm_transmit=True,
+    )
     session.commit()
 
     assert result.status == "completed"
@@ -342,6 +348,141 @@ def test_broker_rejection_marks_intent_rejected():
     event = session.scalars(select(BrokerOrderEvent)).one()
     assert event.event_type == "rejected"
     assert "201" in (event.message or "")
+
+
+# ---------------------------------------------------------------------------
+# Service-level confirm_transmit gate (L20)
+# ---------------------------------------------------------------------------
+
+
+def test_transmit_true_without_confirm_transmit_raises_safety_error():
+    """L20: place_order(transmit=True, confirm_transmit=False) must raise
+    BEFORE any DB writes or broker calls — symmetric with cancel_order's
+    confirm_cancel brake.
+    """
+
+    from marketpulse.broker.order_service import place_order
+
+    session = _session()
+    client = FakeOrderClient(
+        PlaceResult(
+            placeorder_called=False,
+            broker_order_id=None,
+            broker_perm_id=None,
+            managed_accounts=(),
+            observations=(),
+        )
+    )
+
+    with pytest.raises(OrderSafetyError):
+        place_order(
+            session,
+            client=client,
+            request=_request(transmit=True, key="no-confirm"),
+            confirm_transmit=False,
+        )
+
+    # Fail-closed: no intent, no events, no broker call.
+    assert client.calls == []
+    assert _count(session, BrokerOrderIntent) == 0
+    assert _count(session, BrokerOrderEvent) == 0
+
+
+def test_transmit_true_with_confirm_transmit_proceeds():
+    """L20: confirm_transmit=True allows the transmit flow to proceed."""
+
+    from marketpulse.broker.order_service import place_order
+
+    session = _session()
+    client = FakeOrderClient(
+        PlaceResult(
+            placeorder_called=True,
+            broker_order_id="2002",
+            broker_perm_id=None,
+            managed_accounts=("DU123456",),
+            observations=(
+                BrokerOrderObservation(
+                    event_type="submitted_to_broker",
+                    broker_order_id="2002",
+                    broker_status="Submitted",
+                    raw={"transmit": True},
+                ),
+            ),
+        )
+    )
+
+    result = place_order(
+        session,
+        client=client,
+        request=_request(transmit=True, key="confirmed-tx"),
+        confirm_transmit=True,
+    )
+    session.commit()
+
+    assert result.status in {"completed", "sent"}
+    assert len(client.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Non-paper account broker_environment classification persistence
+# ---------------------------------------------------------------------------
+
+
+def test_live_account_rejection_persists_live_classification():
+    """Non-paper rejection must persist the actual classification
+    (``live``/``unknown``) — not coerce to ``paper`` — so audit queries
+    can distinguish refusal reasons.
+    """
+
+    from marketpulse.broker.order_service import place_order
+
+    session = _session()
+    client = FakeOrderClient(
+        PlaceResult(
+            placeorder_called=False,
+            broker_order_id=None,
+            broker_perm_id=None,
+            managed_accounts=(),
+            observations=(),
+        )
+    )
+
+    result = place_order(
+        session,
+        client=client,
+        request=_request(account_id="U1234567", key="live-cls"),
+    )
+    session.commit()
+
+    intent = session.get(BrokerOrderIntent, result.intent.id)
+    assert intent is not None
+    assert intent.broker_environment == "live"
+
+
+def test_unknown_account_rejection_persists_unknown():
+    from marketpulse.broker.order_service import place_order
+
+    session = _session()
+    client = FakeOrderClient(
+        PlaceResult(
+            placeorder_called=False,
+            broker_order_id=None,
+            broker_perm_id=None,
+            managed_accounts=(),
+            observations=(),
+        )
+    )
+
+    result = place_order(
+        session,
+        client=client,
+        request=_request(account_id="FOO123", key="unk-cls"),
+    )
+    session.commit()
+
+    intent = session.get(BrokerOrderIntent, result.intent.id)
+    assert intent is not None
+    assert intent.broker_environment == "unknown"
 
 
 # ---------------------------------------------------------------------------

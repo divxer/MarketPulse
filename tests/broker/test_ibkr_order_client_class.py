@@ -428,3 +428,37 @@ def test_adapter_exposes_only_three_public_methods():
 def test_ibkr_order_app_is_module_private():
     assert hasattr(mod, "_IbkrOrderApp")
     assert not hasattr(mod, "IbkrOrderApp")
+
+
+# ---------------------------------------------------------------------------
+# Reader-thread join on disconnect (no leaked daemon threads)
+# ---------------------------------------------------------------------------
+
+
+def test_disconnect_joins_reader_thread():
+    """The adapter must join the EClient reader thread on tear-down.
+
+    ``_FakeApp.run()`` returns immediately, so the reader thread completes
+    promptly; after ``place_lmt_order`` we observe ``disconnect`` was called
+    AND the reader is no longer alive (proving the join executed and the
+    thread was reaped, not leaked as a daemon).
+    """
+
+    app = _FakeApp()
+    app.fire_managed_accounts = ("DU123456",)
+    app.fire_next_valid_id = 4242
+    client = _make_client(app)
+
+    # Snapshot enumerated threads before/after to make sure we don't leak.
+    before = {t.ident for t in threading.enumerate()}
+
+    client.place_lmt_order(
+        _make_request(transmit=False), intent_id=1, order_ref="MP-7B-1-x"
+    )
+
+    assert app.disconnect_calls == 1
+    # The reader thread targeting our fake _FakeApp.run() (no-op) should be
+    # joined and no longer alive after place_lmt_order returns.
+    after = {t for t in threading.enumerate() if t.ident not in before}
+    leaked_readers = [t for t in after if t.name == "ibkr-order-reader" and t.is_alive()]
+    assert leaked_readers == [], f"reader threads leaked: {leaked_readers}"

@@ -26,15 +26,32 @@ Before running any 7b command, confirm all of the following:
 - The TWS API socket is enabled:
   - File → Global Configuration → API → Settings → **Enable ActiveX and Socket Clients**.
   - Default port **7497** for TWS paper, **4002** for IB Gateway paper.
-- In API → Precautions, the **"Read-Only API"** checkbox is **DISABLED** for
-  this phase. 7b needs write capability to stage and transmit orders. (If you
-  are only running 7a Flex sync, re-enable Read-Only API afterwards.)
+- **TWS "Read-Only API" checkbox in API Precautions must be DISABLED for
+  this phase.** 7b needs write capability to stage and transmit orders. (If
+  you are only running 7a Flex sync, re-enable Read-Only API afterwards.)
+  After 7b experimentation is over, re-enable Read-Only API in TWS to
+  prevent accidental write exposure.
 - DB migration `0013` has been applied:
   ```
   uv run alembic upgrade head
   ```
   This creates the `broker_order_intent` and `broker_order_event` tables that
   the 7b CLI writes to.
+
+---
+
+## 1a. Test coverage gap — real TWS smoke is the only verification
+
+Automated tests in `tests/broker/test_ibkr_order_client_class.py` use a
+fake-app substitute injected via `app_factory`. They validate the adapter's
+Event-wait/timeout logic and the observation-buffer semantics, but they DO
+NOT exercise real `ibapi` callback ordering, real `EClient.run()`
+reader-thread interleaving, or real TWS-side error code mapping. The manual
+smoke procedures below are therefore the only end-to-end verification of the
+threading code under realistic conditions. **Do not run `--transmit true`
+until you have first completed a `--transmit false` (staged) smoke** that
+exercises connect → nextValidId → placeOrder → status → cancel against a
+real TWS instance.
 
 ---
 
