@@ -220,6 +220,10 @@ class OrderCallbackTimeoutError(OrderError):
     """Expected broker callback did not arrive before the bounded timeout."""
 
 
+class OrderStateTransitionError(OrderError):
+    """Attempted intent.status transition is not allowed by the state machine."""
+
+
 # Phase-7a-style aliases for backwards-compatible imports.
 BrokerOrderSafetyError = OrderSafetyError
 BrokerOrderConnectionError = OrderConnectionError
