@@ -23,6 +23,7 @@ dependencies = [
     "tenacity>=9.0",
     "markdown>=3.7",
     "exchange_calendars>=4.5,<5.0",
+    "ibapi>=9.81.1.post1",
 ]
 
 [dependency-groups]
