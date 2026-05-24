@@ -617,3 +617,110 @@ class BrokerExecutionSnapshot(Base):
         Index("ix_broker_execution_sync", "sync_run_id"),
         Index("ix_broker_execution_account_exec", "account_id", "broker_exec_id"),
     )
+
+
+class BrokerOrderIntent(Base):
+    __tablename__ = "broker_order_intent"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
+    operator_source: Mapped[str] = mapped_column(String(16), nullable=False, default="cli")
+    action: Mapped[str] = mapped_column(String(16), nullable=False)
+    broker: Mapped[str] = mapped_column(String(16), nullable=False)
+    broker_environment: Mapped[str] = mapped_column(String(16), nullable=False)
+    account_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    symbol: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    asset_class: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    side: Mapped[str | None] = mapped_column(String(4), nullable=True)
+    quantity: Mapped[_Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    order_type: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    limit_price: Mapped[_Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    transmit: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    local_idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    parent_intent_id: Mapped[int | None] = mapped_column(
+        ForeignKey("broker_order_intent.id"), nullable=True
+    )
+    broker_order_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    broker_perm_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="created")
+    context: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+    __table_args__ = (
+        Index("ix_broker_order_intent_created", "created_at"),
+        Index(
+            "ix_broker_order_intent_account_action_created",
+            "account_id",
+            "action",
+            "created_at",
+        ),
+        Index("ix_broker_order_intent_parent", "parent_intent_id"),
+        UniqueConstraint(
+            "account_id",
+            "action",
+            "local_idempotency_key",
+            name="uq_broker_order_intent_idem",
+        ),
+        CheckConstraint(
+            "action IN ('place', 'cancel', 'status_check')",
+            name="ck_broker_order_intent_action",
+        ),
+        CheckConstraint("broker IN ('IBKR')", name="ck_broker_order_intent_broker"),
+        CheckConstraint(
+            "broker_environment IN ('paper', 'live', 'unknown')",
+            name="ck_broker_order_intent_environment",
+        ),
+        CheckConstraint(
+            "asset_class IS NULL OR asset_class IN ('STK')",
+            name="ck_broker_order_intent_asset_class",
+        ),
+        CheckConstraint(
+            "side IS NULL OR side IN ('BUY', 'SELL')",
+            name="ck_broker_order_intent_side",
+        ),
+        CheckConstraint(
+            "order_type IS NULL OR order_type IN ('LMT')",
+            name="ck_broker_order_intent_order_type",
+        ),
+        CheckConstraint(
+            "status IN ('created', 'sent', 'completed', 'rejected', 'failed')",
+            name="ck_broker_order_intent_status",
+        ),
+    )
+
+
+class BrokerOrderEvent(Base):
+    __tablename__ = "broker_order_event"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    intent_id: Mapped[int] = mapped_column(
+        ForeignKey("broker_order_intent.id"), nullable=False
+    )
+    observed_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    event_source: Mapped[str] = mapped_column(String(16), nullable=False)
+    broker_order_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    broker_perm_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    broker_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    filled_quantity: Mapped[_Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    remaining_quantity: Mapped[_Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    avg_fill_price: Mapped[_Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+    __table_args__ = (
+        Index("ix_broker_order_event_intent", "intent_id"),
+        Index("ix_broker_order_event_observed", "observed_at"),
+        CheckConstraint(
+            "event_type IN ("
+            "'safety_rejected', 'connection_failed', 'account_mismatch', "
+            "'next_valid_id_received', 'staged_to_tws', 'submitted_to_broker', "
+            "'open_order_seen', 'order_status_seen', 'broker_cancel_requested', "
+            "'staged_cancelled', 'cancelled', 'filled', 'rejected', 'error'"
+            ")",
+            name="ck_broker_order_event_type",
+        ),
+        CheckConstraint(
+            "event_source IN ('adapter_callback', 'service_safety', 'cli_validation', 'timeout')",
+            name="ck_broker_order_event_source",
+        ),
+    )
