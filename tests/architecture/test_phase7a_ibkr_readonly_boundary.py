@@ -1,3 +1,4 @@
+# Layer: invariant
 """Architecture guards for Phase 7a IBKR read-only sync."""
 
 from __future__ import annotations

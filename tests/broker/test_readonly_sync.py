@@ -1,3 +1,4 @@
+# Layer: stateful
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -95,7 +96,12 @@ def test_connection_failure_writes_failed_run_without_snapshots():
     assert _count(session, BrokerAccountSnapshot) == 0
     run = session.get(BrokerSyncRun, result.sync_run_id)
     assert run is not None
-    assert run.completed_at == datetime(2026, 5, 23, 21, 0, tzinfo=UTC)
+    # completed_at is wall-clock at failure time, not the injected started_at —
+    # failures can occur long after the run was created (slow IBKR connect,
+    # timeouts), so the audit trail must reflect actual failure time.
+    started_at = datetime(2026, 5, 23, 21, 0, tzinfo=UTC)
+    assert run.completed_at >= started_at
+    assert run.started_at == started_at
 
 
 def test_multiple_account_ambiguity_from_client_writes_failed_run_without_snapshots():
