@@ -20,6 +20,7 @@ from marketpulse.broker.ibkr_client import (
     _decimal_or_none,
     _ibkr_execution_filter_time,
     _map_position,
+    _parse_ibkr_time,
 )
 
 
@@ -417,3 +418,103 @@ def test_fatal_error_callback_aborts_fetch_snapshot():
         raise AssertionError("fatal error should propagate")
 
     assert reader.disconnected is True
+
+
+# ---------------------------------------------------------------------------
+# Phase 7a follow-up: ibapi Execution.time string parsing + fatal error 326
+# ---------------------------------------------------------------------------
+
+
+def test_parse_ibkr_time_handles_known_formats():
+    # None / empty / malformed → None (snapshot must remain persistable)
+    assert _parse_ibkr_time(None) is None
+    assert _parse_ibkr_time("") is None
+    assert _parse_ibkr_time("   ") is None
+    assert _parse_ibkr_time("not a date") is None
+    assert _parse_ibkr_time("20260523") is None
+    assert _parse_ibkr_time("99999999 99:99:99") is None
+
+    # No-TZ form → assumed UTC
+    parsed = _parse_ibkr_time("20260523 21:30:00")
+    assert isinstance(parsed, datetime)
+    assert parsed.tzinfo is not None
+    assert parsed.astimezone(UTC) == datetime(2026, 5, 23, 21, 30, tzinfo=UTC)
+
+    # With TZ suffix → converted to UTC
+    parsed_tz = _parse_ibkr_time("20260523 21:30:00 US/Eastern")
+    assert isinstance(parsed_tz, datetime)
+    assert parsed_tz.tzinfo is not None
+    # US/Eastern in May = UTC-4 (EDT) → 21:30 EDT == 01:30 UTC next day
+    assert parsed_tz.astimezone(UTC) == datetime(2026, 5, 24, 1, 30, tzinfo=UTC)
+
+    # Unknown TZ name → falls through to UTC assumption (does not raise)
+    parsed_bad_tz = _parse_ibkr_time("20260523 21:30:00 Bogus/Zone")
+    assert isinstance(parsed_bad_tz, datetime)
+    assert parsed_bad_tz.tzinfo is not None
+
+
+def test_executed_at_parses_ibkr_string_time_to_utc_datetime():
+    """End-to-end: real ibapi Execution shape uses a *string* time field.
+
+    The previous FakeIbReader-driven tests passed a real datetime in
+    place of execution.time, which masked the bug. This test mimics the
+    raw ibapi.Execution shape (plain attribute object with string time).
+    """
+
+    class _RawExecution:
+        # Duck-typed, NOT an _ExecutionRow / _FakeExecution dataclass.
+        def __init__(self, time_str: str):
+            self.execId = "exec-raw-1"
+            self.orderId = 99
+            self.side = "BOT"
+            self.shares = 5.0
+            self.price = 200.0
+            self.time = time_str  # string, exactly like ibapi delivers
+
+    class _RawExecution2:
+        def __init__(self, time_str: str):
+            self.execId = "exec-raw-2"
+            self.orderId = 100
+            self.side = "BOT"
+            self.shares = 1.0
+            self.price = 201.0
+            self.time = time_str
+
+    contract = FakeContract("AAPL", "STK")
+    raw_no_tz = _RawExecution("20260523 21:30:00")
+    raw_with_tz = _RawExecution2("20260523 21:30:00 US/Eastern")
+
+    reader = FakeIbReader(
+        managed_accounts=["DU123"],
+        account_values_to_return=[("BaseCurrency", "USD", "")],
+        executions_to_return=[(contract, raw_no_tz), (contract, raw_with_tz)],
+    )
+    client = _make_client(reader)
+
+    snapshot = client.fetch_snapshot()
+
+    assert len(snapshot.executions) == 2
+    for e in snapshot.executions:
+        assert isinstance(e.executed_at, datetime), (
+            f"executed_at must be parsed to datetime (got {type(e.executed_at)})"
+        )
+        assert e.executed_at.tzinfo is not None, "executed_at must be timezone-aware"
+
+
+def test_error_code_326_aborts_fetch_snapshot():
+    """IBKR error 326 (client id already in use) is fatal sub-1100."""
+    from marketpulse.broker.ibkr_client import IbkrApiError, _IbReader
+
+    reader = _IbReader()
+    # Simulate the error callback firing on the reader thread.
+    reader.error(reqId=-1, errorCode=326, errorString="Client id is already in use")
+
+    assert reader.fatal_error is not None
+    assert isinstance(reader.fatal_error, IbkrApiError)
+    assert "326" in str(reader.fatal_error)
+    # All blocking events should have been released so waiters unblock.
+    assert reader.ready_event.is_set()
+    assert reader.managed_accounts_event.is_set()
+    assert reader.account_download_end_event.is_set()
+    assert reader.position_end_event.is_set()
+    assert reader.open_order_end_event.is_set()
