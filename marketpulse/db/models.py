@@ -484,3 +484,136 @@ class PaperAuditEvent(Base):
             name="ck_paper_audit_event_type",
         ),
     )
+
+
+class BrokerSyncRun(Base):
+    __tablename__ = "broker_sync_run"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    started_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
+    broker: Mapped[str] = mapped_column(String(16), nullable=False)
+    broker_environment: Mapped[str] = mapped_column(String(16), nullable=False)
+    account_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    error_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    context: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+    __table_args__ = (
+        Index("ix_broker_sync_run_started", "started_at"),
+        Index("ix_broker_sync_run_status_started", "status", "started_at"),
+        CheckConstraint("broker IN ('IBKR')", name="ck_broker_sync_run_broker"),
+        CheckConstraint(
+            "broker_environment IN ('paper', 'live', 'unknown')",
+            name="ck_broker_sync_run_environment",
+        ),
+        CheckConstraint(
+            "status IN ('started', 'completed', 'failed')",
+            name="ck_broker_sync_run_status",
+        ),
+    )
+
+
+class BrokerAccountSnapshot(Base):
+    __tablename__ = "broker_account_snapshot"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    sync_run_id: Mapped[int] = mapped_column(ForeignKey("broker_sync_run.id"), nullable=False)
+    account_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    broker_environment: Mapped[str] = mapped_column(String(16), nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
+    account_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    base_currency: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    net_liquidation: Mapped[_Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    buying_power: Mapped[_Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    maintenance_margin: Mapped[_Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    excess_liquidity: Mapped[_Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+
+    __table_args__ = (Index("ix_broker_account_sync", "sync_run_id"),)
+
+
+class BrokerCashSnapshot(Base):
+    __tablename__ = "broker_cash_snapshot"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    sync_run_id: Mapped[int] = mapped_column(ForeignKey("broker_sync_run.id"), nullable=False)
+    account_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    broker_environment: Mapped[str] = mapped_column(String(16), nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
+    currency: Mapped[str] = mapped_column(String(8), nullable=False)
+    cash_balance: Mapped[_Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    settled_cash: Mapped[_Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    accrued_interest: Mapped[_Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+
+    __table_args__ = (
+        Index("ix_broker_cash_sync", "sync_run_id"),
+        Index("ix_broker_cash_account_currency", "account_id", "currency"),
+    )
+
+
+class BrokerPositionSnapshot(Base):
+    __tablename__ = "broker_position_snapshot"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    sync_run_id: Mapped[int] = mapped_column(ForeignKey("broker_sync_run.id"), nullable=False)
+    account_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    broker_environment: Mapped[str] = mapped_column(String(16), nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    asset_class: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    quantity: Mapped[_Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    avg_cost: Mapped[_Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    market_price: Mapped[_Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    market_value: Mapped[_Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    unrealized_pnl: Mapped[_Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    realized_pnl: Mapped[_Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+
+    __table_args__ = (
+        Index("ix_broker_position_sync", "sync_run_id"),
+        Index("ix_broker_position_account_symbol", "account_id", "symbol"),
+    )
+
+
+class BrokerOpenOrderSnapshot(Base):
+    __tablename__ = "broker_open_order_snapshot"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    sync_run_id: Mapped[int] = mapped_column(ForeignKey("broker_sync_run.id"), nullable=False)
+    account_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    broker_environment: Mapped[str] = mapped_column(String(16), nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
+    broker_order_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    symbol: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    side: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    order_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    quantity: Mapped[_Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    limit_price: Mapped[_Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    status: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    __table_args__ = (
+        Index("ix_broker_open_order_sync", "sync_run_id"),
+        Index("ix_broker_open_order_account_order", "account_id", "broker_order_id"),
+    )
+
+
+class BrokerExecutionSnapshot(Base):
+    __tablename__ = "broker_execution_snapshot"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    sync_run_id: Mapped[int] = mapped_column(ForeignKey("broker_sync_run.id"), nullable=False)
+    account_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    broker_environment: Mapped[str] = mapped_column(String(16), nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
+    broker_exec_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    broker_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    symbol: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    side: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    quantity: Mapped[_Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    price: Mapped[_Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    executed_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
+
+    __table_args__ = (
+        Index("ix_broker_execution_sync", "sync_run_id"),
+        Index("ix_broker_execution_account_exec", "account_id", "broker_exec_id"),
+    )
