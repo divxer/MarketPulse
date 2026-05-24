@@ -190,3 +190,34 @@ class TestParser:
         snap = self._parse("multi_account.xml")
         # First statement wins; precise semantics documented in parser docstring
         assert snap.account_id.startswith("DU")
+
+
+class TestFetchSnapshotIntegration:
+    def test_full_path_send_then_poll_then_parse(self):
+        transport = _mock_transport([
+            httpx.Response(200, content=_fixture("send_request_success.xml")),
+            httpx.Response(200, content=_fixture("err_generation_in_progress.xml")),
+            httpx.Response(200, content=_fixture("full_paper.xml")),
+        ])
+        client = FlexClient(
+            token="t", query_id=123, transport=transport,
+            poll_interval_seconds=0, max_wait_seconds=10,
+        )
+        snap = client.fetch_snapshot()
+        assert snap.account_id == "DU1234567"
+        assert client.reference_code == "1234567890"
+
+    def test_reference_code_preserved_on_timeout(self):
+        in_progress = _fixture("err_generation_in_progress.xml")
+        transport = _mock_transport([
+            httpx.Response(200, content=_fixture("send_request_success.xml")),
+            *[httpx.Response(200, content=in_progress) for _ in range(5)],
+        ])
+        client = FlexClient(
+            token="t", query_id=1, transport=transport,
+            poll_interval_seconds=0, max_wait_seconds=0,
+        )
+        with pytest.raises(FlexReportTimeoutError) as excinfo:
+            client.fetch_snapshot()
+        assert excinfo.value.reference_code == "1234567890"
+        assert client.reference_code == "1234567890"  # also available on instance
