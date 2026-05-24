@@ -65,6 +65,7 @@ _FATAL_ERROR_FLOOR = 1100
 # immediately rather than falling through to a timeout. Codes >= 1100
 # (e.g. 1100 connectivity lost) are always fatal regardless.
 _FATAL_SUB_1100_ERROR_CODES = frozenset({
+    326,    # Unable to connect: client id already in use
     502,    # Couldn't connect to TWS
     504,    # Not connected
     1300,   # Socket port has been reset and is now in use
@@ -93,6 +94,43 @@ def _decimal_or_none(value: Any) -> Decimal | None:
 
 def _ibkr_execution_filter_time(value: datetime) -> str:
     return value.astimezone(UTC).strftime("%Y%m%d %H:%M:%S")
+
+
+def _parse_ibkr_time(value: Any) -> datetime | None:
+    """Parse IBKR's execution.time string into a UTC datetime.
+
+    ibapi's ``Execution.time`` is a raw string. Two formats are observed
+    in the wild:
+      - ``"YYYYMMDD HH:MM:SS"``       (e.g. ``"20260523 21:30:00"``) — assumed UTC
+      - ``"YYYYMMDD HH:MM:SS TZ"``    (e.g. ``"20260523 21:30:00 US/Eastern"``)
+        where TZ is an IANA tz name returned alongside the time field.
+
+    Returns ``None`` if value is ``None``, empty string, or unparseable.
+    Never raises — the snapshot must continue to be persistable even if
+    one execution row has a malformed time.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    parts = text.split(" ", 2)
+    if len(parts) < 2:
+        return None
+    date_part, time_part = parts[0], parts[1]
+    tz_part = parts[2] if len(parts) >= 3 else None
+    try:
+        naive = datetime.strptime(f"{date_part} {time_part}", "%Y%m%d %H:%M:%S")
+    except ValueError:
+        return None
+    if tz_part:
+        try:
+            from zoneinfo import ZoneInfo
+            return naive.replace(tzinfo=ZoneInfo(tz_part)).astimezone(UTC)
+        except Exception:  # noqa: BLE001 — bad tz → fall through to UTC assumption
+            return naive.replace(tzinfo=UTC)
+    # No tz suffix → assume UTC (IBKR's documented default for paper accounts)
+    return naive.replace(tzinfo=UTC)
 
 
 def _map_position(
@@ -435,7 +473,7 @@ class IbkrReadClient:
                     side=getattr(execution, "side", None),
                     quantity=_decimal_or_none(getattr(execution, "shares", None)),
                     price=_decimal_or_none(getattr(execution, "price", None)),
-                    executed_at=getattr(execution, "time", None),
+                    executed_at=_parse_ibkr_time(getattr(execution, "time", None)),
                 )
             )
         return tuple(rows)
