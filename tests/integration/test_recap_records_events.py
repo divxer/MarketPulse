@@ -63,6 +63,11 @@ def test_recap_with_3_verdicts_records_3_events(db_session):
     for e in events:
         assert e.payload["source"] == "recap"
         assert e.payload["recap_date"] == "2026-05-15"
+        # Phase 7c follow-up: recap events MUST carry strategy so the
+        # nightly paper_trading_tick BidAggregator collects them (it
+        # skips events with empty payload.strategy).
+        assert e.payload["strategy"] == "general"
+        assert e.payload["strategy_version"] == "v1"
 
 
 def test_recap_without_verdicts_marker_no_events(db_session):
