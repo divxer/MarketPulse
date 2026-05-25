@@ -21,11 +21,20 @@ container, no VNC, no 2FA at request time.
 4. Period: `Last Business Day` (or `Today`).
 5. Format: `XML`, Date format `yyyy-MM-dd`, Time format `HH:mm:ss`.
 6. **Sections** — tick exactly these (others are optional, see "Section drift"):
-   - **Account Information** (REQUIRED)
+   - **Account Information** (REQUIRED) — provides accountId / accountType / baseCurrency
+   - **Equity Summary in Base** — provides Net Liquidation Value (NLV).
+     Without this, `/lab/broker` shows "Net Liquidation: —". IBKR does NOT
+     expose NLV in the Account Information section despite what the field
+     names suggest.
    - **Cash Report** → tick "All currencies"
    - **Open Positions**
    - **Trades** → tick at least "Executions"
 7. Save. Note the **Query ID** (a 6-digit integer).
+
+   Note: Activity Flex Web Service NEVER exports Buying Power, Maintenance
+   Margin, or Excess Liquidity — those are live concepts available only via
+   the TWS API socket. The /lab/broker dashboard intentionally surfaces
+   "Cash (Base)" instead, sourced from Cash Report's `BASE_SUMMARY` row.
 
 ### 2. Issue a Flex Token
 

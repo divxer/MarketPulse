@@ -2,6 +2,13 @@
 {% from "partials/broker_macros.html" import fmt_money %}
 {% set acct = dashboard.account %}
 {% set snap = dashboard.snapshot_run %}
+{# Pick the base-currency cash row (IBKR emits "BASE_SUMMARY" as the
+   aggregate; fall back to the first row if it's absent for any reason). #}
+{% set base_cash = None %}
+{% for r in dashboard.cash_rows %}
+  {% if r.currency == 'BASE_SUMMARY' %}{% set base_cash = r %}{% endif %}
+{% endfor %}
+{% if base_cash is none and dashboard.cash_rows %}{% set base_cash = dashboard.cash_rows[0] %}{% endif %}
 <section class="mp-lab-kpis" aria-label="Account Summary">
   <article class="mp-card mp-lab-kpi">
     <div class="mp-card__body">
@@ -11,8 +18,8 @@
   </article>
   <article class="mp-card mp-lab-kpi">
     <div class="mp-card__body">
-      <div class="mp-card__eyebrow">Buying Power</div>
-      <div class="mp-lab-kpi__value">{{ fmt_money(acct.buying_power) if acct else '—' }}</div>
+      <div class="mp-card__eyebrow">Cash (Base)</div>
+      <div class="mp-lab-kpi__value">{{ fmt_money(base_cash.cash_balance) if base_cash else '—' }}</div>
     </div>
   </article>
   <article class="mp-card mp-lab-kpi">
