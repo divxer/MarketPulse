@@ -182,6 +182,18 @@ class RecapService:
                                     "prompt_version": prompts.COMMENTARY_PROMPT_VERSION,
                                     "source": "recap",
                                     "recap_date": target.isoformat(),
+                                    # Tag recap verdicts with `general` so the
+                                    # nightly paper_trading_tick BidAggregator
+                                    # picks them up (it skips events with no
+                                    # payload.strategy). Recap produces a
+                                    # general-purpose market-context verdict
+                                    # rather than running the strategy router
+                                    # per ticker — that semantically matches
+                                    # the general.yaml strategy. Strategy
+                                    # router stays on the /stock analyze path
+                                    # only, keeping recap's daily cost flat.
+                                    "strategy": "general",
+                                    "strategy_version": "v1",
                                 },
                                 db=self.session,
                             )
