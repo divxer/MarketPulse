@@ -80,6 +80,10 @@ def test_severity_rank_order():
 
 
 def test_diff_row_frozen():
+    import dataclasses
+
+    import pytest
+
     row = DiffRow(
         symbol="AAPL",
         diff_type=DiffType.MATCHED,
@@ -88,10 +92,7 @@ def test_diff_row_frozen():
         delta=Decimal("0"),
         is_red=False,
     )
-    import dataclasses
-    assert dataclasses.is_frozen := True  # type: ignore[has-type]
     # frozen=True means attribute writes raise FrozenInstanceError
-    import pytest
     with pytest.raises(dataclasses.FrozenInstanceError):
         row.symbol = "MSFT"  # type: ignore[misc]
 
@@ -635,6 +636,14 @@ def _add_paper_position(
         strategy="general",
         ticker=ticker,
         quantity=quantity,
+        # The following columns are non-nullable per the PaperPosition
+        # ORM — confirmed against marketpulse/db/models.py before plan
+        # was finalized. Fixture must supply all of them.
+        entry_price=Decimal("100"),
+        entry_date=date(2026, 5, 25),
+        horizon_date=date(2026, 6, 1),
+        status="CLOSED" if closed else "OPEN",
+        opened_at=now,
     ))
     db.flush()
 
@@ -796,22 +805,57 @@ def test_closed_paper_positions_excluded(monkeypatch):
     get_settings.cache_clear()
 
 
-def test_stale_broker_snapshot(monkeypatch):
+def test_stale_broker_snapshot_deterministic(monkeypatch):
+    """Use the now= injection point for deterministic stale-boundary
+    testing — avoids race against the wall clock."""
     monkeypatch.setenv("IBKR_ACCOUNT_ID", "DU-A")
     from marketpulse.config import get_settings
     get_settings.cache_clear()
 
     db = _session()
-    base = datetime.now(UTC) - timedelta(hours=25)  # >24h ago
-    run = _make_completed_run(db, started_at=base, account_id="DU-A")
+    run_completed = datetime(2026, 5, 24, 12, tzinfo=UTC)
+    run = _make_completed_run(db, started_at=run_completed, account_id="DU-A")
     _add_broker_position(db, run, symbol="AAPL", quantity=Decimal("100"))
     _add_paper_position(db, ticker="AAPL", quantity=100)
     db.commit()
 
+    # 23h59m after completed_at → NOT stale (boundary just under 24h)
+    fresh_now = run.completed_at + timedelta(hours=23, minutes=59)
+    fresh = load_reconciliation_dashboard(db, now=fresh_now)
+    assert fresh.broker_is_stale is False
+    assert fresh.severity == Severity.GREEN  # diff unaffected
+
+    # 24h01m after completed_at → stale
+    stale_now = run.completed_at + timedelta(hours=24, minutes=1)
+    stale = load_reconciliation_dashboard(db, now=stale_now)
+    assert stale.broker_is_stale is True
+    assert stale.severity == Severity.GREEN  # stale does NOT bump severity
+    get_settings.cache_clear()
+
+
+def test_latest_completed_run_picked_when_multiple_on_same_account(monkeypatch):
+    """If the same account has N completed runs, the most recent wins."""
+    monkeypatch.setenv("IBKR_ACCOUNT_ID", "DU-A")
+    from marketpulse.config import get_settings
+    get_settings.cache_clear()
+
+    db = _session()
+    base = datetime.now(UTC) - timedelta(hours=10)
+    old_run = _make_completed_run(
+        db, started_at=base, account_id="DU-A", reference_code="REF-OLD",
+    )
+    _add_broker_position(db, old_run, symbol="AAPL", quantity=Decimal("50"))  # stale
+    new_run = _make_completed_run(
+        db, started_at=base + timedelta(hours=1), account_id="DU-A",
+        reference_code="REF-NEW",
+    )
+    _add_broker_position(db, new_run, symbol="AAPL", quantity=Decimal("100"))  # current
+    _add_paper_position(db, ticker="AAPL", quantity=100)
+    db.commit()
+
     dash = load_reconciliation_dashboard(db)
-    assert dash.broker_is_stale is True
-    # Stale does NOT change diff severity itself.
-    assert dash.severity == Severity.GREEN
+    assert dash.broker_reference_code == "REF-NEW"  # picked the latest
+    assert dash.matched_count == 1  # against the newer 100, not the older 50
     get_settings.cache_clear()
 
 
@@ -992,10 +1036,15 @@ def _recent_failed_descriptions(db: Session, limit: int = 3) -> tuple[str, ...]:
         .order_by(BrokerSyncRun.started_at.desc())
         .limit(limit)
     ).scalars().all()
-    return tuple(
-        f"#{r.id} {r.started_at.strftime('%Y-%m-%d %H:%M')} {r.error_type or 'failed'}"
-        for r in rows
-    )
+    parts: list[str] = []
+    for r in rows:
+        label = r.error_type or "failed"
+        if r.error_message:
+            # Truncate to keep the line readable on the empty-state card.
+            msg = r.error_message[:80].replace("\n", " ")
+            label = f"{label} — {msg}"
+        parts.append(f"#{r.id} {r.started_at.strftime('%Y-%m-%d %H:%M')} {label}")
+    return tuple(parts)
 
 
 def _paper_map(db: Session) -> tuple[dict[str, Decimal], int]:
@@ -1006,7 +1055,9 @@ def _paper_map(db: Session) -> tuple[dict[str, Decimal], int]:
     ).scalars().all()
     paper: dict[str, Decimal] = {}
     for row in rows:
-        key = row.ticker.upper().strip()
+        key = (row.ticker or "").upper().strip()
+        if not key:  # defensive: skip rows with empty ticker
+            continue
         paper[key] = paper.get(key, Decimal(0)) + Decimal(row.quantity)
     return paper, len(rows)
 
@@ -1018,7 +1069,9 @@ def _broker_map(db: Session, run_id: int) -> dict[str, Decimal]:
     ).scalars().all()
     broker: dict[str, Decimal] = {}
     for row in rows:
-        key = row.symbol.upper().strip()
+        key = (row.symbol or "").upper().strip()
+        if not key:  # defensive: skip rows with empty symbol
+            continue
         broker[key] = broker.get(key, Decimal(0)) + row.quantity
     return broker
 
@@ -1035,7 +1088,16 @@ def _compute_severity(rows: list, *, no_broker: bool, ambiguous: bool) -> Severi
     return Severity.YELLOW
 
 
-def load_reconciliation_dashboard(db: Session) -> ReconciliationDashboard:
+def load_reconciliation_dashboard(
+    db: Session, *, now: datetime | None = None,
+) -> ReconciliationDashboard:
+    """Build the full dashboard payload.
+
+    The optional ``now`` parameter is for deterministic stale-flag
+    testing — pass an explicit timestamp instead of relying on
+    datetime.now(UTC) so the threshold boundary is reproducible.
+    """
+    clock_now = now if now is not None else datetime.now(UTC)
     account, ambiguous = _pick_account(db)
 
     if ambiguous:
@@ -1075,7 +1137,7 @@ def load_reconciliation_dashboard(db: Session) -> ReconciliationDashboard:
 
     is_stale = (
         latest_run.completed_at is not None
-        and (datetime.now(UTC) - latest_run.completed_at) > _STALE_THRESHOLD
+        and (clock_now - latest_run.completed_at) > _STALE_THRESHOLD
     )
 
     severity = _compute_severity(rows, no_broker=False, ambiguous=False)
@@ -1185,6 +1247,8 @@ def _seed_completed_with_position(account_id: str = "DU-A"):
         db.add(PaperPosition(
             order_id=order.id, entry_fill_id=1, exit_fill_id=None,
             strategy="general", ticker="AAPL", quantity=100,
+            entry_price=Decimal("100"), entry_date=date(2026, 5, 25),
+            horizon_date=date(2026, 6, 1), status="OPEN", opened_at=base,
         ))
         db.commit()
     finally:
@@ -1613,16 +1677,30 @@ Locate the nav block in `base.html` (around line 70-75 where other lab links liv
 <a href="/lab/reconcile" class="{% if p.startswith('/lab/reconcile') %}mp-nav-active{% endif %}">对账</a>
 ```
 
-- [ ] **Step 2: Verify visually with a quick route check**
+- [ ] **Step 2: Add a nav-link regression assertion**
+
+Append to `tests/web/test_lab_reconcile_route.py`:
+
+```python
+def test_nav_link_present(client, monkeypatch):
+    """Regression: 对账 nav link must render on any authed page."""
+    _login(client, monkeypatch)
+    response = client.get("/lab/reconcile")
+    assert 'href="/lab/reconcile"' in response.text
+    assert "对账" in response.text
+```
+
+- [ ] **Step 3: Verify visually with a quick route check**
 
 Run: `uv run pytest tests/web/test_lab_reconcile_route.py -v`
-Expected: still 6 passed (no regression)
+Expected: 7 passed (the 6 existing + the new nav assertion)
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add marketpulse/web/templates/base.html
-git commit -m "feat(7c): T6 — nav link for /lab/reconcile"
+git add marketpulse/web/templates/base.html \
+        tests/web/test_lab_reconcile_route.py
+git commit -m "feat(7c): T6 — nav link for /lab/reconcile + regression test"
 ```
 
 ---
@@ -1730,12 +1808,12 @@ def test_python_targets_avoid_forbidden_models():
 def test_python_targets_do_not_mutate_session():
     """No session.add/flush/commit/delete in reconcile/* or route.
 
-    AST-walk catches ``something.add(...)`` regardless of receiver name,
-    which is intentionally broad: it'll flag e.g. ``list.append`` too,
-    so we narrow to actual session mutation verbs only.
+    AST attribute names are receiver-agnostic. Our FORBIDDEN_SESSION_ATTRS
+    list is the four SQLAlchemy mutation verbs (add/add_all/flush/commit/
+    delete); none of these collide with stdlib container methods like
+    list.append or dict.update that the module might legitimately call.
     """
     offenders: list[str] = []
-    # Allowed attributes that happen to share names — none in our scope today
     for path in PY_TARGETS:
         _, attrs = _walk_ast(path)
         for attr in attrs:
