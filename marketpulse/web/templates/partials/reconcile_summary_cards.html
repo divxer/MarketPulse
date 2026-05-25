@@ -1,0 +1,33 @@
+{# Phase 7c - reconciliation summary cards. #}
+<section class="mp-lab-kpis" aria-label="Reconciliation Summary">
+  <article class="mp-card mp-lab-kpi">
+    <div class="mp-card__body">
+      <div class="mp-card__eyebrow">已对齐</div>
+      <div class="mp-lab-kpi__value">{{ dashboard.matched_count }}</div>
+    </div>
+  </article>
+  <article class="mp-card mp-lab-kpi">
+    <div class="mp-card__body">
+      <div class="mp-card__eyebrow">缺 broker</div>
+      <div class="mp-lab-kpi__value">{{ dashboard.missing_in_broker_count }}</div>
+    </div>
+  </article>
+  <article class="mp-card mp-lab-kpi">
+    <div class="mp-card__body">
+      <div class="mp-card__eyebrow">缺 paper</div>
+      <div class="mp-lab-kpi__value">{{ dashboard.missing_in_paper_count }}</div>
+    </div>
+  </article>
+  <article class="mp-card mp-lab-kpi">
+    <div class="mp-card__body">
+      <div class="mp-card__eyebrow">数量不一致</div>
+      <div class="mp-lab-kpi__value">{{ dashboard.quantity_mismatch_count }}</div>
+    </div>
+  </article>
+  <article class="mp-card mp-lab-kpi">
+    <div class="mp-card__body">
+      <div class="mp-card__eyebrow">方向相反</div>
+      <div class="mp-lab-kpi__value">{{ dashboard.side_mismatch_count }}</div>
+    </div>
+  </article>
+</section>

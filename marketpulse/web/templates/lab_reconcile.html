@@ -1,0 +1,36 @@
+{# Phase 7c - Position Reconciliation MVP, read-only inspection surface. #}
+{% extends "base.html" %}
+{% block main_width %}max-w-[2400px]{% endblock %}
+{% block nav_width %}max-w-[2400px]{% endblock %}
+{% block content %}
+<section class="mp-lab-ops">
+  {% include "partials/reconcile_hero.html" %}
+
+  {% if dashboard.no_broker_data %}
+    <article class="mp-card">
+      <div class="mp-card__body" style="padding:32px; text-align:center;">
+        <h2 style="margin:0 0 8px;">无法对账</h2>
+        <p class="mp-lab-muted">尚未捕获 broker truth。先跑 Flex sync,见 <code>docs/operations/ibkr-readonly-sync-runbook.md</code>。</p>
+        {% if dashboard.recent_failed_run_descriptions %}
+          <p class="mp-lab-muted" style="margin-top:12px;">最近失败的同步:</p>
+          <ul style="list-style:none; padding:0; margin:0;">
+            {% for description in dashboard.recent_failed_run_descriptions %}
+              <li><code>{{ description }}</code></li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+      </div>
+    </article>
+  {% elif dashboard.account_ambiguous %}
+    <article class="mp-card">
+      <div class="mp-card__body" style="padding:32px; text-align:center;">
+        <h2 style="margin:0 0 8px;">Ambiguous broker account</h2>
+        <p class="mp-lab-muted">历史 sync 包含多个账号但 <code>IBKR_ACCOUNT_ID</code> 未配置,无法选定对账目标。</p>
+      </div>
+    </article>
+  {% else %}
+    {% include "partials/reconcile_summary_cards.html" %}
+    {% include "partials/reconcile_diff_table.html" %}
+  {% endif %}
+</section>
+{% endblock %}

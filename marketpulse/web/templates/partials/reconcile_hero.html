@@ -1,0 +1,43 @@
+{# Phase 7c - read-only hero. #}
+{% set sev = dashboard.severity.value %}
+<header class="mp-lab-ops__header">
+  <div>
+    <p class="mp-eyebrow mp-eyebrow--primary">Lab · Reconciliation</p>
+    <h1>对账</h1>
+    <p>Phase 7c — paper engine 当前持仓 vs broker truth 最近快照,只读 diff view。</p>
+    {% if not dashboard.no_broker_data and not dashboard.account_ambiguous %}
+      <div class="mp-broker-account-row">
+        <span class="mp-card__title" style="margin-right:4px;">{{ dashboard.broker_account_id }}</span>
+        {% if sev == 'green' %}
+          <span class="mp-chip mp-chip--success">已对齐</span>
+        {% elif sev == 'yellow' %}
+          <span class="mp-chip mp-chip--warn">有偏差</span>
+        {% elif sev == 'red' %}
+          <span class="mp-chip mp-chip--failed">严重偏差</span>
+        {% endif %}
+        <span class="mp-lab-muted">paper 开仓 {{ dashboard.paper_open_position_count }}</span>
+      </div>
+      {% if dashboard.broker_is_stale %}
+        <div class="mp-broker-stale-banner">
+          Broker snapshot 已超过 24 小时未更新,详见 <a href="/lab/broker">broker 页</a>。
+        </div>
+      {% endif %}
+    {% elif dashboard.account_ambiguous %}
+      <div class="mp-broker-account-row">
+        <span class="mp-chip mp-chip--warn">Ambiguous broker account</span>
+        <span class="mp-lab-muted">设置 <code>IBKR_ACCOUNT_ID</code> 选定账号</span>
+      </div>
+    {% else %}
+      <div class="mp-broker-account-row">
+        <span class="mp-chip mp-chip--warn">无法对账</span>
+        <span class="mp-lab-muted">尚未捕获 broker truth</span>
+      </div>
+    {% endif %}
+  </div>
+  {% if dashboard.broker_completed_at %}
+    <div class="mp-lab-ops__generated">
+      {% if dashboard.broker_reference_code %}Ref: <code>{{ dashboard.broker_reference_code }}</code><br>{% endif %}
+      Broker {{ dashboard.broker_completed_at.strftime('%Y-%m-%d %H:%M UTC') }}
+    </div>
+  {% endif %}
+</header>
