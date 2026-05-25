@@ -5,10 +5,10 @@ from __future__ import annotations
 from decimal import Decimal
 
 from marketpulse.reconcile.types import (
+    _SEVERITY_RANK,
     DiffRow,
     DiffType,
     Severity,
-    _SEVERITY_RANK,
 )
 
 

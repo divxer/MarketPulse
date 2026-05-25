@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from decimal import Decimal
 
-from marketpulse.reconcile.types import DiffRow, DiffType, _SEVERITY_RANK
+from marketpulse.reconcile.types import _SEVERITY_RANK, DiffRow, DiffType
 
 
 def reconcile_positions(

@@ -303,7 +303,10 @@ def test_stale_broker_snapshot_deterministic(monkeypatch):
     _add_paper_position(db, ticker="AAPL", quantity=100)
     db.commit()
 
-    fresh = load_reconciliation_dashboard(db, now=run.completed_at + timedelta(hours=23, minutes=59))
+    fresh = load_reconciliation_dashboard(
+        db,
+        now=run.completed_at + timedelta(hours=23, minutes=59),
+    )
     assert fresh.broker_is_stale is False
     assert fresh.severity == Severity.GREEN
 
