@@ -406,12 +406,20 @@ def build_scheduler() -> BackgroundScheduler:
         ),
         id="alert_check", replace_existing=True, misfire_grace_time=60,
     )
+    # misfire_grace_time=None on daily critical jobs: if a deploy/restart pushes
+    # us past the scheduled fire time, APScheduler should still run the job
+    # exactly once on next start (coalesce=True merges multiple missed instances).
+    # 3600s was dropping entire days during weekend deploys — observed 2026-05-25
+    # when paper_trading_tick silently lost 5/22 Fri / 5/23 Sat / 5/24 Sun after
+    # PR deploys restarted the container past the 21:30 ET schedule.
     # Outcome computation: daily 02:00 UTC (US close ~21:00 UTC → 5h buffer)
     sched.add_job(
         run_outcome_computation,
         trigger=CronTrigger(hour=2, minute=0, timezone="UTC"),
         id="outcome_computation",
         replace_existing=True,
+        misfire_grace_time=None,
+        coalesce=True,
     )
     # Phase 7a-Flex daily broker truth capture. Runs after US close + Flex
     # generation buffer. Skips silently if FLEX_TOKEN/QUERY_ID unset.
@@ -425,7 +433,7 @@ def build_scheduler() -> BackgroundScheduler:
         ),
         id="flex_sync",
         replace_existing=True,
-        misfire_grace_time=3600,  # 1h tolerance — IBKR sometimes lags
+        misfire_grace_time=None,
         coalesce=True,
         max_instances=1,
     )
@@ -441,7 +449,7 @@ def build_scheduler() -> BackgroundScheduler:
         ),
         id="paper_trading_tick",
         replace_existing=True,
-        misfire_grace_time=3600,
+        misfire_grace_time=None,
         coalesce=True,
         max_instances=1,
     )
