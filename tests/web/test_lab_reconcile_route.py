@@ -205,3 +205,10 @@ def test_nav_link_present(client, monkeypatch):
     response = client.get("/lab/reconcile")
     assert 'href="/lab/reconcile"' in response.text
     assert "对账" in response.text
+
+
+def test_broker_nav_label_localized(client, monkeypatch):
+    _login(client, monkeypatch)
+    response = client.get("/lab/reconcile")
+    assert 'href="/lab/broker"' in response.text
+    assert 'href="/lab/broker" class="">券商</a>' in response.text
