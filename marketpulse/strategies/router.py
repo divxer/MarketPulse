@@ -9,12 +9,23 @@ to the actual LLM in Task 7.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from marketpulse.data.types import Bar, Fundamentals, Quote
 from marketpulse.strategies.types import Strategy
 
 _ROUTER_MARKER = "ROUTER_JSON:"
+
+# Match a balanced-ish JSON object containing a "strategy" key. Tolerates
+# the LLM wrapping the object in ```json ... ``` fences, prepending a
+# ROUTER_JSON: marker, or appending free-form prose after the closing
+# brace. We DON'T try to parse deeply nested JSON — the router prompt
+# guarantees a flat {strategy, reason} shape.
+_JSON_OBJECT_RE = re.compile(
+    r"\{[^{}]*?\"strategy\"\s*:\s*\"[^\"]+\"[^{}]*?\}",
+    re.DOTALL,
+)
 
 
 def build_router_context(
@@ -104,24 +115,38 @@ def parse_router_output(
 ) -> dict[str, str] | None:
     """Extract the {strategy, reason} from router LLM output.
 
-    Uses rfind to tolerate the LLM quoting the marker in body. Validates
+    Robust to common LLM output drift observed in production:
+      - Markdown code fences (```json ... ```)
+      - Prefix ``ROUTER_JSON:`` either bare or inside the fence
+      - Trailing prose after the JSON object
+      - Missing marker entirely (Haiku frequently skips it)
+
+    Strategy: scan the response for the LAST JSON-object-looking blob
+    that contains a "strategy" key (rfind semantics — prefer the final
+    block in case the LLM repeated itself). Parse it as JSON. Validate
     the strategy field is in valid_names. Returns None on any failure;
     caller falls back to 'general'.
     """
-    idx = raw.rfind(_ROUTER_MARKER)
-    if idx == -1:
+    matches = _JSON_OBJECT_RE.findall(raw)
+    if not matches:
         return None
-    tail = raw[idx + len(_ROUTER_MARKER):].strip()
-    try:
-        parsed = json.loads(tail)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(parsed, dict):
-        return None
-    strategy = parsed.get("strategy")
-    if not isinstance(strategy, str) or strategy not in valid_names:
-        return None
-    return {"strategy": strategy, "reason": str(parsed.get("reason", ""))}
+    # Walk matches from last to first so we honor the original rfind
+    # intent — the last JSON block in the response is the operative one
+    # if the LLM dumped multiple drafts.
+    for blob in reversed(matches):
+        try:
+            parsed = json.loads(blob)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        strategy = parsed.get("strategy")
+        if isinstance(strategy, str) and strategy in valid_names:
+            return {
+                "strategy": strategy,
+                "reason": str(parsed.get("reason", "")),
+            }
+    return None
 
 
 # ---------- internal indicators ----------

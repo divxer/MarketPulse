@@ -144,3 +144,47 @@ def test_parse_router_output_missing_strategy_field_returns_none():
         valid_names={"general"},
     )
     assert result is None
+
+
+# --- Production-observed Haiku output shapes (post-PR #109) ---
+
+def test_parse_router_output_markdown_fenced_json_no_marker():
+    """Haiku often returns ```json {...} ``` without the ROUTER_JSON: marker."""
+    from marketpulse.strategies.router import parse_router_output
+    raw = (
+        '```json\n'
+        '{\n  "strategy": "news_event",\n  "reason": "7天20条新闻"\n}\n'
+        '```\n\n**选择依据：** ...'
+    )
+    result = parse_router_output(
+        raw, valid_names={"news_event", "general"},
+    )
+    assert result == {"strategy": "news_event", "reason": "7天20条新闻"}
+
+
+def test_parse_router_output_marker_inside_fence_with_trailing_prose():
+    """Haiku: marker + JSON inside ```json fence + trailing **说明** prose."""
+    from marketpulse.strategies.router import parse_router_output
+    raw = (
+        '```json\nROUTER_JSON: {\n  "strategy": "momentum_breakout", '
+        '"reason": "突破"\n}\n```\n\n**说明：** 价格突破...'
+    )
+    result = parse_router_output(
+        raw, valid_names={"momentum_breakout"},
+    )
+    assert result is not None
+    assert result["strategy"] == "momentum_breakout"
+
+
+def test_parse_router_output_picks_last_valid_block():
+    """If LLM dumps multiple drafts, take the LAST valid block."""
+    from marketpulse.strategies.router import parse_router_output
+    raw = (
+        '{"strategy": "general", "reason": "first draft"}\n\n'
+        'on reflection:\n'
+        '{"strategy": "news_event", "reason": "final answer"}'
+    )
+    result = parse_router_output(
+        raw, valid_names={"general", "news_event"},
+    )
+    assert result == {"strategy": "news_event", "reason": "final answer"}
