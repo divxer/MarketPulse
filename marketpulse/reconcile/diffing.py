@@ -13,12 +13,16 @@ def reconcile_positions(
 ) -> list[DiffRow]:
     """Diff two pre-normalized, pre-aggregated symbol-to-quantity maps."""
     rows: list[DiffRow] = []
-    for symbol in sorted(paper.keys() | broker.keys()):
+    # Iterate the union of keysets directly. The final sorted() below
+    # imposes the canonical (severity_rank, symbol) order; pre-sorting
+    # the union was redundant work.
+    for symbol in paper.keys() | broker.keys():
         p = paper.get(symbol)
         b = broker.get(symbol)
         if p is None:
-            if b is None:
-                continue
+            # Union-membership invariant: at least one side has the
+            # symbol, so `b` is guaranteed non-None here.
+            assert b is not None
             rows.append(
                 DiffRow(
                     symbol=symbol,
