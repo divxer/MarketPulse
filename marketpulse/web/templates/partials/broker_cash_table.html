@@ -1,4 +1,5 @@
 {# Phase 7a+ Broker Truth Viewer — Cash balances. #}
+{% from "partials/broker_macros.html" import fmt_money %}
 <article class="mp-card">
   <div class="mp-card__head"><div class="mp-card__title">Cash Balances</div></div>
   <div class="mp-card__body">
@@ -17,9 +18,9 @@
             {% for r in dashboard.cash_rows %}
               <tr>
                 <td>{{ r.currency }}</td>
-                <td class="num">{% if r.cash_balance is not none %}{{ r.cash_balance }}{% endif %}</td>
-                <td class="num">{% if r.settled_cash is not none %}{{ r.settled_cash }}{% endif %}</td>
-                <td class="num">{% if r.accrued_interest is not none %}{{ r.accrued_interest }}{% endif %}</td>
+                <td class="num">{{ fmt_money(r.cash_balance) }}</td>
+                <td class="num">{{ fmt_money(r.settled_cash) }}</td>
+                <td class="num">{{ fmt_money(r.accrued_interest) }}</td>
               </tr>
             {% endfor %}
           </tbody>

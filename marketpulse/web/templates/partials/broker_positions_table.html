@@ -1,4 +1,5 @@
 {# Phase 7a+ Broker Truth Viewer — Positions. #}
+{% from "partials/broker_macros.html" import fmt_money, fmt_num %}
 <article class="mp-card">
   <div class="mp-card__head"><div class="mp-card__title">Positions</div></div>
   <div class="mp-card__body">
@@ -18,12 +19,12 @@
               <tr>
                 <td>{{ r.symbol }}</td>
                 <td>{{ r.asset_class or '' }}</td>
-                <td class="num">{{ r.quantity }}</td>
-                <td class="num">{% if r.avg_cost is not none %}{{ r.avg_cost }}{% endif %}</td>
-                <td class="num">{% if r.market_price is not none %}{{ r.market_price }}{% endif %}</td>
-                <td class="num">{% if r.market_value is not none %}{{ r.market_value }}{% endif %}</td>
-                <td class="num">{% if r.unrealized_pnl is not none %}{{ r.unrealized_pnl }}{% endif %}</td>
-                <td class="num">{% if r.realized_pnl is not none %}{{ r.realized_pnl }}{% endif %}</td>
+                <td class="num">{{ fmt_num(r.quantity) }}</td>
+                <td class="num">{{ fmt_money(r.avg_cost) }}</td>
+                <td class="num">{{ fmt_money(r.market_price) }}</td>
+                <td class="num">{{ fmt_money(r.market_value) }}</td>
+                <td class="num">{{ fmt_money(r.unrealized_pnl) }}</td>
+                <td class="num">{{ fmt_money(r.realized_pnl) }}</td>
               </tr>
             {% endfor %}
           </tbody>

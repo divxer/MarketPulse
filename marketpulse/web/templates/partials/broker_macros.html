@@ -1,0 +1,7 @@
+{# Phase 7a+ Broker Truth Viewer — shared formatting macros. #}
+{% macro fmt_money(v) -%}
+  {%- if v is none -%}—{%- else -%}${{ "{:,.2f}".format(v) }}{%- endif -%}
+{%- endmacro %}
+{% macro fmt_num(v) -%}
+  {%- if v is none -%}—{%- else -%}{{ "{:,.4f}".format(v) }}{%- endif -%}
+{%- endmacro %}

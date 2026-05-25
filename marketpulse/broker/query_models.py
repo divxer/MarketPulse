@@ -33,7 +33,6 @@ class BrokerSyncRunSummary:
     error_type: str | None
     error_message: str | None
     reference_code: str | None
-    rows_total: int | None
 
 
 @dataclass(frozen=True)
@@ -60,21 +59,6 @@ class BrokerDashboard:
 def _summary_from_run(run: BrokerSyncRun) -> BrokerSyncRunSummary:
     ctx = run.context or {}
     ref = ctx.get("reference_code") if isinstance(ctx, dict) else None
-    rows_total: int | None
-    if isinstance(ctx, dict):
-        # Sum the persisted row counts the sync orchestration writes
-        # into context when it can (best-effort; older runs may lack).
-        candidates = [
-            ctx.get("account_snapshots"),
-            ctx.get("cash_rows"),
-            ctx.get("positions"),
-            ctx.get("open_orders"),
-            ctx.get("executions"),
-        ]
-        ints = [c for c in candidates if isinstance(c, int)]
-        rows_total = sum(ints) if ints else None
-    else:
-        rows_total = None
     return BrokerSyncRunSummary(
         id=run.id,
         started_at=run.started_at,
@@ -85,7 +69,6 @@ def _summary_from_run(run: BrokerSyncRun) -> BrokerSyncRunSummary:
         error_type=run.error_type,
         error_message=run.error_message,
         reference_code=ref if isinstance(ref, str) else None,
-        rows_total=rows_total,
     )
 
 
