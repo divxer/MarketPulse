@@ -4,38 +4,39 @@
 {% block main_width %}max-w-[2400px]{% endblock %}
 {% block nav_width %}max-w-[2400px]{% endblock %}
 {% block content %}
-  <div class="mp-lab-page mp-broker-page">
-    <p class="mp-kicker mp-eyebrow mp-eyebrow--primary">实验室 · Broker Truth</p>
-    <h1>Broker Truth</h1>
-    <p class="muted">
-      Phase 7a+ — IBKR 账户的最近一次 Flex sync 快照。只读视图,不触发同步。
-      手动跑同步: <code>scripts/sync_ibkr_readonly.py</code>;自动调度: 23:30 NY (mon-fri)。
-    </p>
 
-    {% if dashboard.latest_run is none %}
-      <section class="mp-empty-state mp-card" style="padding:32px; text-align:center;">
-        <h2>No completed broker sync yet</h2>
-        <p>See <code>docs/operations/ibkr-readonly-sync-runbook.md</code> for setup.</p>
-      </section>
-    {% else %}
-      {% include "partials/broker_hero.html" %}
-      {% if dashboard.snapshot_run is not none %}
-        {% include "partials/broker_kpi_strip.html" %}
-        <section class="mp-broker-body">
-          {% include "partials/broker_positions_table.html" %}
-          {% include "partials/broker_cash_table.html" %}
-        </section>
-      {% else %}
-        <section class="mp-empty-state mp-card" style="padding:24px;">
-          <p><strong>No snapshot state.</strong> Only failed runs so far.</p>
-          {% if dashboard.latest_run.error_type %}
-            <p class="muted">Latest error: <code>{{ dashboard.latest_run.error_type }}</code>
-              {% if dashboard.latest_run.error_message %} — {{ dashboard.latest_run.error_message }}{% endif %}
-            </p>
-          {% endif %}
-        </section>
-      {% endif %}
-      {% include "partials/broker_recent_runs_table.html" %}
-    {% endif %}
-  </div>
+<section class="mp-lab-ops">
+  {% include "partials/broker_hero.html" %}
+
+  {% if dashboard.latest_run is none %}
+    <article class="mp-card">
+      <div class="mp-card__body" style="padding:32px; text-align:center;">
+        <h2 style="margin:0 0 8px;">No completed broker sync yet</h2>
+        <p class="mp-lab-muted">See <code>docs/operations/ibkr-readonly-sync-runbook.md</code> for setup.</p>
+      </div>
+    </article>
+  {% elif dashboard.snapshot_run is not none %}
+    {% include "partials/broker_kpi_strip.html" %}
+    <section class="mp-broker-body">
+      {% include "partials/broker_positions_table.html" %}
+      {% include "partials/broker_cash_table.html" %}
+    </section>
+  {% else %}
+    <article class="mp-card">
+      <div class="mp-card__body" style="padding:24px;">
+        <p><strong>No snapshot state.</strong> Only failed runs so far.</p>
+        {% if dashboard.latest_run.error_type %}
+          <p class="mp-lab-muted">Latest error: <code>{{ dashboard.latest_run.error_type }}</code>
+            {% if dashboard.latest_run.error_message %} — {{ dashboard.latest_run.error_message }}{% endif %}
+          </p>
+        {% endif %}
+      </div>
+    </article>
+  {% endif %}
+
+  {% if dashboard.latest_run is not none %}
+    {% include "partials/broker_recent_runs_table.html" %}
+  {% endif %}
+</section>
+
 {% endblock %}

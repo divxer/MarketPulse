@@ -1142,31 +1142,37 @@ hr.mp-hr {
 }
 
 /* ════════ Phase 6f: /lab/paper-trading operations UI ════════ */
-.mp-paper-ops {
+.mp-paper-ops,
+.mp-lab-ops {
   display: flex;
   flex-direction: column;
   gap: 16px;
 }
-.mp-paper-ops__header {
+.mp-paper-ops__header,
+.mp-lab-ops__header {
   display: flex;
   justify-content: space-between;
   align-items: flex-end;
   gap: 24px;
   padding: 10px 4px 2px;
 }
-.mp-paper-ops__header h1 {
+.mp-paper-ops__header h1,
+.mp-lab-ops__header h1 {
   margin: 4px 0 4px;
   font: 700 34px/1 var(--ns-font-headline);
   color: var(--ns-navy);
   letter-spacing: 0;
 }
-.mp-paper-ops__header p {
+.mp-paper-ops__header p,
+.mp-lab-ops__header p {
   margin: 0;
   color: var(--ns-on-surface-variant);
   font-size: 13px;
 }
 .mp-paper-ops__generated,
-.mp-paper-muted {
+.mp-paper-muted,
+.mp-lab-ops__generated,
+.mp-lab-muted {
   color: var(--ns-on-surface-variant);
   font-size: 12px;
 }
@@ -1175,14 +1181,24 @@ hr.mp-hr {
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 12px;
 }
-.mp-paper-kpi .mp-card__body {
+.mp-lab-kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+.mp-paper-kpi .mp-card__body,
+.mp-lab-kpi .mp-card__body {
   padding: 16px 18px;
 }
-.mp-paper-kpi__value {
+.mp-paper-kpi__value,
+.mp-lab-kpi__value {
   margin-top: 6px;
   font: 700 28px/1.05 var(--ns-font-headline);
   color: var(--ns-navy);
   letter-spacing: 0;
+}
+.mp-lab-kpi__value--small {
+  font-size: 16px;
 }
 .mp-paper-primary-row {
   display: grid;
@@ -1364,22 +1380,19 @@ hr.mp-hr {
   white-space: nowrap;
 }
 
-/* Phase 7a+ Broker Truth Viewer */
-.mp-broker-page { display: flex; flex-direction: column; gap: 16px; }
-.mp-broker-hero { padding: 16px 0; }
-.mp-broker-hero__account {
+/* Phase 7a+ Broker Truth Viewer — page-specific layout only. Uses
+   .mp-lab-ops / .mp-lab-kpis / existing .mp-chip--success/failed/warn. */
+.mp-broker-account-row {
   display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
+  margin-top: 4px;
 }
-.mp-broker-hero__account h2 { margin: 0; }
 .mp-broker-stale-banner {
-  margin-top: 8px; padding: 8px 12px; border-radius: 4px;
-  background: #fef3c7; color: #92400e; border: 1px solid #fde68a;
+  margin-top: 10px; padding: 8px 12px; border-radius: 4px;
+  background: var(--mp-warn-soft, #fef3c7);
+  color: #92400e;
+  border: 1px solid #fde68a;
+  font-size: 13px;
 }
-.mp-broker-kpis {
-  display: grid; gap: 12px;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-}
-.mp-kpi-card__value--small { font-size: 0.95rem; }
 .mp-broker-body {
   display: grid; gap: 16px;
   grid-template-columns: 1fr;
@@ -1387,10 +1400,6 @@ hr.mp-hr {
 .mp-broker-table-wrap { overflow-x: auto; }
 .mp-table--broker th, .mp-table--broker td { padding: 6px 10px; }
 .mp-table--broker .num { text-align: right; font-variant-numeric: tabular-nums; }
-.mp-empty-state { color: #64748b; padding: 12px 0; }
-.mp-chip--env-paper { background: #dbeafe; color: #1e40af; }
-.mp-chip--env-live { background: #fee2e2; color: #991b1b; }
-.mp-chip--env-unknown { background: #e5e7eb; color: #374151; }
-.mp-chip--ok { background: #d1fae5; color: #065f46; }
-.mp-chip--bad { background: #fee2e2; color: #991b1b; }
-.mp-chip--warn { background: #fef3c7; color: #92400e; }
+.mp-chip--env-paper   { background:#dbeafe; color:#1e40af; }
+.mp-chip--env-live    { background:#fee2e2; color:#991b1b; }
+.mp-chip--env-unknown { background:var(--ns-surface-container); color:var(--ns-on-surface-variant); }
