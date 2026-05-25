@@ -40,6 +40,13 @@ COPY marketpulse ./marketpulse
 COPY alembic ./alembic
 COPY alembic.ini ./alembic.ini
 COPY scripts ./scripts
+# Phase 6b risk-gate config + future YAML-driven config files. Without this
+# COPY, paper_trading_tick_job() raises FileNotFoundError during
+# RiskConfigProvider.from_yaml() init and the entire nightly tick aborts
+# before any paper_order rows are created. Discovered 2026-05-25 while
+# trying to surface a real paper position on /lab/reconcile — paper engine
+# had been silently dead since Phase 6b deploy.
+COPY config ./config
 COPY --from=css /app/marketpulse/web/static/app.css ./marketpulse/web/static/app.css
 
 RUN useradd -u 1001 -m app && chown -R app /app \
