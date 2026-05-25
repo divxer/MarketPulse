@@ -255,7 +255,7 @@ class FlexClient:
             broker_environment=environment,
             account_id=account_id,
             captured_at=captured_at,
-            account=self._parse_account(account_el, account_id),
+            account=self._parse_account(statement, account_el, account_id),
             cash=self._parse_cash(statement, account_id),
             positions=self._parse_positions(statement, account_id),
             open_orders=(),  # L18: Flex Activity never produces open orders
@@ -312,16 +312,39 @@ class FlexClient:
         except InvalidOperation:
             return None
 
-    def _parse_account(self, el: ET.Element, account_id: str) -> BrokerAccount:
+    def _parse_account(
+        self, statement: ET.Element, el: ET.Element, account_id: str
+    ) -> BrokerAccount:
+        # NLV is NOT in AccountInformation (which only carries metadata like
+        # accountType / baseCurrency / contact details). It comes from
+        # EquitySummaryInBase.total. Likewise buyingPower / maintenanceMargin
+        # / excessLiquidity are live-only TWS concepts — Activity Flex never
+        # exports them, so we leave them None.
         return BrokerAccount(
             account_id=account_id,
             account_type=el.get("accountType"),
             base_currency=el.get("baseCurrency"),
-            net_liquidation=self._decimal(el.get("netLiquidationValue")),
-            buying_power=self._decimal(el.get("buyingPower")),
-            maintenance_margin=self._decimal(el.get("maintenanceMarginReq")),
-            excess_liquidity=self._decimal(el.get("excessLiquidity")),
+            net_liquidation=self._extract_net_liquidation(statement),
+            buying_power=None,
+            maintenance_margin=None,
+            excess_liquidity=None,
         )
+
+    def _extract_net_liquidation(self, statement: ET.Element) -> Decimal | None:
+        """Pull NLV from EquitySummaryInBase / EquitySummaryByReportDateInBase.
+
+        Both element names appear in IBKR Activity Flex output depending on
+        report period; both carry a ``total`` attribute. When multiple rows
+        are present (multi-day reports), pick the latest by ``reportDate``
+        (yyyymmdd string — lexicographic sort is correct).
+        """
+        rows: list[ET.Element] = []
+        for tag in ("EquitySummaryInBase", "EquitySummaryByReportDateInBase"):
+            rows.extend(statement.findall(f".//{tag}"))
+        if not rows:
+            return None
+        rows.sort(key=lambda r: r.get("reportDate") or "", reverse=True)
+        return self._decimal(rows[0].get("total"))
 
     def _parse_cash(self, statement: ET.Element, account_id: str) -> tuple[BrokerCash, ...]:
         rows: list[BrokerCash] = []

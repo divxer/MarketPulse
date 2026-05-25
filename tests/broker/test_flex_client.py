@@ -191,6 +191,13 @@ class TestParser:
         assert snap.cash == ()
         assert snap.positions == ()
         assert snap.executions == ()
+        # When the EquitySummaryInBase section is absent, net_liquidation
+        # must be None — operator forgot to tick the section in Flex Query.
+        # (Activity Flex never exports buying_power / margin / excess liq.)
+        assert snap.account.net_liquidation is None
+        assert snap.account.buying_power is None
+        assert snap.account.maintenance_margin is None
+        assert snap.account.excess_liquidity is None
 
     def test_missing_account_section_raises(self):
         with pytest.raises(FlexParseError, match="Account"):
