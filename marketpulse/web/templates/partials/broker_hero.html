@@ -1,29 +1,38 @@
-{# Phase 7a+ Broker Truth Viewer — Hero partial. #}
+{# Phase 7a+ Broker Truth Viewer — Hero / page header. #}
 {% set latest = dashboard.latest_run %}
-{% set env = latest.broker_environment or 'unknown' %}
-<section class="mp-hero mp-broker-hero">
+<header class="mp-lab-ops__header">
   <div>
-    <div class="mp-broker-hero__account">
-      <h2 class="grotesk">{{ latest.account_id or '(unknown account)' }}</h2>
-      <span class="mp-chip mp-chip--env mp-chip--env-{{ env }}">{{ env }}</span>
-      {% if latest.status == 'completed' %}
-        <span class="mp-chip mp-chip--ok">Latest sync OK</span>
-      {% elif latest.status == 'failed' %}
-        <span class="mp-chip mp-chip--bad">Latest sync failed{% if latest.error_type %} · {{ latest.error_type }}{% endif %}</span>
-      {% elif latest.status == 'started' %}
-        <span class="mp-chip mp-chip--warn">In progress</span>
-      {% endif %}
-    </div>
-    {% if dashboard.snapshot_is_stale %}
-      <div class="mp-broker-stale-banner">
-        Snapshot from previous completed sync (latest attempt failed).
+    <p class="mp-eyebrow mp-eyebrow--primary">Lab · Broker Truth</p>
+    <h1>Broker Truth</h1>
+    <p>Phase 7a+ — IBKR 账户最近一次 Flex sync 快照。只读视图,不触发同步。
+       自动调度: 23:30 NY (mon-fri);手动:<code>scripts/sync_ibkr_readonly.py</code>。</p>
+    {% if latest is not none %}
+      {% set env = latest.broker_environment or 'unknown' %}
+      <div class="mp-broker-account-row">
+        <span class="mp-card__title" style="margin-right:4px;">{{ latest.account_id or '(unknown account)' }}</span>
+        <span class="mp-chip mp-chip--env-{{ env }}">{{ env }}</span>
+        {% if latest.status == 'completed' %}
+          <span class="mp-chip mp-chip--success">Latest sync OK</span>
+        {% elif latest.status == 'failed' %}
+          <span class="mp-chip mp-chip--failed">Latest sync failed{% if latest.error_type %} · {{ latest.error_type }}{% endif %}</span>
+        {% elif latest.status == 'started' %}
+          <span class="mp-chip mp-chip--warn">In progress</span>
+        {% endif %}
       </div>
-    {% endif %}
-    {% if latest.reference_code %}
-      <p class="muted">Reference code: <code>{{ latest.reference_code }}</code></p>
-    {% endif %}
-    {% if latest.status == 'failed' and latest.error_message %}
-      <p class="muted">{{ latest.error_message }}</p>
+      {% if dashboard.snapshot_is_stale %}
+        <div class="mp-broker-stale-banner">
+          Snapshot from previous completed sync (latest attempt failed).
+        </div>
+      {% endif %}
+      {% if latest.status == 'failed' and latest.error_message %}
+        <p class="mp-lab-muted" style="margin-top:6px;">{{ latest.error_message }}</p>
+      {% endif %}
     {% endif %}
   </div>
-</section>
+  {% if latest is not none %}
+    <div class="mp-lab-ops__generated">
+      {% if latest.reference_code %}Ref: <code>{{ latest.reference_code }}</code><br>{% endif %}
+      {% if latest.started_at %}Started {{ latest.started_at.strftime('%Y-%m-%d %H:%M UTC') }}{% endif %}
+    </div>
+  {% endif %}
+</header>
