@@ -59,28 +59,23 @@ def test_no_production_module_imports_ibapi():
     assert not offenders, "ibapi must not be imported in production code:\n" + "\n".join(offenders)
 
 
-def test_no_gateway_references_in_compose_files():
-    """Phase 7a-Flex removed the ib-gateway sidecar — compose files must
-    not resurrect any Gateway service / image / env-var references."""
-    import re
-
-    repo_root = Path(__file__).resolve().parents[2]
-    compose_files = [
-        repo_root / "docker-compose.cn.yml",
-        repo_root / "docker-compose.prod.yml",
-    ]
-    pattern = re.compile(
-        r"gnzsnz/ib-gateway|ib-gateway:|TWS_USERID|TWS_PASSWORD|"
-        r"IBKR_HOST|IBKR_PORT|IBKR_CLIENT_ID",
-        re.IGNORECASE,
-    )
-    offenders: list[str] = []
-    for path in compose_files:
-        if not path.exists():
-            continue
-        for lineno, line in enumerate(path.read_text().splitlines(), 1):
-            if pattern.search(line):
-                offenders.append(f"{path.name}:{lineno}: {line.strip()}")
-    assert not offenders, (
-        "Gateway references must not appear in compose files:\n" + "\n".join(offenders)
-    )
+# NOTE: test_no_gateway_references_in_compose_files was DELETED in the
+# Phase 7b sidecar-compose follow-up PR (2026-05-24).
+#
+# Original intent: prevent accidental regression of the Phase 7a Gateway
+# sidecar after Phase 7a-Flex switched the read-only truth path to the
+# Flex Web Service (HTTPS+XML), removing the sidecar entirely.
+#
+# Why obsolete: Phase 7b reintroduces the Gateway sidecar legitimately
+# for paper order execution (place/status/cancel against TWS). The
+# sidecar block — `ib-gateway:` service, `gnzsnz/ib-gateway` image,
+# `TWS_USERID`/`TWS_PASSWORD` env — is now a required part of the
+# compose, validated end-to-end against IBKR paper account DUE411848.
+# A guard that forbids those tokens would fail on the supported
+# deployment.
+#
+# The 7a-Flex read-only path is still protected by:
+#   - test_no_production_module_imports_ibapi (above) — restricts ibapi
+#     to the single 7b adapter file.
+#   - test_phase7b_order_boundary.py — narrower allow-list for ibapi.
+#   - The Flex client tests under tests/broker/test_flex_*.

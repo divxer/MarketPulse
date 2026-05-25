@@ -78,12 +78,110 @@ services:
       IBKR_FLEX_MAX_WAIT_SECONDS: ${IBKR_FLEX_MAX_WAIT_SECONDS:-60}
       IBKR_ACCOUNT_ID: ${IBKR_ACCOUNT_ID:-}
       MP_IBKR_ALLOW_LIVE: ${MP_IBKR_ALLOW_LIVE:-false}
+      # Phase 7b — IBKR Gateway sidecar order execution
+      IBKR_ORDER_HOST: ${IBKR_ORDER_HOST:-ib-gateway}
+      IBKR_ORDER_PORT: ${IBKR_ORDER_PORT:-4002}
+      IBKR_ORDER_CLIENT_ID: ${IBKR_ORDER_CLIENT_ID:-72}
+      IBKR_ORDER_CONNECT_TIMEOUT_SECONDS: ${IBKR_ORDER_CONNECT_TIMEOUT_SECONDS:-10}
+      IBKR_ORDER_NEXT_VALID_ID_TIMEOUT_SECONDS: ${IBKR_ORDER_NEXT_VALID_ID_TIMEOUT_SECONDS:-10}
+      IBKR_ORDER_OBSERVATION_TIMEOUT_SECONDS: ${IBKR_ORDER_OBSERVATION_TIMEOUT_SECONDS:-15}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
       interval: 30s
       timeout: 5s
       start_period: 20s
       retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Phase 7b IBKR paper order execution — TWS Gateway sidecar.
+  # Headless IB Gateway with IBC auto-login. paper mode only; 4002 is the
+  # Gateway paper API socket. marketpulse talks to ib-gateway:4002 via the
+  # compose docker network — no host port bind for the API socket itself.
+  #
+  # CRITICAL ACCOUNT PREREQUISITE:
+  #   IBKR account tier MUST be Pro, not Lite. Lite accounts have no API
+  #   entitlement; the Gateway will display "API support is not available
+  #   for accounts that support free trading" on every login and the API
+  #   socket will never open. Switch via IBKR Portal → Settings →
+  #   IBKR Pricing Plan.
+  #
+  # CRITICAL ONE-TIME SETUP after first boot (VNC into <host>:5900):
+  #   1. Configure → Settings → API → Settings
+  #      - ✅ Enable ActiveX and Socket Clients
+  #      - Socket port = 4002 (paper)
+  #      - Trusted IPs → Add the marketpulse container's docker subnet
+  #        (typically 192.168.80.0/24) or the explicit container IP.
+  #        IBC does NOT propagate this setting from its config in this
+  #        gnzsnz image version — the operator MUST set it via the GUI.
+  #   2. The setting persists in the TWS_SETTINGS_PATH volume across
+  #      container restarts / recreations.
+  ib-gateway:
+    image: ${IB_GATEWAY_IMAGE:-ghcr.io/gnzsnz/ib-gateway:stable}
+    pull_policy: always
+    container_name: ib-gateway
+    restart: unless-stopped
+    ports:
+      # VNC for one-time GUI configuration. Bind to LAN IP only — VNC is
+      # NOT encrypted; do NOT expose to public internet.
+      - "${IB_GATEWAY_VNC_BIND:-0.0.0.0:5900}:5900"
+    environment:
+      TWS_USERID: ${IBKR_USERNAME}
+      TWS_PASSWORD: ${IBKR_PASSWORD}  # In Portainer: escape every `$` as `$$`
+      TRADING_MODE: ${IBKR_TRADING_MODE:-paper}
+      READ_ONLY_API: "no"  # Phase 7b needs write capability
+      VNC_SERVER_PASSWORD: ${VNC_SERVER_PASSWORD}
+      TZ: America/New_York
+      # IBC auto-handles the "Existing session detected" dialog by clicking
+      # "Continue Login" (takes over the stale server-side session).
+      EXISTING_SESSION_DETECTED_ACTION: ${EXISTING_SESSION_DETECTED_ACTION:-primary}
+      # IBC auto-clicks runtime "Accept incoming connection?" dialogs.
+      BYPASS_WARNING: "yes"
+      # Daily IBKR forced-logout recovery (IBKR resets paper sessions ~23:55 NY).
+      TWOFA_TIMEOUT_ACTION: restart
+      AUTO_RESTART_TIME: "23:00"
+      RELOGIN_AFTER_TWOFA_TIMEOUT: "yes"
+      # Persist settings (TrustedIPs cache, jts.ini etc.) so the one-time
+      # VNC config survives container restarts. gnzsnz official guidance:
+      # set TWS_SETTINGS_PATH then bind/volume-mount that path.
+      TWS_SETTINGS_PATH: /home/ibgateway/tws_settings
+    volumes:
+      - /volume1/docker/ib-gateway/tws_settings:/home/ibgateway/tws_settings
+    # Mount /tmp as tmpfs (RAM-backed, 512MB cap) — gnzsnz README recommends.
+    # Gateway writes hundreds of MB of cache/session data to /tmp daily;
+    # without this it accumulates in the container's writable layer and
+    # eventually requires a container recreate to reclaim space.
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    healthcheck:
+      # /proc/net/tcp shows local listening sockets. 0FA2 = 4002 in hex.
+      # Image does not ship `nc` so we read /proc directly.
+      test: ["CMD-SHELL", "cat /proc/net/tcp | grep -q ':0FA2' || exit 1"]
+      interval: 60s
+      timeout: 5s
+      start_period: 120s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   marketpulse_data:
+
+# Pin the compose network to 192.168.80.0/24 so the marketpulse container
+# IP stays stable across `docker compose down/up`. The Phase 7b sidecar's
+# Gateway-side Trusted IPs (set via VNC) reference this subnet; if docker
+# reassigns the subnet on recreate, Phase 7b orders silently fail at the
+# TrustedIPs handshake. Do NOT change this subnet without re-doing the
+# VNC Trusted IPs config.
+networks:
+  default:
+    name: marketpulse_default
+    ipam:
+      config:
+        - subnet: 192.168.80.0/24

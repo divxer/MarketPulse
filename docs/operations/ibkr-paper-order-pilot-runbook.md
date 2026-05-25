@@ -40,6 +40,93 @@ Before running any 7b command, confirm all of the following:
 
 ---
 
+## NAS sidecar deployment (recommended for unattended operation)
+
+This is the validated production deployment as of 2026-05-24. The Gateway
+runs as a docker sidecar next to `marketpulse` on the same compose network.
+
+### Account-tier prerequisite (must verify before deployment)
+
+The IBKR account MUST be on the **IBKR Pro** pricing plan, NOT Lite. Lite
+accounts have no TWS Socket API entitlement; the Gateway will display
+"API support is not available for accounts that support free trading" mid
+mid-login and the API socket will never open. Symptom in IBC logs:
+`** no title **` dialog blocks dispatch forever.
+
+Switch via: IBKR Portal → Settings → IBKR Pricing Plan → select IBKR Pro
+→ Continue. May take up to 24 hours to take effect; processed on the
+Friday following the request in the worst case.
+
+### One-time host setup on the NAS
+
+```bash
+sudo mkdir -p /volume1/docker/ib-gateway/tws_settings
+sudo chown -R 1000:1000 /volume1/docker/ib-gateway/tws_settings
+```
+
+(UID 1000 is the `ibgateway` user inside the gnzsnz image. Adjust if your
+NAS uses a different PUID convention.)
+
+### Populate env (Portainer or `.env`)
+
+```env
+IBKR_USERNAME=<your IBKR username>
+IBKR_PASSWORD=<your IBKR password — escape every $ as $$ in Portainer>
+IBKR_TRADING_MODE=paper
+IB_GATEWAY_VNC_BIND=<NAS LAN IP>:5900
+VNC_SERVER_PASSWORD=<6–8 char password, NOT your IBKR password>
+```
+
+### Deploy
+
+Portainer → Stacks → marketpulse → Update. Wait ~90s for first boot
+(login + config dialog + API socket open).
+
+### One-time VNC configuration (Trusted IPs)
+
+The gnzsnz image's IBC version does not propagate the `TrustedTwsApiClientIPs`
+config option into `jts.ini`, and Gateway resets `jts.ini` TrustedIPs on
+every IBC-driven boot. The reliable workaround is to set Trusted IPs
+once via the GUI; the value is cached in `tws_settings/` (mounted as a
+volume) and persists across container restarts forever.
+
+1. From your Mac: `open vnc://<NAS LAN IP>:5900` — password is your
+   `VNC_SERVER_PASSWORD` from `.env`.
+2. In the IBKR Gateway window: **Configure → Settings → API → Settings**.
+3. Find **Trusted IPs** → **Create** → enter the marketpulse container's
+   docker subnet (typically `192.168.80.0/24`) OR the explicit
+   marketpulse container IP. To find the IP:
+   `docker inspect marketpulse --format '{{.NetworkSettings.Networks.marketpulse_default.IPAddress}}'`
+4. Click **OK** → **Apply** → close dialog.
+5. Disconnect VNC. You should not need it again unless you change
+   account credentials or recreate the volume.
+
+### Verify end-to-end
+
+```bash
+sudo docker exec marketpulse uv run alembic upgrade head
+sudo docker exec marketpulse uv run python scripts/ibkr_paper_order.py place \
+  --account <DUxxxxxxx> \
+  --symbol AAPL --side BUY --quantity 1 --limit-price 1.00 --transmit false
+```
+
+Expected output includes `intent_status: completed` and a
+`staged_to_tws (adapter_callback) broker_status=Staged` event.
+
+### Why we use a custom `TWS_SETTINGS_PATH`
+
+The compose mounts `/volume1/docker/ib-gateway/tws_settings →
+/home/ibgateway/tws_settings` and points IBC at the same path via
+`TWS_SETTINGS_PATH`. This is the gnzsnz-documented pattern for
+preserving Gateway state across container recreates. We deliberately do
+NOT mount `/home/ibgateway/Jts` directly (it contains the Gateway JAR
+files; bind-mounting shadows them) and we do NOT mount `/home/ibgateway`
+(it contains the entrypoint script; mounting empties it and the
+container fails to start with "exec: no such file"). Both pitfalls are
+documented from prior Phase 7a deployment incidents.
+
+---
+
 ## 1a. Test coverage gap — real TWS smoke is the only verification
 
 Automated tests in `tests/broker/test_ibkr_order_client_class.py` use a
