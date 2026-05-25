@@ -29,6 +29,7 @@ kicked off our own running connection.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 import threading
 from pathlib import Path
@@ -167,10 +168,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         return 0
     finally:
-        try:
+        with contextlib.suppress(Exception):
             app.disconnect()
-        except Exception:
-            pass
         reader.join(timeout=2.0)
 
 

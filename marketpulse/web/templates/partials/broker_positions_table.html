@@ -1,0 +1,36 @@
+{# Phase 7a+ Broker Truth Viewer — Positions. #}
+<article class="mp-card">
+  <div class="mp-card__head"><div class="mp-card__title">Positions</div></div>
+  <div class="mp-card__body">
+    {% if dashboard.position_rows %}
+      <div class="mp-broker-table-wrap">
+        <table class="mp-table mp-table--broker">
+          <thead>
+            <tr>
+              <th>Symbol</th><th>Asset Class</th>
+              <th class="num">Quantity</th><th class="num">Avg Cost</th>
+              <th class="num">Market Price</th><th class="num">Market Value</th>
+              <th class="num">Unrealized P&amp;L</th><th class="num">Realized P&amp;L</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in dashboard.position_rows %}
+              <tr>
+                <td>{{ r.symbol }}</td>
+                <td>{{ r.asset_class or '' }}</td>
+                <td class="num">{{ r.quantity }}</td>
+                <td class="num">{% if r.avg_cost is not none %}{{ r.avg_cost }}{% endif %}</td>
+                <td class="num">{% if r.market_price is not none %}{{ r.market_price }}{% endif %}</td>
+                <td class="num">{% if r.market_value is not none %}{{ r.market_value }}{% endif %}</td>
+                <td class="num">{% if r.unrealized_pnl is not none %}{{ r.unrealized_pnl }}{% endif %}</td>
+                <td class="num">{% if r.realized_pnl is not none %}{{ r.realized_pnl }}{% endif %}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="mp-empty-state">No positions</div>
+    {% endif %}
+  </div>
+</article>

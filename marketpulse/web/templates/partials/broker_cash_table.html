@@ -1,0 +1,32 @@
+{# Phase 7a+ Broker Truth Viewer — Cash balances. #}
+<article class="mp-card">
+  <div class="mp-card__head"><div class="mp-card__title">Cash Balances</div></div>
+  <div class="mp-card__body">
+    {% if dashboard.cash_rows %}
+      <div class="mp-broker-table-wrap">
+        <table class="mp-table mp-table--broker">
+          <thead>
+            <tr>
+              <th>Currency</th>
+              <th class="num">Cash Balance</th>
+              <th class="num">Settled Cash</th>
+              <th class="num">Accrued Interest</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in dashboard.cash_rows %}
+              <tr>
+                <td>{{ r.currency }}</td>
+                <td class="num">{% if r.cash_balance is not none %}{{ r.cash_balance }}{% endif %}</td>
+                <td class="num">{% if r.settled_cash is not none %}{{ r.settled_cash }}{% endif %}</td>
+                <td class="num">{% if r.accrued_interest is not none %}{{ r.accrued_interest }}{% endif %}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="mp-empty-state">No cash balances</div>
+    {% endif %}
+  </div>
+</article>

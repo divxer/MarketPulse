@@ -1,0 +1,29 @@
+{# Phase 7a+ Broker Truth Viewer — Hero partial. #}
+{% set latest = dashboard.latest_run %}
+{% set env = latest.broker_environment or 'unknown' %}
+<section class="mp-hero mp-broker-hero">
+  <div>
+    <div class="mp-broker-hero__account">
+      <h2 class="grotesk">{{ latest.account_id or '(unknown account)' }}</h2>
+      <span class="mp-chip mp-chip--env mp-chip--env-{{ env }}">{{ env }}</span>
+      {% if latest.status == 'completed' %}
+        <span class="mp-chip mp-chip--ok">Latest sync OK</span>
+      {% elif latest.status == 'failed' %}
+        <span class="mp-chip mp-chip--bad">Latest sync failed{% if latest.error_type %} · {{ latest.error_type }}{% endif %}</span>
+      {% elif latest.status == 'started' %}
+        <span class="mp-chip mp-chip--warn">In progress</span>
+      {% endif %}
+    </div>
+    {% if dashboard.snapshot_is_stale %}
+      <div class="mp-broker-stale-banner">
+        Snapshot from previous completed sync (latest attempt failed).
+      </div>
+    {% endif %}
+    {% if latest.reference_code %}
+      <p class="muted">Reference code: <code>{{ latest.reference_code }}</code></p>
+    {% endif %}
+    {% if latest.status == 'failed' and latest.error_message %}
+      <p class="muted">{{ latest.error_message }}</p>
+    {% endif %}
+  </div>
+</section>
