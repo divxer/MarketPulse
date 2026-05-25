@@ -35,10 +35,15 @@ class _FakeTencent:
         self.history_calls += 1
         if self.history_fail:
             raise ValueError("tencent kline unavailable")
-        return [Bar(
-            date=datetime.now(UTC).date(),
-            open=1, high=2, low=0.5, close=1.5, volume=100,
-        )]
+        # Return >= _TENCENT_MIN_ROWS (5) so HybridClient accepts the result
+        # without triggering the "tencent_history_too_short_falling_back"
+        # defense-in-depth fallback added in PR #101. Real Tencent kline
+        # for short periods returns dozens of bars; 5 minimal-but-realistic.
+        today = datetime.now(UTC).date()
+        return [
+            Bar(date=today, open=1, high=2, low=0.5, close=1.5, volume=100)
+            for _ in range(5)
+        ]
 
 
 class _FakeYF:
@@ -112,7 +117,10 @@ def test_history_prefers_tencent() -> None:
     yf = _FakeYF()
     client = HybridClient(yf, tencent=tencent, prefer_tencent=True)
     bars = client.fetch_history("AAPL")
-    assert len(bars) == 1
+    # _FakeTencent returns 5 bars (matching real Tencent kline shape for short
+    # periods). HybridClient PR #101 added a `< _TENCENT_MIN_ROWS` fallback
+    # guard — 5 is exactly at the threshold (>=), so Tencent's result is used.
+    assert len(bars) == 5
     assert tencent.history_calls == 1
 
 
