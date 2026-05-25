@@ -55,6 +55,15 @@ proxy, or ensure such access logs are scrubbed / not retained. Keep the
 token in a password manager and rotate it via IBKR Portal if you suspect
 exposure.
 
+## Automatic schedule
+
+The Flex sync runs automatically inside the MarketPulse scheduler at
+**23:30 America/New_York, Mon-Fri** (overridable via `FLEX_SYNC_HOUR` /
+`FLEX_SYNC_MINUTE`). Operators no longer need to `docker exec` daily — the
+manual command below is only for ad-hoc testing, troubleshooting, or
+backfill after a failure window. The scheduled job silently skips itself
+when `IBKR_FLEX_TOKEN` or `IBKR_FLEX_QUERY_ID` are unset.
+
 ## Manual smoke
 
 ```bash

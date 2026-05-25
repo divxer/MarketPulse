@@ -292,6 +292,82 @@ def run_outcome_computation() -> None:
         db.close()
 
 
+def run_flex_sync() -> None:
+    """Daily job: Phase 7a-Flex broker truth capture via IBKR Flex Web Service.
+
+    Pulls the configured Activity Flex Query and persists snapshot rows
+    into broker_account_snapshot / broker_cash_snapshot / broker_position_snapshot
+    / broker_execution_snapshot. Open-orders are not produced by Flex (Phase
+    7a-Flex spec L18).
+
+    No-op (logs a warning, skips the call) when IBKR_FLEX_TOKEN or
+    IBKR_FLEX_QUERY_ID are not configured — keeps the scheduler quiet on
+    dev / pre-Flex-setup environments.
+
+    Runs daily at 23:30 NY (after US market close + Flex generation buffer)
+    by default; overridable via FLEX_SYNC_HOUR / FLEX_SYNC_MINUTE env.
+    """
+    from marketpulse.broker.flex_client import FlexClient
+    from marketpulse.broker.readonly_sync import FlexSyncConfig, run_readonly_sync
+
+    settings = get_settings()
+    if not settings.ibkr_flex_token or not settings.ibkr_flex_query_id:
+        log.warning(
+            "flex_sync_skipped_unconfigured",
+            reason="IBKR_FLEX_TOKEN or IBKR_FLEX_QUERY_ID not set",
+        )
+        return
+
+    gen = session_scope()
+    db = next(gen)
+    try:
+        config = FlexSyncConfig(
+            token=settings.ibkr_flex_token,
+            query_id=settings.ibkr_flex_query_id,
+            base_url=settings.ibkr_flex_base_url,
+            account_id=settings.ibkr_account_id or None,
+            poll_interval_seconds=settings.ibkr_flex_poll_interval_seconds,
+            max_wait_seconds=settings.ibkr_flex_max_wait_seconds,
+            allow_live=settings.ibkr_allow_live,
+        )
+        with FlexClient(
+            token=config.token,
+            query_id=config.query_id,
+            account_id=config.account_id,
+            base_url=config.base_url,
+            poll_interval_seconds=config.poll_interval_seconds,
+            max_wait_seconds=config.max_wait_seconds,
+        ) as client:
+            result = run_readonly_sync(
+                db, client=client, config=config, now=datetime.now(UTC),
+            )
+        db.commit()
+        log.info(
+            "flex_sync_done",
+            sync_run_id=result.sync_run_id,
+            status=result.status,
+            account_id=result.account_id,
+            error_type=result.error_type,
+            error_message=result.error_message,
+            account_snapshots=result.account_snapshots,
+            cash_rows=result.cash_rows,
+            positions=result.positions,
+            executions=result.executions,
+            reference_code=result.reference_code,
+        )
+        record_run_summary(db, {
+            "ran_at": datetime.now(UTC).isoformat(),
+            "status": result.status,
+            "sync_run_id": result.sync_run_id,
+            "rows_total": (
+                result.account_snapshots + result.cash_rows
+                + result.positions + result.executions
+            ),
+        })
+    finally:
+        db.close()
+
+
 def build_scheduler() -> BackgroundScheduler:
     settings = get_settings()
     sched = BackgroundScheduler(timezone="America/New_York")
@@ -336,6 +412,22 @@ def build_scheduler() -> BackgroundScheduler:
         trigger=CronTrigger(hour=2, minute=0, timezone="UTC"),
         id="outcome_computation",
         replace_existing=True,
+    )
+    # Phase 7a-Flex daily broker truth capture. Runs after US close + Flex
+    # generation buffer. Skips silently if FLEX_TOKEN/QUERY_ID unset.
+    sched.add_job(
+        run_flex_sync,
+        trigger=CronTrigger(
+            hour=settings.flex_sync_hour,
+            minute=settings.flex_sync_minute,
+            day_of_week="mon-fri",  # no point on weekends; IBKR markets closed
+            timezone=ZoneInfo("America/New_York"),
+        ),
+        id="flex_sync",
+        replace_existing=True,
+        misfire_grace_time=3600,  # 1h tolerance — IBKR sometimes lags
+        coalesce=True,
+        max_instances=1,
     )
     # Phase 6a paper trading daily tick (lock xxv: thin entrypoint).
     # Imported here so the registration sits with all other jobs.

@@ -77,6 +77,11 @@ class Settings(BaseSettings):
         alias="IBKR_FLEX_MAX_WAIT_SECONDS",
         ge=0,
     )
+    # Phase 7a-Flex scheduler cron — daily broker-truth sync window
+    # (America/New_York). Default 23:30 NY: market close 16:00 + Flex
+    # generation buffer; leaves headroom before 02:00 UTC outcome_computation.
+    flex_sync_hour: int = Field(23, alias="FLEX_SYNC_HOUR", ge=0, le=23)
+    flex_sync_minute: int = Field(30, alias="FLEX_SYNC_MINUTE", ge=0, le=59)
 
     # Phase 7b IBKR paper order pilot — TWS/Gateway connection settings.
     ibkr_order_host: str = Field("127.0.0.1", alias="IBKR_ORDER_HOST")
