@@ -88,6 +88,8 @@ services:
       IBKR_FLEX_BASE_URL: ${IBKR_FLEX_BASE_URL:-https://gdcdyn.interactivebrokers.com/Universal/servlet}
       IBKR_FLEX_POLL_INTERVAL_SECONDS: ${IBKR_FLEX_POLL_INTERVAL_SECONDS:-5}
       IBKR_FLEX_MAX_WAIT_SECONDS: ${IBKR_FLEX_MAX_WAIT_SECONDS:-60}
+      FLEX_SYNC_HOUR: ${FLEX_SYNC_HOUR:-23}
+      FLEX_SYNC_MINUTE: ${FLEX_SYNC_MINUTE:-30}
       IBKR_ACCOUNT_ID: ${IBKR_ACCOUNT_ID:-}
       MP_IBKR_ALLOW_LIVE: ${MP_IBKR_ALLOW_LIVE:-false}
       # Phase 7b — IBKR Gateway sidecar order execution
