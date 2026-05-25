@@ -59,6 +59,16 @@ Friday following the request in the worst case.
 
 ### One-time host setup on the NAS
 
+**MUST run before first deploy.** Docker does NOT auto-create the bind-mount
+source path. If the `tws_settings/` subdirectory does not exist on the host,
+the container fails to start with:
+
+```
+Error: Bind mount failed: '/volume1/docker/ib-gateway/tws_settings' does not exist
+```
+
+Pre-create the directory and chown it to the in-container UID:
+
 ```bash
 sudo mkdir -p /volume1/docker/ib-gateway/tws_settings
 sudo chown -R 1000:1000 /volume1/docker/ib-gateway/tws_settings
@@ -93,10 +103,19 @@ volume) and persists across container restarts forever.
 1. From your Mac: `open vnc://<NAS LAN IP>:5900` — password is your
    `VNC_SERVER_PASSWORD` from `.env`.
 2. In the IBKR Gateway window: **Configure → Settings → API → Settings**.
-3. Find **Trusted IPs** → **Create** → enter the marketpulse container's
-   docker subnet (typically `192.168.80.0/24`) OR the explicit
-   marketpulse container IP. To find the IP:
-   `docker inspect marketpulse --format '{{.NetworkSettings.Networks.marketpulse_default.IPAddress}}'`
+3. Find **Trusted IPs** → **Create** → enter **individual IPs only**.
+   **CIDR notation (e.g. `192.168.80.0/24`) is silently rejected** by the
+   dialog — the OK button closes, the entry does not appear in the list,
+   and Gateway logs nothing about the rejection. You must enter individual
+   IPs one at a time.
+   - Pinning the compose network to `192.168.80.0/24` guarantees the
+     segment but **not the individual IP**: containers are assigned `.2`,
+     `.3`, etc. based on startup order. If marketpulse boots before
+     ib-gateway, marketpulse gets `.2`; if order swaps after a stack
+     restart, marketpulse gets `.3`.
+   - **Best practice: add BOTH `192.168.80.2` AND `192.168.80.3`** so
+     either boot order works. To confirm the current assignment:
+     `docker inspect marketpulse --format '{{.NetworkSettings.Networks.marketpulse_default.IPAddress}}'`
 4. Click **OK** → **Apply** → close dialog.
 5. Disconnect VNC. You should not need it again unless you change
    account credentials or recreate the volume.
@@ -112,6 +131,29 @@ sudo docker exec marketpulse uv run python scripts/ibkr_paper_order.py place \
 
 Expected output includes `intent_status: completed` and a
 `staged_to_tws (adapter_callback) broker_status=Staged` event.
+
+### Diagnosing `connection_failed: managedAccounts callback did not arrive`
+
+This is the symptom you see when Trusted IPs is not correctly configured
+for the marketpulse container's actual IP. Two non-obvious traps:
+
+1. **Do NOT `grep TrustedIPs jts.ini` to verify the setting worked.** On
+   **IBKR Pro accounts**, the GUI persists Trusted IPs in
+   `tws_settings/<random-hash>/ibg.xml` (encrypted/binary), and `jts.ini`
+   keeps showing `TrustedIPs=127.0.0.1` even after a successful GUI save.
+   (On the deprecated Lite tier the value did live in `jts.ini` — that
+   guidance is stale for Pro.) The only reliable success signal is **the
+   `place` CLI completes** — connection success is observable end-to-end,
+   the on-disk file state is not.
+2. **Re-check CIDR rejection (above).** If you typed `192.168.80.0/24`
+   into the GUI, no entry was actually saved despite the dialog closing
+   cleanly. Re-open Configure → Settings → API → Settings → Trusted IPs
+   and confirm individual IP entries are visible in the list.
+
+If the `place` CLI still fails after re-entering individual IPs, confirm
+both `.2` AND `.3` are present (see Trusted IPs note above) — the
+container may have been assigned a different IP on the most recent stack
+restart.
 
 ### Why we use a custom `TWS_SETTINGS_PATH`
 
