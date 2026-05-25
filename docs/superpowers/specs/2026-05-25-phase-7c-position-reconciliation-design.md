@@ -213,6 +213,8 @@ Allowed reads (MVP):
 
 Template guard (substring scan of all `reconcile_*.html` partials): same forbidden-name list.
 
+**Template authoring rule:** templates MUST NOT mention ORM model class names (e.g. `PaperOrder`, `BrokerOrderIntent`) even in user-facing explanatory copy, since the substring scan will fire. Use user-friendly Chinese / English labels only ("纸上交易订单", "broker 订单意图"). The guard is intentionally name-blind — keep the surface clean.
+
 ## UI
 
 ### Page structure (`/lab/reconcile`)
@@ -221,8 +223,14 @@ Template guard (substring scan of all `reconcile_*.html` partials): same forbidd
 Hero (mp-lab-ops__header pattern, matching /lab/broker)
   Eyebrow: Lab · Reconciliation
   H1: 对账
-  Body: latest paper tick time + latest broker sync time + severity chip
+  Body: latest broker sync time + paper open-position count + severity chip
   Right meta: ref code, started_at
+
+  Note: MVP does NOT display "latest paper tick time". That would require
+  reading PaperAuditEvent (TICK_COMPLETED event), which is excluded from
+  the allowed-reads list to keep the architecture guard tight. Paper-side
+  freshness can be inferred from the open-position count + the broker
+  side's stale flag.
   Conditional banners:
     - Stale broker snapshot (yellow)
     - Account ambiguous (gray)
