@@ -19,6 +19,15 @@ from marketpulse.logging import get_logger
 
 log = get_logger(__name__)
 
+# Tencent's kline endpoint only carries ~60 days of history reliably for
+# non-CN tickers. Beyond that it silently returns a single truncated row
+# instead of raising, which broke the evaluation framework's forward-return
+# computation (asked for "1y" of SPY, got 1 row, wrote 0 outcomes).
+_TENCENT_PERIODS = frozenset({"30d", "60d"})
+# Defense-in-depth threshold for short periods — if Tencent returns absurdly
+# few rows, treat it as a silent failure and fall through to yfinance.
+_TENCENT_MIN_ROWS = 5
+
 
 class _TencentLike(Protocol):
     def fetch_quote(self, ticker: str) -> Quote: ...
@@ -57,13 +66,28 @@ class HybridClient:
         return self.yf.fetch_quote(ticker)
 
     def fetch_history(self, ticker: str, period: str = "60d") -> list[Bar]:
+        # Long periods (e.g. 6m / 1y) skip Tencent entirely — its kline API
+        # silently truncates to 1 row for non-CN tickers, which broke the
+        # evaluation framework's forward-return computation. yfinance is the
+        # authoritative source for long history.
+        if period not in _TENCENT_PERIODS:
+            return self.yf.fetch_history(ticker, period=period)
         if self.tencent and self.prefer_tencent:
             try:
-                return self.tencent.fetch_history(ticker, period=period)
+                bars = self.tencent.fetch_history(ticker, period=period)
+                # Defense-in-depth: even for 30d/60d, if Tencent returns
+                # absurdly few rows (silent quota / region block), fall through.
+                if len(bars) < _TENCENT_MIN_ROWS:
+                    log.info(
+                        "tencent_history_too_short_falling_back",
+                        ticker=ticker, period=period, rows=len(bars),
+                    )
+                else:
+                    return bars
             except Exception as exc:
                 log.info(
                     "tencent_history_failed_falling_back",
-                    ticker=ticker, error=str(exc),
+                    ticker=ticker, period=period, error=str(exc),
                 )
         return self.yf.fetch_history(ticker, period=period)
 
