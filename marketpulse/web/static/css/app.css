@@ -1016,7 +1016,10 @@ hr.mp-hr {
 }
 .mp-ai-track-body {
   padding: 0 48px 32px;
-  display: grid; grid-template-columns: 760px 1fr; gap: 56px;
+  /* Main column grows to fill wide displays; rail capped at 380px so the
+     filter / strategy / ticker cards don't stretch into wasted whitespace
+     on the 2400px max-width lab pages. */
+  display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 32px;
 }
 .mp-ai-track-main { display: flex; flex-direction: column; gap: 16px; }
 .mp-ai-track-rail { display: flex; flex-direction: column; gap: 16px; }
