@@ -103,6 +103,11 @@ services:
       timeout: 5s
       start_period: 20s
       retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # Phase 7b IBKR paper order execution — TWS Gateway sidecar.
   # Headless IB Gateway with IBC auto-login. paper mode only; 4002 is the
@@ -157,6 +162,12 @@ services:
       TWS_SETTINGS_PATH: /home/ibgateway/tws_settings
     volumes:
       - /volume1/docker/ib-gateway/tws_settings:/home/ibgateway/tws_settings
+    # Mount /tmp as tmpfs (RAM-backed, 512MB cap) — gnzsnz README recommends.
+    # Gateway writes hundreds of MB of cache/session data to /tmp daily;
+    # without this it accumulates in the container's writable layer and
+    # eventually requires a container recreate to reclaim space.
+    tmpfs:
+      - /tmp:size=512m,mode=1777
     healthcheck:
       # /proc/net/tcp shows local listening sockets. 0FA2 = 4002 in hex.
       # Image does not ship `nc` so we read /proc directly.
@@ -165,3 +176,21 @@ services:
       timeout: 5s
       start_period: 120s
       retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# Pin the compose network to 192.168.80.0/24 so the marketpulse container
+# IP stays stable across `docker compose down/up`. The Phase 7b sidecar's
+# Gateway-side Trusted IPs (set via VNC) reference this subnet; if docker
+# reassigns the subnet on recreate, Phase 7b orders silently fail at the
+# TrustedIPs handshake. Do NOT change this subnet without re-doing the
+# VNC Trusted IPs config.
+networks:
+  default:
+    name: marketpulse_default
+    ipam:
+      config:
+        - subnet: 192.168.80.0/24
