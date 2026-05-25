@@ -1406,3 +1406,4 @@ hr.mp-hr {
 .mp-chip--env-paper   { background:#dbeafe; color:#1e40af; }
 .mp-chip--env-live    { background:#fee2e2; color:#991b1b; }
 .mp-chip--env-unknown { background:var(--ns-surface-container); color:var(--ns-on-surface-variant); }
+/* Phase 7c - Reconciliation page reuses the broker viewer lab styles. */

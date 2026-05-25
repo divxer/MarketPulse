@@ -1,0 +1,46 @@
+{# Phase 7c - position diff table. #}
+<article class="mp-card">
+  <div class="mp-card__head"><div class="mp-card__title">持仓 diff</div></div>
+  <div class="mp-card__body">
+    {% if dashboard.rows %}
+      <div class="mp-broker-table-wrap">
+        <table class="mp-table mp-table--broker">
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>类型</th>
+              <th class="num">Paper Qty</th>
+              <th class="num">Broker Qty</th>
+              <th class="num">Δ</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in dashboard.rows %}
+              <tr>
+                <td>{{ row.symbol }}</td>
+                <td>
+                  {% if row.diff_type.value == 'matched' %}
+                    <span class="mp-chip mp-chip--success">已对齐</span>
+                  {% elif row.diff_type.value == 'missing_in_broker' %}
+                    <span class="mp-chip {% if row.is_red %}mp-chip--failed{% else %}mp-chip--warn{% endif %}">缺 broker</span>
+                  {% elif row.diff_type.value == 'missing_in_paper' %}
+                    <span class="mp-chip mp-chip--warn">缺 paper</span>
+                  {% elif row.diff_type.value == 'quantity_mismatch' %}
+                    <span class="mp-chip mp-chip--warn">数量不一致</span>
+                  {% elif row.diff_type.value == 'side_mismatch' %}
+                    <span class="mp-chip mp-chip--failed">方向相反</span>
+                  {% endif %}
+                </td>
+                <td class="num">{% if row.paper_qty is not none %}{{ row.paper_qty }}{% else %}-{% endif %}</td>
+                <td class="num">{% if row.broker_qty is not none %}{{ row.broker_qty }}{% else %}-{% endif %}</td>
+                <td class="num">{% if row.delta is not none %}{{ row.delta }}{% else %}-{% endif %}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="mp-empty-state">无 diff 行</div>
+    {% endif %}
+  </div>
+</article>
