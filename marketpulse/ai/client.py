@@ -32,14 +32,27 @@ class AnthropicClient:
         retry=retry_if_exception_type(_AI_RETRY_EXCEPTIONS),
     )
     def complete(self, *, system: str, user: str, model: str | None = None) -> str:
-        msg = self._client.messages.create(
-            model=model or self._model,
-            max_tokens=2000,
-            system=[
-                {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}},
-            ],
-            messages=[{"role": "user", "content": user}],
-        )
+        # Only attach a system block when there's actual content. Anthropic API
+        # rejects empty text blocks under cache_control with
+        #   "system.0: cache_control cannot be set for empty text blocks".
+        # The router stage (service._route_strategy) calls complete(system="")
+        # because the router prompt is fully embedded in the user message;
+        # without this guard every router call 400'd and silently fell back
+        # to the "general" strategy, defeating Phase 3 entirely.
+        kwargs: dict = {
+            "model": model or self._model,
+            "max_tokens": 2000,
+            "messages": [{"role": "user", "content": user}],
+        }
+        if system:
+            kwargs["system"] = [
+                {
+                    "type": "text",
+                    "text": system,
+                    "cache_control": {"type": "ephemeral"},
+                },
+            ]
+        msg = self._client.messages.create(**kwargs)
         parts: list[str] = []
         for block in msg.content:
             if getattr(block, "type", None) == "text":
