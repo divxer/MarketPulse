@@ -1,0 +1,42 @@
+{# Phase 7a+ Broker Truth Viewer — Recent sync runs (last 10, any status). #}
+<article class="mp-card mp-broker-recent">
+  <div class="mp-card__head"><div class="mp-card__title">Recent Sync Runs</div></div>
+  <div class="mp-card__body">
+    {% if dashboard.recent_runs %}
+      <div class="mp-broker-table-wrap">
+        <table class="mp-table mp-table--broker">
+          <thead>
+            <tr>
+              <th>ID</th><th>Started At</th><th>Status</th>
+              <th>Environment</th><th>Account</th>
+              <th>Error Type</th><th>Ref Code</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in dashboard.recent_runs %}
+              <tr>
+                <td>{{ r.id }}</td>
+                <td>{{ r.started_at.strftime('%Y-%m-%d %H:%M UTC') }}</td>
+                <td>
+                  {% if r.status == 'completed' %}
+                    <span class="mp-chip mp-chip--ok">completed</span>
+                  {% elif r.status == 'failed' %}
+                    <span class="mp-chip mp-chip--bad">failed</span>
+                  {% else %}
+                    <span class="mp-chip mp-chip--warn">{{ r.status }}</span>
+                  {% endif %}
+                </td>
+                <td>{{ r.broker_environment }}</td>
+                <td>{{ r.account_id or '' }}</td>
+                <td>{% if r.error_type %}<code>{{ r.error_type }}</code>{% endif %}</td>
+                <td>{% if r.reference_code %}<code>{{ r.reference_code }}</code>{% endif %}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="mp-empty-state">No sync runs recorded</div>
+    {% endif %}
+  </div>
+</article>

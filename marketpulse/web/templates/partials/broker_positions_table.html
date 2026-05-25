@@ -1,0 +1,37 @@
+{# Phase 7a+ Broker Truth Viewer — Positions. #}
+{% from "partials/broker_macros.html" import fmt_money, fmt_num %}
+<article class="mp-card">
+  <div class="mp-card__head"><div class="mp-card__title">Positions</div></div>
+  <div class="mp-card__body">
+    {% if dashboard.position_rows %}
+      <div class="mp-broker-table-wrap">
+        <table class="mp-table mp-table--broker">
+          <thead>
+            <tr>
+              <th>Symbol</th><th>Asset Class</th>
+              <th class="num">Quantity</th><th class="num">Avg Cost</th>
+              <th class="num">Market Price</th><th class="num">Market Value</th>
+              <th class="num">Unrealized P&amp;L</th><th class="num">Realized P&amp;L</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in dashboard.position_rows %}
+              <tr>
+                <td>{{ r.symbol }}</td>
+                <td>{{ r.asset_class or '' }}</td>
+                <td class="num">{{ fmt_num(r.quantity) }}</td>
+                <td class="num">{{ fmt_money(r.avg_cost) }}</td>
+                <td class="num">{{ fmt_money(r.market_price) }}</td>
+                <td class="num">{{ fmt_money(r.market_value) }}</td>
+                <td class="num">{{ fmt_money(r.unrealized_pnl) }}</td>
+                <td class="num">{{ fmt_money(r.realized_pnl) }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="mp-empty-state">No positions</div>
+    {% endif %}
+  </div>
+</article>

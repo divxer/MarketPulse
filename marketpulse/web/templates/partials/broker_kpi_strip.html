@@ -1,0 +1,32 @@
+{# Phase 7a+ Broker Truth Viewer — KPI strip. #}
+{% from "partials/broker_macros.html" import fmt_money %}
+{% set acct = dashboard.account %}
+{% set snap = dashboard.snapshot_run %}
+<section class="mp-broker-kpis">
+  <article class="mp-card mp-kpi-card">
+    <div class="mp-card__body">
+      <div class="mp-card__eyebrow">Net Liquidation</div>
+      <div class="mp-kpi-card__value">{{ fmt_money(acct.net_liquidation) if acct else '—' }}</div>
+    </div>
+  </article>
+  <article class="mp-card mp-kpi-card">
+    <div class="mp-card__body">
+      <div class="mp-card__eyebrow">Buying Power</div>
+      <div class="mp-kpi-card__value">{{ fmt_money(acct.buying_power) if acct else '—' }}</div>
+    </div>
+  </article>
+  <article class="mp-card mp-kpi-card">
+    <div class="mp-card__body">
+      <div class="mp-card__eyebrow">Positions</div>
+      <div class="mp-kpi-card__value">{{ dashboard.position_rows|length }}</div>
+    </div>
+  </article>
+  <article class="mp-card mp-kpi-card">
+    <div class="mp-card__body">
+      <div class="mp-card__eyebrow">Snapshot captured</div>
+      <div class="mp-kpi-card__value mp-kpi-card__value--small">
+        {% if snap and snap.completed_at %}{{ snap.completed_at.strftime('%Y-%m-%d %H:%M UTC') }}{% else %}—{% endif %}
+      </div>
+    </div>
+  </article>
+</section>

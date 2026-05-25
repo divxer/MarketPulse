@@ -1363,3 +1363,34 @@ hr.mp-hr {
   font-family: var(--ns-font-mono, monospace);
   white-space: nowrap;
 }
+
+/* Phase 7a+ Broker Truth Viewer */
+.mp-broker-page { display: flex; flex-direction: column; gap: 16px; }
+.mp-broker-hero { padding: 16px 0; }
+.mp-broker-hero__account {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
+}
+.mp-broker-hero__account h2 { margin: 0; }
+.mp-broker-stale-banner {
+  margin-top: 8px; padding: 8px 12px; border-radius: 4px;
+  background: #fef3c7; color: #92400e; border: 1px solid #fde68a;
+}
+.mp-broker-kpis {
+  display: grid; gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+.mp-kpi-card__value--small { font-size: 0.95rem; }
+.mp-broker-body {
+  display: grid; gap: 16px;
+  grid-template-columns: 1fr;
+}
+.mp-broker-table-wrap { overflow-x: auto; }
+.mp-table--broker th, .mp-table--broker td { padding: 6px 10px; }
+.mp-table--broker .num { text-align: right; font-variant-numeric: tabular-nums; }
+.mp-empty-state { color: #64748b; padding: 12px 0; }
+.mp-chip--env-paper { background: #dbeafe; color: #1e40af; }
+.mp-chip--env-live { background: #fee2e2; color: #991b1b; }
+.mp-chip--env-unknown { background: #e5e7eb; color: #374151; }
+.mp-chip--ok { background: #d1fae5; color: #065f46; }
+.mp-chip--bad { background: #fee2e2; color: #991b1b; }
+.mp-chip--warn { background: #fef3c7; color: #92400e; }
