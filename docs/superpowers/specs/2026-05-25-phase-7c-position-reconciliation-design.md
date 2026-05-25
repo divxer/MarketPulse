@@ -86,20 +86,33 @@ class DiffRow:
     diff_type: DiffType
     paper_qty: Decimal | None      # None when MISSING_IN_PAPER
     broker_qty: Decimal | None     # None when MISSING_IN_BROKER
-    delta: Decimal | None          # paper_qty - broker_qty (None if either side None)
+    delta: Decimal | None          # paper_qty - broker_qty; None if either side None
     is_red: bool                   # see Hero severity below
 ```
+
+**Symbol normalization (input contract):** all symbol strings — both `paper.ticker` and `broker.symbol` — are normalized via `symbol.upper().strip()` before entering the diff. No conId / exchange / currency-level matching in MVP.
+
+**Aggregation (input contract):** if the same normalized symbol appears more than once on either side (multi-lot paper positions, or duplicate broker snapshot rows), the input maps must be pre-aggregated by `sum(quantity)`. The map type is `Mapping[str, Decimal]` keyed by normalized symbol; the diff function never sees lot-level rows.
 
 ### `reconcile_positions()` algorithm
 
 ```python
+_SEVERITY_RANK = {
+    SIDE_MISMATCH:     0,  # red, most severe
+    MISSING_IN_BROKER: 1,  # red when paper qty != 0, else yellow
+    QUANTITY_MISMATCH: 2,
+    MISSING_IN_PAPER:  3,
+    MATCHED:           4,  # least severe, last
+}
+
 def reconcile_positions(
     paper: Mapping[str, Decimal],
     broker: Mapping[str, Decimal],
 ) -> list[DiffRow]:
-    """Pure diff. Inputs are already-extracted symbol→qty maps.
+    """Pure diff. Inputs are pre-normalized symbol→qty maps.
 
-    Returns rows sorted by severity desc (red first, MATCHED last).
+    Caller is responsible for symbol normalization (upper().strip()) and
+    same-symbol aggregation. Returns rows sorted by severity then symbol.
     """
     rows: list[DiffRow] = []
     for symbol in sorted(paper.keys() | broker.keys()):
@@ -108,28 +121,40 @@ def reconcile_positions(
         if p is None:
             rows.append(DiffRow(symbol, MISSING_IN_PAPER, None, b, None, is_red=False))
         elif b is None:
-            # Per L4 in hero severity: MISSING_IN_BROKER with non-zero paper is red
-            red = p != 0
-            rows.append(DiffRow(symbol, MISSING_IN_BROKER, p, None, p, is_red=red))
+            red = p != 0   # MISSING_IN_BROKER w/ non-zero paper exposure is severe
+            rows.append(DiffRow(symbol, MISSING_IN_BROKER, p, None, None, is_red=red))
         elif p * b < 0:
             rows.append(DiffRow(symbol, SIDE_MISMATCH, p, b, p - b, is_red=True))
         elif abs(p - b) >= 1:
             rows.append(DiffRow(symbol, QUANTITY_MISMATCH, p, b, p - b, is_red=False))
         else:
             rows.append(DiffRow(symbol, MATCHED, p, b, p - b, is_red=False))
-    return sorted(rows, key=lambda r: (not r.is_red, r.diff_type != QUANTITY_MISMATCH, r.symbol))
+    return sorted(rows, key=lambda r: (_SEVERITY_RANK[r.diff_type], r.symbol))
 ```
 
 ### `load_reconciliation_dashboard(db)` algorithm
 
+Settings attribute is `settings.ibkr_account_id` (confirmed against `marketpulse/config.py` — pydantic Settings field aliased to `IBKR_ACCOUNT_ID`).
+
 1. **Pick the broker account:**
-   - If `settings.ibkr_account_id` is set: use it.
-   - Else: use the `account_id` of the latest completed `BrokerSyncRun`.
-   - If no completed runs exist OR multiple distinct accounts exist in history with no settings override: return `account_ambiguous=True` and skip the diff (hero shows gray "Ambiguous broker account — set `IBKR_ACCOUNT_ID`").
+   - If `settings.ibkr_account_id` is non-empty: use it.
+   - Else: query `account_id` from `BrokerSyncRun` where `status='completed'`. If exactly one distinct account exists, use it. If **multiple distinct accounts exist among completed runs only** (failed runs ignored), return `account_ambiguous=True` and skip the diff (hero shows gray "Ambiguous broker account — set `IBKR_ACCOUNT_ID`"). If no completed runs at all, fall through to step 2's `no_broker_data` branch.
 2. **Fetch broker snapshot:** latest `BrokerSyncRun` where `status='completed'` AND `account_id=<chosen>`. If none, return `no_broker_data=True` (hero shows gray "尚未捕获 broker truth").
-3. **Build broker positions map:** `{p.symbol: p.quantity}` from `BrokerPositionSnapshot` where `sync_run_id=<chosen>`.
-4. **Build paper positions map:** `{p.ticker: Decimal(p.quantity)}` from `PaperPosition` where `exit_fill_id IS NULL`.
-5. **Call `reconcile_positions()`** with the two maps.
+3. **Build broker positions map:** aggregate `BrokerPositionSnapshot` rows where `sync_run_id=<chosen>` by normalized symbol:
+   ```python
+   broker_map: dict[str, Decimal] = {}
+   for row in rows:
+       key = row.symbol.upper().strip()
+       broker_map[key] = broker_map.get(key, Decimal(0)) + row.quantity
+   ```
+4. **Build paper positions map:** aggregate `PaperPosition` rows where `exit_fill_id IS NULL` by normalized ticker:
+   ```python
+   paper_map: dict[str, Decimal] = {}
+   for row in rows:
+       key = row.ticker.upper().strip()
+       paper_map[key] = paper_map.get(key, Decimal(0)) + Decimal(row.quantity)
+   ```
+5. **Call `reconcile_positions(paper_map, broker_map)`**.
 6. **Compute hero severity** (see below).
 7. **Compute stale flag:** `now_utc - broker_run.completed_at > 24h` → `is_stale=True` (warning banner only; does NOT affect diff calculation).
 8. **Return** `ReconciliationDashboard` with all fields.
@@ -179,9 +204,12 @@ Forbidden references (out-of-scope reads):
 - `BrokerOpenOrderSnapshot`, `BrokerExecutionSnapshot` (not part of MVP diff)
 - `PaperOrder`, `PaperFill`, `PaperCashLedger`, `PaperAuditEvent` (only `PaperPosition` is allowed)
 
-Allowed reads:
+Allowed reads (MVP):
 - `PaperPosition` (paper open positions)
-- `BrokerSyncRun`, `BrokerPositionSnapshot`, `BrokerAccountSnapshot` (broker truth)
+- `BrokerSyncRun` (account picking + stale check + hero metadata)
+- `BrokerPositionSnapshot` (broker positions)
+
+`BrokerAccountSnapshot` and `BrokerCashSnapshot` are NOT consumed by MVP — `/lab/broker` already shows that data. If a future revision needs to display NLV in the reconciliation hero, add `BrokerAccountSnapshot` to the allowed-reads list at that time.
 
 Template guard (substring scan of all `reconcile_*.html` partials): same forbidden-name list.
 
@@ -228,8 +256,8 @@ Main table (mp-table--broker reuse):
 ### Pure-logic tests (`tests/reconcile/test_diffing.py`)
 Layer: `unit`. Exhaustive coverage of `reconcile_positions()`:
 - Empty paper + empty broker → []
-- Empty paper + non-empty broker → all MISSING_IN_PAPER
-- Non-empty paper + empty broker → all MISSING_IN_BROKER with `is_red` set by paper qty != 0
+- Empty paper + non-empty broker → all MISSING_IN_PAPER with `delta is None`
+- Non-empty paper + empty broker → all MISSING_IN_BROKER with `delta is None` and `is_red` set by paper qty != 0
 - MATCHED: paper=100, broker=100 → diff_type=MATCHED, delta=0
 - MATCHED with fractional: paper=100, broker=100.34 → MATCHED with delta=-0.34
 - QUANTITY_MISMATCH boundary cases:
@@ -237,17 +265,24 @@ Layer: `unit`. Exhaustive coverage of `reconcile_positions()`:
   - paper=100, broker=99.5  → MATCHED (|diff|=0.5 < 1)
   - paper=100, broker=99.01 → MATCHED (just under threshold; spec L14 still records delta)
 - SIDE_MISMATCH: paper=10 (long), broker=-5 (short) → SIDE_MISMATCH with is_red=True
-- Sort order: red rows first, then QUANTITY_MISMATCH, then MATCHED
+- Sort order assertions: order must follow `_SEVERITY_RANK` then symbol
+  - SIDE_MISMATCH before MISSING_IN_BROKER (both red, severity ranked)
+  - MISSING_IN_BROKER before QUANTITY_MISMATCH before MISSING_IN_PAPER before MATCHED
+  - Within same diff_type: alphabetical by symbol
 
 ### Query model tests (`tests/reconcile/test_query_models.py`)
 Layer: `stateful`. SQLite in-memory:
 - Empty DB → no_broker_data=True, gray hero
-- Only failed runs → no_broker_data=True
+- Only failed runs → no_broker_data=True (per spec: failed runs do NOT count toward account ambiguity)
 - One completed broker run + no paper positions → MISSING_IN_PAPER rows
 - Completed broker run + paper positions, all MATCHED → green hero, 0 mismatches
-- Multi-account history + no settings → account_ambiguous=True
-- `settings.ibkr_account_id` set + multi-account history → picks correct account
+- **Account picking: failed runs ignored** → seed 2 failed runs on account A + 1 failed on account B + 0 completed: result is no_broker_data, NOT account_ambiguous
+- Multi-account history (2 distinct accounts among completed runs) + no settings → account_ambiguous=True
+- Multi-account history (2 distinct) + `settings.ibkr_account_id` set → picks the configured account, ambiguous=False
 - Stale broker snapshot (completed_at = now - 25h) → is_stale=True
+- **Symbol normalization:** broker has `"aapl"` (lowercase), paper has `"AAPL"` → MATCHED (both normalize to "AAPL")
+- **Aggregation:** 2 BrokerPositionSnapshot rows for "AAPL" qty=50 each, paper has one row qty=100 → MATCHED with delta=0
+- **Aggregation paper side:** 2 PaperPosition rows for "AAPL" qty=50 each (open), broker has one row qty=100 → MATCHED
 
 ### Route tests (`tests/web/test_lab_reconcile_route.py`)
 Layer: `route`. TestClient with auth fixture:
