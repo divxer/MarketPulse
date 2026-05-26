@@ -137,13 +137,15 @@ def compute_bid_weights(
       3. Otherwise: None strategies get avg of known weights; floor at min_floor.
 
     Contract:
-      - Every entry of `strategies_today` MUST be a key of `daily_curves`.
-        Raises KeyError on missing.
+      - Strategies missing from daily_curves are treated as having empty
+        curves (rolling_sharpe returns None → bootstrap path applies).
+        Same forward-mode tolerance as compute_position_sizes (see that
+        function's docstring for the production rationale).
       - Empty curve for a strategy → its rolling_sharpe is None → bootstrap path.
     """
     raw: dict[str, float | None] = {
         s: rolling_sharpe(
-            daily_curves[s], as_of=as_of, lookback_days=lookback_days,
+            daily_curves.get(s, []), as_of=as_of, lookback_days=lookback_days,
             min_events=min_events,
         )
         for s in strategies_today
@@ -241,19 +243,29 @@ def compute_position_sizes(
       None of these enter sigma, alpha, or mean_alpha computations.
 
     Contract:
-      - Every entry of strategies_today MUST appear in daily_curves.
-        Raises KeyError on missing.
+      - Strategies missing from daily_curves are treated as having empty
+        curves (rolling_sigma/alpha return None → sizes fall back to base
+        position size). This supports Phase 6 forward mode where curves
+        haven't accumulated yet; backtest mode passes a fully-populated
+        dict and behaves identically.
     """
     overrides = per_strategy_overrides or {}
 
     # Signal-layer computation — MUST NOT depend on overrides (lock #12).
+    # Forward-mode tolerance: missing strategies in daily_curves yield an
+    # empty curve, which rolling_sigma/alpha handle by returning None.
+    # The downstream sigma/alpha None branch then falls back to base size.
+    # Without this fallback, Phase 6 forward mode (which seeds curves={})
+    # KeyErrors at the first bid (observed in production 2026-05-26 — the
+    # paper_trading_tick crashed with ENGINE_INVARIANT_ERROR allocator_failed
+    # KeyError('general') as soon as recap-tagged bids arrived).
     sigmas: dict[str, float | None] = {
-        s: rolling_sigma(daily_curves[s], as_of=as_of,
+        s: rolling_sigma(daily_curves.get(s, []), as_of=as_of,
                          lookback_days=lookback_days, min_events=min_events)
         for s in strategies_today
     }
     alphas: dict[str, float | None] = {
-        s: rolling_alpha(daily_curves[s], as_of=as_of,
+        s: rolling_alpha(daily_curves.get(s, []), as_of=as_of,
                          lookback_days=lookback_days, min_events=min_events)
         for s in strategies_today
     }
