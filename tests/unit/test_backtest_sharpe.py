@@ -528,19 +528,23 @@ def test_size_all_strategies_below_min_returns_all_none():
         assert "a" in raw_below and "b" in raw_below
 
 
-def test_compute_position_sizes_raises_on_missing_strategy():
-    """Contract: every strategy in strategies_today must appear in daily_curves."""
+def test_compute_position_sizes_treats_missing_strategy_as_empty_curve():
+    """Contract change (2026-05-26): missing strategies in daily_curves are
+    treated as having an empty curve, which yields sigma/alpha=None and a
+    fall-back to base_position_size. This unblocks Phase 6 forward mode
+    where curves={} is the steady state until 6c accumulates data."""
     from datetime import date
-
-    import pytest
 
     from marketpulse.backtest.sharpe import compute_position_sizes
     daily_curves = {"present": _noisy_curve()}
-    with pytest.raises(KeyError):
-        compute_position_sizes(
-            ["present", "missing"], daily_curves,
-            as_of=date(2026, 5, 1),
-        )
+    sizes, _raw_below, _clamped = compute_position_sizes(
+        ["present", "missing"], daily_curves,
+        as_of=date(2026, 5, 1),
+    )
+    # 'missing' had no curve → empty list → rolling_sigma=None → base size.
+    # 'present' computes normally based on its curve.
+    assert sizes["missing"] is not None
+    assert sizes["missing"] > 0    # falls back to base_position_size
 
 
 def test_compute_position_sizes_returns_raw_sizes_below_min_dict():
