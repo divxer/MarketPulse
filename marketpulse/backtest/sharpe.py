@@ -137,13 +137,15 @@ def compute_bid_weights(
       3. Otherwise: None strategies get avg of known weights; floor at min_floor.
 
     Contract:
-      - Every entry of `strategies_today` MUST be a key of `daily_curves`.
-        Raises KeyError on missing.
+      - Strategies missing from daily_curves are treated as having empty
+        curves (rolling_sharpe returns None → bootstrap path applies).
+        Same forward-mode tolerance as compute_position_sizes (see that
+        function's docstring for the production rationale).
       - Empty curve for a strategy → its rolling_sharpe is None → bootstrap path.
     """
     raw: dict[str, float | None] = {
         s: rolling_sharpe(
-            daily_curves[s], as_of=as_of, lookback_days=lookback_days,
+            daily_curves.get(s, []), as_of=as_of, lookback_days=lookback_days,
             min_events=min_events,
         )
         for s in strategies_today

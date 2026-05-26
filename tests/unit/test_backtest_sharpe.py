@@ -144,17 +144,22 @@ def test_bid_weight_deep_negative_sharpe_still_floored_at_0_1():
     assert weights["catastrophic"] == 0.1
 
 
-def test_compute_bid_weights_raises_on_missing_strategy():
-    """Contract: every strategy in strategies_today must be in daily_curves."""
-    import pytest
-
+def test_compute_bid_weights_treats_missing_strategy_as_empty_curve():
+    """Contract change (2026-05-26): missing strategies in daily_curves are
+    treated as having an empty curve (rolling_sharpe=None → bootstrap path).
+    Forward-mode parity with compute_position_sizes — paper_trading_tick's
+    allocate_for_day passes curves={} until Phase 6c accumulates data."""
     from marketpulse.backtest.sharpe import compute_bid_weights
     daily_curves = {"momentum_breakout": _curve()}
-    with pytest.raises(KeyError):
-        compute_bid_weights(
-            ["momentum_breakout", "missing"], daily_curves,
-            as_of=date(2026, 5, 1), lookback_days=60,
-        )
+    weights, _floor_hits = compute_bid_weights(
+        ["momentum_breakout", "missing"], daily_curves,
+        as_of=date(2026, 5, 1), lookback_days=60,
+    )
+    # Both strategies receive weights — `missing` via the bootstrap branch
+    # (all-None case if both are None, or avg-of-known otherwise).
+    assert "missing" in weights
+    assert weights["missing"] is not None
+    assert weights["missing"] > 0
 
 
 def test_bid_weight_empty_curve_in_daily_curves_returns_bootstrap():
