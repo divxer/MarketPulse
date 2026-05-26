@@ -57,7 +57,11 @@ def _winner_for(ticker, strategy, allocation_date):
         event_price=150.0,
         horizon_date=allocation_date + timedelta(days=7),
         horizon_price=155.0,
-        quantity=10,
+        # Phase 6 forward share-sizing: quantity is now derived from
+        # position_size / event_price at the OrderRequest boundary.
+        # Set position_size so the conversion yields the legacy quantity=10.
+        quantity=10,           # legacy field; ignored by _make_order_request
+        position_size=1500.0,  # = 10 shares * $150
         weight=1.0, raw_bid_weight=1.0, pool_corr=0.1,
         contribution_multiplier=1.0, adjusted_bid_weight=1.0,
         effective_corr_window=60,
@@ -348,3 +352,113 @@ def test_daily_cycle_tick_completed_includes_price_unavailable_count(session):
     # Context has the new key (value 0 since no OPEN positions to exit).
     assert "price_unavailable_count" in tc_audits[0].context
     assert tc_audits[0].context["price_unavailable_count"] == 0
+
+
+# === Phase 6 forward share-sizing — _make_order_request quantization ===
+# Added 2026-05-26. PR #117: daily_cycle._make_order_request now converts
+# winner.position_size (USD) into integer shares at the OrderRequest
+# boundary. Was previously trusting winner.quantity which Phase 5 leaves at
+# 0 — see allocation.py:547. Production paper_trading_tick crashed with
+# CHECK constraint when bids finally flowed.
+
+def _winner_with_size(*, event_price: float, position_size: float):
+    """Bare AllocationWinner with the two fields _make_order_request reads."""
+    from marketpulse.backtest.allocation import AllocationWinner
+    return AllocationWinner(
+        strategy="general", ticker="AAPL",
+        event_time=datetime(2026, 5, 21, 14, 0, tzinfo=UTC),
+        event_price=event_price,
+        horizon_date=date(2026, 5, 28),
+        horizon_price=None,
+        quantity=0,                # legacy field; conversion ignores it
+        position_size=position_size,
+        weight=1.0, raw_bid_weight=1.0, pool_corr=None,
+        contribution_multiplier=1.0, adjusted_bid_weight=1.0,
+        effective_corr_window=60,
+        rewarded_for_negative_corr=False,
+        would_change_rank=False,
+        size_clamped_by_override=False,
+        strategy_version="v1",
+    )
+
+
+def test_make_order_request_dollar_to_shares_basic():
+    """$1000 / $25 = 40 shares."""
+    from marketpulse.trading.daily_cycle import _make_order_request
+    from marketpulse.trading.types import AllocationRunId
+    req, skip = _make_order_request(
+        winner=_winner_with_size(event_price=25.0, position_size=1000.0),
+        allocation_run_id=AllocationRunId("test"),
+        allocation_date=date(2026, 5, 26),
+    )
+    assert skip is None
+    assert req is not None
+    assert req.quantity == 40
+
+
+def test_make_order_request_dollar_to_shares_expensive():
+    """$1000 / $333 = 3 shares (floor)."""
+    from marketpulse.trading.daily_cycle import _make_order_request
+    from marketpulse.trading.types import AllocationRunId
+    req, skip = _make_order_request(
+        winner=_winner_with_size(event_price=333.0, position_size=1000.0),
+        allocation_run_id=AllocationRunId("test"),
+        allocation_date=date(2026, 5, 26),
+    )
+    assert skip is None
+    assert req.quantity == 3
+
+
+def test_make_order_request_below_share_cost_rejects():
+    """$100 / $150 = 0 → reject below_share_cost."""
+    from marketpulse.trading.daily_cycle import _make_order_request
+    from marketpulse.trading.types import AllocationRunId
+    req, skip = _make_order_request(
+        winner=_winner_with_size(event_price=150.0, position_size=100.0),
+        allocation_run_id=AllocationRunId("test"),
+        allocation_date=date(2026, 5, 26),
+    )
+    assert req is None
+    assert skip == "below_share_cost"
+
+
+def test_make_order_request_zero_price_rejects():
+    """event_price=0 → reject invalid_event_price (avoid ZeroDivisionError)."""
+    from marketpulse.trading.daily_cycle import _make_order_request
+    from marketpulse.trading.types import AllocationRunId
+    req, skip = _make_order_request(
+        winner=_winner_with_size(event_price=0.0, position_size=1000.0),
+        allocation_run_id=AllocationRunId("test"),
+        allocation_date=date(2026, 5, 26),
+    )
+    assert req is None
+    assert skip == "invalid_event_price"
+
+
+def test_make_order_request_negative_price_rejects():
+    """event_price<0 → reject invalid_event_price (defensive)."""
+    from marketpulse.trading.daily_cycle import _make_order_request
+    from marketpulse.trading.types import AllocationRunId
+    req, skip = _make_order_request(
+        winner=_winner_with_size(event_price=-1.0, position_size=1000.0),
+        allocation_run_id=AllocationRunId("test"),
+        allocation_date=date(2026, 5, 26),
+    )
+    assert req is None
+    assert skip == "invalid_event_price"
+
+
+def test_make_order_request_never_emits_quantity_zero():
+    """Invariant: success path must never produce quantity=0 (would violate
+    paper_order.ck_qty_positive). Either we return a positive quantity or a
+    skip reason — never (request, None) with quantity=0."""
+    from marketpulse.trading.daily_cycle import _make_order_request
+    from marketpulse.trading.types import AllocationRunId
+    for px, sz in [(25, 1000), (1, 1), (1000, 1), (333, 1000)]:
+        req, _ = _make_order_request(
+            winner=_winner_with_size(event_price=float(px), position_size=float(sz)),
+            allocation_run_id=AllocationRunId("test"),
+            allocation_date=date(2026, 5, 26),
+        )
+        if req is not None:
+            assert req.quantity >= 1, f"quantity=0 leaked for px={px} sz={sz}"

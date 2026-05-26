@@ -66,19 +66,45 @@ def _make_order_request(
     winner,
     allocation_run_id: AllocationRunId,
     allocation_date: date,
-) -> OrderRequest:
-    """Quantization site: float -> Decimal at the OrderRequest boundary
-    (lock xxii).
+) -> tuple[OrderRequest | None, str | None]:
+    """Quantization site: float -> Decimal + dollar position_size ->
+    integer share count (lock xxii + Phase 6 forward share-sizing).
 
     Lock 6b+L1: forward mode ALWAYS leaves the order's pre-filled per-share
     exit price unset (None). The execution engine fetches the actual
     close at exit time via its injected price source. The legacy column on
     paper_order remains for Phase 5 backtest replay compatibility but is
-    not consulted by the forward execution path."""
-    return OrderRequest(
+    not consulted by the forward execution path.
+
+    Phase 6 forward share-sizing (added 2026-05-26): the allocator
+    (allocate_for_day) returns `winner.quantity=0` because Phase 5 is
+    dollar-sized and reserved share quantization for Phase 6. The
+    conversion was never implemented end-to-end — the first time bids
+    actually flowed (after PR #114-#116 unblocked upstream gates), the
+    `quantity=0` violated paper_order's ck_qty_positive CHECK.
+
+    Conversion: `quantity = floor(winner.position_size / event_price)`.
+
+    Returns:
+        (request, None)   — success, caller calls place_order
+        (None, reason)    — skip path; caller must audit ORDER_REJECTED
+                            with the returned reason and skip place_order.
+
+    Skip reasons:
+        "invalid_event_price" — event_price missing or non-positive
+        "below_share_cost"    — position_size < event_price (can't even
+                                afford a single share)
+    """
+    event_price = winner.event_price
+    if event_price is None or event_price <= 0:
+        return None, "invalid_event_price"
+    quantity = int(winner.position_size // event_price)
+    if quantity < 1:
+        return None, "below_share_cost"
+    request = OrderRequest(
         strategy=winner.strategy,
         ticker=winner.ticker,
-        quantity=winner.quantity,
+        quantity=quantity,
         event_time=winner.event_time,
         allocation_date=allocation_date,
         event_price=Decimal(str(winner.event_price)),
@@ -100,6 +126,7 @@ def _make_order_request(
         would_change_rank=winner.would_change_rank,
         size_clamped_by_override=winner.size_clamped_by_override,
     )
+    return request, None
 
 
 def _position_snapshots(repo: Repository) -> list[PositionSnapshot]:
@@ -287,11 +314,33 @@ def run(
     duplicates = 0
     if allocation is not None:
         for winner in allocation.winners:
-            request = _make_order_request(
+            request, skip_reason = _make_order_request(
                 winner=winner,
                 allocation_run_id=allocation_run_id,
                 allocation_date=tick_date,
             )
+            if skip_reason is not None:
+                # Phase 6 forward-mode share-sizing failed (invalid event
+                # price or position_size < event_price). Audit per the
+                # ORDER_REJECTED convention used by forward_engine.py:92-125
+                # and count toward rejected. No paper_order row is created.
+                with repository.transaction():
+                    repository.write_audit_event(
+                        event_type=AuditEventType.ORDER_REJECTED,
+                        order_id=None,
+                        strategy=winner.strategy,
+                        reason=skip_reason,
+                        context={
+                            "ticker": winner.ticker,
+                            "position_size": winner.position_size,
+                            "event_price": winner.event_price,
+                            "tick_date": tick_date.isoformat(),
+                            "allocation_run_id": str(allocation_run_id),
+                        },
+                        timestamp=clock.now(),
+                    )
+                rejected += 1
+                continue
             try:
                 result = engine.place_order(order_request=request)
                 if result.created:
