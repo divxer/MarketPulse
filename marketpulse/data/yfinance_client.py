@@ -243,7 +243,24 @@ class YFinanceClient:
 
     @_retry
     def fetch_fundamentals(self, ticker: str) -> Fundamentals:
-        info = yf.Ticker(ticker).info or {}
+        # yfinance 1.3.0's Ticker.info lazy-loads _get_1y_prices() which
+        # hard-indexes md["currentTradingPeriod"] (scrapers/quote.py:134).
+        # When Yahoo's metadata response omits that key (observed in
+        # production 2026-05-26 — Yahoo schema drift / partial degradation),
+        # info access raises KeyError that bypasses our @_retry network-only
+        # filter and crashes the whole recap. Treat fundamentals as best-
+        # effort: any exception => empty Fundamentals (all None). Downstream
+        # consumers already None-check every field, so the recap continues.
+        try:
+            info = yf.Ticker(ticker).info or {}
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "yfinance_info_failed",
+                ticker=ticker,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            info = {}
         return Fundamentals(
             ticker=ticker,
             market_cap=info.get("marketCap"),
