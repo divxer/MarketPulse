@@ -88,6 +88,10 @@ def _stub_allocator(*, horizon_date, horizon_price=155.0,
             horizon_date=horizon_date,
             horizon_price=horizon_price,
             quantity=quantity,
+            # Phase 6 forward share-sizing: position_size USD drives
+            # quantity at _make_order_request. Set it to produce the
+            # legacy `quantity` value when divided by event_price.
+            position_size=float(quantity) * event_price,
             weight=1.0, raw_bid_weight=1.0, pool_corr=0.1,
             contribution_multiplier=1.0, adjusted_bid_weight=1.0,
             effective_corr_window=60,
@@ -430,6 +434,7 @@ def test_e2e_phase6b_17_30_ny_happy_path(tmp_path, monkeypatch):
                         horizon_date=date(2026, 5, 28),
                         horizon_price=155.0,
                         quantity=10,
+                        position_size=1500.0,  # 10 * 150
                         weight=1.0, raw_bid_weight=1.0, pool_corr=0.1,
                         contribution_multiplier=1.0, adjusted_bid_weight=1.0,
                         effective_corr_window=60,
@@ -517,6 +522,7 @@ def test_e2e_phase6b_sector_cap_denial_writes_per_gate_audit(tmp_path):
                         horizon_date=date(2026, 5, 28),
                         horizon_price=210.0,
                         quantity=100,
+                        position_size=20000.0,  # 100 * 200
                         weight=1.0, raw_bid_weight=1.0, pool_corr=0.1,
                         contribution_multiplier=1.0, adjusted_bid_weight=1.0,
                         effective_corr_window=60,
@@ -610,6 +616,7 @@ def test_e2e_phase6b_plus_happy_path_real_pnl(tmp_path):
                         horizon_date=horizon_date,
                         horizon_price=None,    # forward mode
                         quantity=10,
+                        position_size=1500.0,  # 10 * 150
                         weight=1.0, raw_bid_weight=1.0, pool_corr=0.1,
                         contribution_multiplier=1.0, adjusted_bid_weight=1.0,
                         effective_corr_window=60,
@@ -710,6 +717,7 @@ def test_e2e_phase6b_plus_roll_back_to_prior_session(tmp_path):
                         horizon_date=requested,
                         horizon_price=None,
                         quantity=10,
+                        position_size=1500.0,  # 10 * 150
                         weight=1.0, raw_bid_weight=1.0, pool_corr=0.1,
                         contribution_multiplier=1.0, adjusted_bid_weight=1.0,
                         effective_corr_window=60,
@@ -814,6 +822,7 @@ def test_e2e_phase6b_plus_price_unavailable_retry_then_succeed(tmp_path):
                         event_price=150.0,
                         horizon_date=horizon, horizon_price=None,
                         quantity=10,
+                        position_size=1500.0,  # 10 * 150
                         weight=1.0, raw_bid_weight=1.0, pool_corr=0.1,
                         contribution_multiplier=1.0, adjusted_bid_weight=1.0,
                         effective_corr_window=60,
