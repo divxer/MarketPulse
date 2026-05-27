@@ -13,10 +13,22 @@
   <section class="mp-ai-track-body">
     <div class="mp-ai-track-main">
       <div class="mp-card" style="padding:64px; text-align:center;">
-        <p class="muted" style="font-size:16px;">
-          AI 评估数据积累中,需要至少 7 个交易日才有可读数据。
-        </p>
-        <a href="/recaps" class="mp-btn mp-btn--ghost" style="margin-top:16px;">浏览历史复盘</a>
+        {% if fallback_horizon is not none %}
+          <p style="font-size:16px; margin-bottom:8px;">
+            当前 horizon = <strong>t+{{ filters.horizon }}</strong> 暂无已成熟 outcome。
+          </p>
+          <p class="muted" style="font-size:14px; margin-bottom:20px;">
+            较短的 <strong>t+{{ fallback_horizon }}</strong> 已有 {{ fallback_n_total }}
+            条 outcome — 早期数据稀疏属于正常,t+{{ filters.horizon }} 会随时间填充。
+          </p>
+          <a href="/lab/ai-track{% if fallback_qs %}?{{ fallback_qs }}{% endif %}"
+             class="mp-btn mp-btn--primary">查看 t+{{ fallback_horizon }} 数据</a>
+        {% else %}
+          <p class="muted" style="font-size:16px;">
+            AI 评估数据积累中,需要至少 7 个交易日才有可读数据。
+          </p>
+          <a href="/recaps" class="mp-btn mp-btn--ghost" style="margin-top:16px;">浏览历史复盘</a>
+        {% endif %}
       </div>
     </div>
     <aside class="mp-ai-track-rail">

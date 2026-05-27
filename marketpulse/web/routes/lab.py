@@ -130,6 +130,29 @@ def lab_ai_track(
         None,
     )
 
+    # Empty-state fallback hint: when the requested horizon has 0 rows but
+    # a shorter horizon does have data, surface a one-click switch so the
+    # page doesn't look broken. Early-stage data sparsity (first ~5 trading
+    # days post-deploy) — h=5/20/60 mature later than h=1.
+    fallback_horizon = None
+    fallback_n_total = 0
+    if overall.n_total == 0:
+        for alt in sorted(DEFAULT_HORIZONS):
+            if alt == horizon:
+                continue
+            alt_stats = scoring.compute_hit_rate(
+                db, ticker=ticker_u, subtype=verdict, strategy=strategy,
+                horizon=alt, source=source, since=since,
+            )
+            if alt_stats.n_total > 0:
+                fallback_horizon = alt
+                fallback_n_total = alt_stats.n_total
+                break
+
+    fallback_qs = _qs_from_filters(
+        {**filters, "horizon": fallback_horizon},
+    ) if fallback_horizon is not None else ""
+
     return templates.TemplateResponse(request, "lab_ai_track.html", {
         "overall": overall,
         "trend": trend,
@@ -143,6 +166,9 @@ def lab_ai_track(
         "filters_qs": _qs_from_filters(filters),
         "filters_qs_no_ticker": _qs_from_filters({**filters, "ticker": None}),
         "filters_qs_no_strategy": _qs_from_filters({**filters, "strategy": None}),
+        "fallback_horizon": fallback_horizon,
+        "fallback_n_total": fallback_n_total,
+        "fallback_qs": fallback_qs,
     })
 
 
