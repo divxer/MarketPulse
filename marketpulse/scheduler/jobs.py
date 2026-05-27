@@ -309,12 +309,28 @@ def run_flex_sync() -> None:
     """
     from marketpulse.broker.flex_client import FlexClient
     from marketpulse.broker.readonly_sync import FlexSyncConfig, run_readonly_sync
+    from marketpulse.trading.calendar import NY, NYTradingCalendar
 
     settings = get_settings()
     if not settings.ibkr_flex_token or not settings.ibkr_flex_query_id:
         log.warning(
             "flex_sync_skipped_unconfigured",
             reason="IBKR_FLEX_TOKEN or IBKR_FLEX_QUERY_ID not set",
+        )
+        return
+
+    # Skip non-trading days (weekends + US market holidays). IBKR Flex
+    # statements don't generate new truth on closed days — running anyway
+    # produces FlexSendRequestError 1001 noise and a false failure row in
+    # broker_sync_run. Skip happens BEFORE the SendRequest call so we never
+    # talk to IBKR on closed days. Observed 2026-05-25 (Memorial Day) +
+    # 2026-05-26 03:30 UTC failure that triggered this hardening.
+    today_ny = datetime.now(UTC).astimezone(NY).date()
+    if not NYTradingCalendar().is_business_day(today_ny):
+        log.info(
+            "flex_sync_skipped_market_closed",
+            ny_date=today_ny.isoformat(),
+            reason="NY market closed (weekend or holiday)",
         )
         return
 
@@ -366,6 +382,78 @@ def run_flex_sync() -> None:
         })
     finally:
         db.close()
+
+
+# Transient IBKR / network errors worth retrying once. Anything outside this
+# set (auth, config, schema mismatch) is a hard fault — retry would just
+# fail the same way, so we don't waste a request.
+_FLEX_RETRYABLE_ERROR_TYPES = frozenset({
+    "FlexHttpError",          # ConnectTimeout, 5xx, network hiccups
+    "FlexSendRequestError",   # IBKR 1001 "statement could not be generated"
+    "FlexReportTimeoutError", # statement never finishes generating
+    "IbkrApiError",           # TWS/Gateway transient errors
+})
+
+
+def run_flex_sync_retry() -> None:
+    """Retry flex sync once if the most recent run today failed with a
+    transient error. Skips when last run succeeded or failed with a
+    non-retryable (auth/config/schema) error. Fires 30min after the main
+    flex_sync cron — gives IBKR's "statement could not be generated"
+    backoff window time to clear.
+    """
+    from marketpulse.broker.flex_client import (
+        FlexClient,  # noqa: F401  # import-graph parity with main job
+    )
+    from marketpulse.db.models import BrokerSyncRun
+    from marketpulse.trading.calendar import NY, NYTradingCalendar
+
+    settings = get_settings()
+    if not settings.ibkr_flex_token or not settings.ibkr_flex_query_id:
+        return
+
+    today_ny = datetime.now(UTC).astimezone(NY).date()
+    if not NYTradingCalendar().is_business_day(today_ny):
+        return
+
+    gen = session_scope()
+    db = next(gen)
+    try:
+        # "Today" by NY date — the cron is registered in NY tz, so a run
+        # from <= 24h ago in NY is the one we'd be retrying.
+        cutoff = datetime.now(UTC) - timedelta(hours=24)
+        last = (
+            db.query(BrokerSyncRun)
+            .filter(BrokerSyncRun.started_at >= cutoff)
+            .order_by(BrokerSyncRun.started_at.desc())
+            .first()
+        )
+        if last is None:
+            log.info("flex_sync_retry_skipped", reason="no_run_today")
+            return
+        if last.status != "failed":
+            log.info(
+                "flex_sync_retry_skipped",
+                reason="last_run_not_failed",
+                last_status=last.status,
+            )
+            return
+        if last.error_type not in _FLEX_RETRYABLE_ERROR_TYPES:
+            log.info(
+                "flex_sync_retry_skipped",
+                reason="non_retryable_error",
+                error_type=last.error_type,
+            )
+            return
+        log.info(
+            "flex_sync_retry_firing",
+            previous_error_type=last.error_type,
+            previous_run_id=last.id,
+        )
+    finally:
+        db.close()
+    # Run the main sync. It opens its own session.
+    run_flex_sync()
 
 
 def build_scheduler() -> BackgroundScheduler:
@@ -432,6 +520,28 @@ def build_scheduler() -> BackgroundScheduler:
             timezone=ZoneInfo("America/New_York"),
         ),
         id="flex_sync",
+        replace_existing=True,
+        misfire_grace_time=None,
+        coalesce=True,
+        max_instances=1,
+    )
+    # 30-minute retry once if the main run failed with a transient IBKR
+    # error (1001 / ConnectTimeout / 5xx). run_flex_sync_retry() inspects
+    # the most recent broker_sync_run row and decides whether to fire.
+    # Roll the hour over when minute+30 wraps past 60.
+    fs_retry_hour = (settings.flex_sync_hour + (
+        1 if settings.flex_sync_minute + 30 >= 60 else 0
+    )) % 24
+    fs_retry_minute = (settings.flex_sync_minute + 30) % 60
+    sched.add_job(
+        run_flex_sync_retry,
+        trigger=CronTrigger(
+            hour=fs_retry_hour,
+            minute=fs_retry_minute,
+            day_of_week="mon-fri",
+            timezone=ZoneInfo("America/New_York"),
+        ),
+        id="flex_sync_retry",
         replace_existing=True,
         misfire_grace_time=None,
         coalesce=True,
