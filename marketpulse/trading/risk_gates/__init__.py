@@ -20,7 +20,10 @@ from marketpulse.trading.risk_gates.config_provider import (
 )
 from marketpulse.trading.risk_gates.daily_loss import DailyLossGate
 from marketpulse.trading.risk_gates.factory import build_standard_composite
-from marketpulse.trading.risk_gates.market_hours import MarketHoursGate
+from marketpulse.trading.risk_gates.market_hours import (
+    MarketHoursGate,
+    validate_paper_tick_in_placement_window,
+)
 from marketpulse.trading.risk_gates.sector_exposure import SectorExposureGate
 from marketpulse.trading.risk_gates.strategy_size import StrategySizeGate
 
@@ -38,4 +41,5 @@ __all__ = [
     "StrategySizeGate",
     "build_standard_composite",
     "strict_sector",
+    "validate_paper_tick_in_placement_window",
 ]

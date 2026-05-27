@@ -12,7 +12,40 @@ from marketpulse.trading.risk_gate import RiskResult
 from marketpulse.trading.risk_gates.config_provider import MarketHoursConfig
 from marketpulse.trading.types import OrderRequest, RiskIntent
 
-__all__ = ["MarketHoursGate"]
+__all__ = ["MarketHoursGate", "validate_paper_tick_in_placement_window"]
+
+
+def validate_paper_tick_in_placement_window(
+    *, tick_hour: int, tick_minute: int, cfg: MarketHoursConfig,
+) -> None:
+    """Startup invariant: the configured paper_tick wall-clock (NY tz)
+    must fall inside an enabled MarketHoursGate window — otherwise the
+    cron will fire and every order will be rejected with
+    `outside_placement_window`, silently losing trading days.
+
+    Skipped (returns OK) when the gate is disabled — operator opted out
+    of window enforcement entirely, so the cron need not align.
+
+    Raises ValueError with a remediation hint when misaligned.
+    """
+    if not cfg.enabled:
+        return
+    t = time(tick_hour, tick_minute)
+    if _window_check(t, cfg):
+        return
+    msg = (
+        f"paper_tick wall-clock {t.strftime('%H:%M')} NY falls outside the "
+        f"configured MarketHoursGate placement window "
+        f"(regular={cfg.allow_regular_session}, "
+        f"post_close={cfg.allow_post_close} until "
+        f"{cfg.post_close_until.strftime('%H:%M')}, "
+        f"premarket={cfg.allow_premarket}). "
+        "Every paper_trading_tick run will be denied with "
+        "outside_placement_window. Either move MP_PAPER_TICK_HOUR/MINUTE "
+        "inside the window or extend post_close_until in "
+        "config/risk_gates.yaml."
+    )
+    raise ValueError(msg)
 
 
 class MarketHoursGate:
