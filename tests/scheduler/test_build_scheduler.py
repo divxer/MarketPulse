@@ -20,3 +20,13 @@ def test_daily_critical_jobs_have_no_misfire_grace():
             f"runs are caught up on next boot, not silently dropped"
         )
         assert job.coalesce is True, f"{job_id} must coalesce missed runs"
+
+
+def test_sector_backfill_job_registered():
+    """Moved out of /holdings GET path — must run daily as a scheduled job."""
+    sched = build_scheduler()
+    job = sched.get_job("sector_backfill")
+    assert job is not None, "sector_backfill cron must be registered"
+    trigger_repr = str(job.trigger)
+    # Daily at 04:00 UTC
+    assert "hour='4'" in trigger_repr or "hour=4" in trigger_repr, trigger_repr

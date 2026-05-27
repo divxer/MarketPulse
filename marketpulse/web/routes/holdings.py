@@ -14,7 +14,6 @@ from marketpulse.holdings.dividends import (
     record_dividend,
     total_dividends,
 )
-from marketpulse.holdings.sector import backfill_holding_sectors
 from marketpulse.holdings.service import (
     allocation_breakdown,
     compute_totals,
@@ -46,9 +45,10 @@ def holdings_page(
     data: DataService = Depends(get_data_service),
     _: None = Depends(require_auth),
 ):
-    # Backfill any NULL sectors (bounded to 3 tickers per call).
-    backfill_holding_sectors(db)
-
+    # Note: sector backfill moved to scheduler (daily job) — was the
+    # biggest cold-cache delay on this route (up to 3 × yfinance .info
+    # calls @ ~1-2s each). NULL sectors now render as "未分类" until the
+    # next scheduler tick fills them in.
     holdings = db.query(Holding).order_by(Holding.sort_order, Holding.id).all()
     rows = enrich_holdings(holdings, data)
     totals = compute_totals(rows)

@@ -106,6 +106,26 @@ def run_alert_check() -> None:
         db.close()
 
 
+def run_sector_backfill() -> None:
+    """Fill Holding.sector for any NULL rows via yfinance .info.
+
+    Previously called inline on every /holdings GET (bounded to 3
+    tickers per request), which added ~1-2s × 3 = up to 6s of latency
+    on cold cache. Moved to a daily scheduler job — sector data is
+    stable enough that "filled within 24h of adding a ticker" is fine,
+    and /holdings now renders without any yfinance Ticker.info calls.
+    """
+    from marketpulse.holdings.sector import backfill_holding_sectors
+    log.info("sector_backfill_start")
+    gen = session_scope()
+    db = next(gen)
+    try:
+        n = backfill_holding_sectors(db, max_per_call=100)
+        log.info("sector_backfill_done", rows_filled=n)
+    finally:
+        db.close()
+
+
 def run_news_purge() -> None:
     log.info("news_purge_start")
     settings = get_settings()
@@ -478,6 +498,17 @@ def build_scheduler() -> BackgroundScheduler:
         run_news_purge,
         trigger=CronTrigger(day_of_week="sun", hour=3),
         id="news_purge", replace_existing=True,
+    )
+    # Fill missing Holding.sector daily at 04:00 UTC (off-peak, pre-NY open).
+    # Was inline on every /holdings GET — biggest cold-cache delay on that
+    # route. Sector data is stable, so a 24h staleness window is fine.
+    sched.add_job(
+        run_sector_backfill,
+        trigger=CronTrigger(hour=4, minute=0, timezone="UTC"),
+        id="sector_backfill",
+        replace_existing=True,
+        misfire_grace_time=3600,
+        coalesce=True,
     )
     # Daily split-detection: runs once at 17:00 ET (after the daily recap)
     # so any same-day splits show up in the next morning's view.

@@ -35,43 +35,68 @@ def _fetch_sparkline(data: "_DataLike", ticker: str) -> list[float]:
         return []
 
 
+def _enrich_one(h: Holding, data: _DataLike) -> dict[str, Any]:
+    """Build one enriched row. Tolerates quote/history fetch failures —
+    the row still renders with cost-basis info. Extracted so the outer
+    loop can fan out across a ThreadPoolExecutor.
+    """
+    cost_basis = h.quantity * h.avg_cost
+    row: dict[str, Any] = {
+        "id": h.id,
+        "ticker": h.ticker,
+        "quantity": h.quantity,
+        "avg_cost": h.avg_cost,
+        "notes": h.notes,
+        "cost_basis": cost_basis,
+        "current_price": None,
+        "market_value": None,
+        "pl_dollars": None,
+        "pl_pct": None,
+        "stale": False,
+    }
+    quote = None
+    try:
+        q = data.get_quote(h.ticker)
+        quote = q
+        row["current_price"] = q.price
+        row["market_value"] = h.quantity * q.price
+        row["pl_dollars"] = row["market_value"] - cost_basis
+        row["pl_pct"] = (q.price - h.avg_cost) / h.avg_cost * 100 if h.avg_cost else 0
+        row["stale"] = q.stale
+    except Exception as exc:
+        log.warning("holding_quote_failed", ticker=h.ticker, error=str(exc))
+    row["sector"] = h.sector or "未分类"
+    row["today_change_pct"] = quote.change_pct if quote is not None else None
+    row["sparkline"] = _fetch_sparkline(data, h.ticker)
+    return row
+
+
+# Tunable for tests that want to assert sequential ordering / disable
+# parallelism. Production paths leave this alone.
+ENRICH_MAX_WORKERS = 8
+
+
 def enrich_holdings(
-    holdings: list[Holding], data: _DataLike
+    holdings: list[Holding], data: _DataLike,
 ) -> list[dict[str, Any]]:
     """Attach live quote + computed P&L to each holding. Live fetch failures
-    are tolerated — the row still renders with cost-basis info."""
-    rows: list[dict[str, Any]] = []
-    for h in holdings:
-        cost_basis = h.quantity * h.avg_cost
-        row: dict[str, Any] = {
-            "id": h.id,
-            "ticker": h.ticker,
-            "quantity": h.quantity,
-            "avg_cost": h.avg_cost,
-            "notes": h.notes,
-            "cost_basis": cost_basis,
-            "current_price": None,
-            "market_value": None,
-            "pl_dollars": None,
-            "pl_pct": None,
-            "stale": False,
-        }
-        quote = None
-        try:
-            q = data.get_quote(h.ticker)
-            quote = q
-            row["current_price"] = q.price
-            row["market_value"] = h.quantity * q.price
-            row["pl_dollars"] = row["market_value"] - cost_basis
-            row["pl_pct"] = (q.price - h.avg_cost) / h.avg_cost * 100 if h.avg_cost else 0
-            row["stale"] = q.stale
-        except Exception as exc:
-            log.warning("holding_quote_failed", ticker=h.ticker, error=str(exc))
-        row["sector"] = h.sector or "未分类"
-        row["today_change_pct"] = quote.change_pct if quote is not None else None
-        row["sparkline"] = _fetch_sparkline(data, h.ticker)
-        rows.append(row)
-    return rows
+    are tolerated — the row still renders with cost-basis info.
+
+    Fans out per-ticker network I/O (get_quote + get_history) across a
+    ThreadPoolExecutor: previously 2 sequential HTTPS calls × N holdings
+    = O(N) wall time; now O(N / workers). For a 5-ticker portfolio with
+    ~300ms per call this drops the route from ~3s to ~600ms on cold cache.
+    Output order matches input order so allocation_breakdown sort stability
+    is preserved.
+    """
+    if not holdings:
+        return []
+    workers = min(ENRICH_MAX_WORKERS, len(holdings))
+    if workers <= 1:
+        return [_enrich_one(h, data) for h in holdings]
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(lambda h: _enrich_one(h, data), holdings))
 
 
 def compute_totals(rows: list[dict[str, Any]]) -> dict[str, float]:
