@@ -336,8 +336,13 @@ class AiService:
         allocation: list[dict[str, Any]],
         realized_pl: float,
         trading_stats: dict[str, Any],
-    ) -> str:
+    ) -> tuple[str, datetime]:
         """portfolio_risk() with content-fingerprint cache.
+
+        Returns (markdown, generated_at). On cache hit, generated_at is the
+        original `requested_at` from the cached AiAnalysis row — so the UI
+        can show "5 分钟前 · 缓存" instead of always claiming "刚刚生成".
+        On miss, generated_at is wall-clock now (UTC).
 
         Cache key fingerprint covers sorted (ticker, quantity, avg_cost) tuples.
         Same portfolio state → cache hit (no API call). Holdings change →
@@ -348,7 +353,7 @@ class AiService:
         cache_key = f"{prompts.RISK_PROMPT_VERSION}::{fp}"
         cached = self._lookup_portfolio_risk_cache(cache_key)
         if cached is not None:
-            return cached
+            return cached  # (response_markdown, requested_at)
 
         response = self.portfolio_risk(
             holdings=holdings,
@@ -357,8 +362,9 @@ class AiService:
             realized_pl=realized_pl,
             trading_stats=trading_stats,
         )
+        now = datetime.now(UTC)
         self._save_portfolio_risk_cache(cache_key, holdings, totals, response)
-        return response
+        return response, now
 
     @staticmethod
     def _portfolio_fingerprint(holdings: list[dict[str, Any]]) -> str:
@@ -372,10 +378,14 @@ class AiService:
         payload = json.dumps(state, default=str, sort_keys=True)
         return hashlib.sha256(payload.encode()).hexdigest()[:12]
 
-    def _lookup_portfolio_risk_cache(self, cache_key: str) -> str | None:
+    def _lookup_portfolio_risk_cache(
+        self, cache_key: str,
+    ) -> tuple[str, datetime] | None:
         """Look up a non-expired portfolio risk cache row by prompt_version key.
 
-        Reuses the AiAnalysis table with ticker='__portfolio__'.
+        Returns (response_markdown, requested_at) so callers can display the
+        original generation timestamp. Reuses the AiAnalysis table with
+        ticker='__portfolio__'.
         """
         stmt = (
             select(AiAnalysis)
@@ -387,7 +397,14 @@ class AiService:
             .limit(1)
         )
         row = self.session.execute(stmt).scalar_one_or_none()
-        return row.response_markdown if row else None
+        if row is None:
+            return None
+        # SQLite + DateTime(timezone=True) can return naive on read-back;
+        # all writes are UTC via datetime.now(UTC), so tag explicitly.
+        ts = row.requested_at
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        return row.response_markdown, ts
 
     def _save_portfolio_risk_cache(
         self,
