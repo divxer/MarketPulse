@@ -439,7 +439,28 @@ def build_scheduler() -> BackgroundScheduler:
     )
     # Phase 6a paper trading daily tick (lock xxv: thin entrypoint).
     # Imported here so the registration sits with all other jobs.
-    from marketpulse.scheduler.paper_trading_tick import paper_trading_tick_job
+    from marketpulse.scheduler.paper_trading_tick import (
+        _RISK_GATES_YAML,
+        _STRATEGIES_DIR,
+        paper_trading_tick_job,
+    )
+    from marketpulse.trading.risk_gates import (
+        RiskConfigProvider,
+        validate_paper_tick_in_placement_window,
+    )
+    # Startup invariant: the paper_tick wall-clock must align with the
+    # MarketHoursGate placement window — otherwise the cron fires and
+    # every order gets rejected with outside_placement_window, silently
+    # losing trading days (root cause of the Phase 6 silent-no-orders
+    # bug fixed in PR #117). Fail fast at boot rather than at 17:30 NY.
+    _provider = RiskConfigProvider.from_yaml(
+        global_path=_RISK_GATES_YAML, strategies_dir=_STRATEGIES_DIR,
+    )
+    validate_paper_tick_in_placement_window(
+        tick_hour=settings.paper_tick_hour,
+        tick_minute=settings.paper_tick_minute,
+        cfg=_provider.global_config().market_hours,
+    )
     sched.add_job(
         paper_trading_tick_job,
         trigger=CronTrigger(
