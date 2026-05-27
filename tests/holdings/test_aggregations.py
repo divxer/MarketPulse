@@ -492,3 +492,81 @@ def test_sector_breakdown_unclassified_separate_bucket():
 def test_sector_breakdown_empty():
     from marketpulse.holdings.service import sector_breakdown
     assert sector_breakdown([]) == []
+
+
+def test_enrich_holdings_runs_concurrently(db_session):
+    """Quotes for N holdings should be fetched in parallel — total wall
+    time approximates max(call_latency), not sum(call_latency).
+    """
+    import time
+
+    from marketpulse.db.models import Holding
+    from marketpulse.holdings.service import enrich_holdings
+
+    class _SlowData:
+        """Each get_quote sleeps 100ms; get_history sleeps 100ms."""
+        def get_quote(self, ticker):
+            time.sleep(0.1)
+            from datetime import UTC, datetime
+
+            from marketpulse.data.types import Quote
+            return Quote(
+                ticker=ticker, price=100.0, change_pct=0.0,
+                volume=1, avg_volume_20d=1, fetched_at=datetime.now(UTC),
+            )
+        def get_history(self, ticker, period="30d"):
+            time.sleep(0.1)
+            return []
+
+    # 5 holdings → sequential = ~1.0s (5 × 2 × 100ms), parallel < 0.5s
+    for i, t in enumerate(["AAA", "BBB", "CCC", "DDD", "EEE"]):
+        db_session.add(Holding(ticker=t, quantity=1, avg_cost=10, sort_order=i))
+    db_session.commit()
+    holdings = db_session.query(Holding).order_by(Holding.sort_order).all()
+
+    t0 = time.monotonic()
+    rows = enrich_holdings(holdings, _SlowData())
+    elapsed = time.monotonic() - t0
+
+    assert len(rows) == 5
+    # Output order matches input
+    assert [r["ticker"] for r in rows] == ["AAA", "BBB", "CCC", "DDD", "EEE"]
+    # Sequential would be ~1.0s; parallel with 8 workers should be ~0.2-0.4s.
+    # Generous bound to survive CI noise.
+    assert elapsed < 0.7, f"enrich_holdings ran sequentially: {elapsed:.3f}s"
+
+
+def test_enrich_holdings_empty_returns_empty():
+    from marketpulse.holdings.service import enrich_holdings
+    assert enrich_holdings([], object()) == []
+
+
+def test_enrich_holdings_tolerates_quote_failure(db_session):
+    """A single failing get_quote must not break the other holdings."""
+    from datetime import UTC, datetime
+
+    from marketpulse.data.types import Quote
+    from marketpulse.db.models import Holding
+    from marketpulse.holdings.service import enrich_holdings
+
+    class _FlakyData:
+        def get_quote(self, ticker):
+            if ticker == "BAD":
+                raise RuntimeError("simulated yfinance outage")
+            return Quote(
+                ticker=ticker, price=50.0, change_pct=1.0,
+                volume=1, avg_volume_20d=1, fetched_at=datetime.now(UTC),
+            )
+        def get_history(self, ticker, period="30d"):
+            return []
+
+    for i, t in enumerate(["GOOD", "BAD", "ALSO_GOOD"]):
+        db_session.add(Holding(ticker=t, quantity=1, avg_cost=10, sort_order=i))
+    db_session.commit()
+    holdings = db_session.query(Holding).order_by(Holding.sort_order).all()
+
+    rows = enrich_holdings(holdings, _FlakyData())
+    assert [r["ticker"] for r in rows] == ["GOOD", "BAD", "ALSO_GOOD"]
+    assert rows[0]["current_price"] == 50.0
+    assert rows[1]["current_price"] is None  # failure preserved as None
+    assert rows[2]["current_price"] == 50.0
