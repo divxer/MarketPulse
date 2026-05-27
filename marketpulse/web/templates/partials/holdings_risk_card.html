@@ -3,7 +3,7 @@
     <span class="mp-card__title">
       <span class="material-symbols-outlined">auto_awesome</span>AI 风险分析
     </span>
-    <span class="mp-card__sub">{{ generated_at or "刚刚生成" }}</span>
+    <span class="mp-card__sub">{{ generated_at | relative_zh }}</span>
   </div>
   <div class="mp-card__body mp-prose">
     {{ analysis_markdown | markdown }}

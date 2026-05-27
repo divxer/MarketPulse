@@ -165,7 +165,8 @@ def test_holdings_risk_analysis_endpoint(client: TestClient, monkeypatch):
         def portfolio_risk(self, **kwargs):
             return "**集中度风险**:测试输出\n\n仅占位用于单测。"
         def portfolio_risk_cached(self, **kwargs):
-            return self.portfolio_risk(**kwargs)
+            from datetime import UTC, datetime
+            return self.portfolio_risk(**kwargs), datetime.now(UTC)
     from marketpulse.web.deps import get_ai_service, get_data_service
     client.app.dependency_overrides[get_data_service] = lambda: fake
     client.app.dependency_overrides[get_ai_service] = lambda: _FakeAi()
@@ -208,7 +209,8 @@ def test_risk_analysis_renders_markdown_to_html(client: TestClient, monkeypatch)
         def portfolio_risk(self, **kwargs):
             return "## 风险\n\n这是一段 **粗体** 文字。\n\n- 第一项\n- 第二项"
         def portfolio_risk_cached(self, **kwargs):
-            return self.portfolio_risk(**kwargs)
+            from datetime import UTC, datetime
+            return self.portfolio_risk(**kwargs), datetime.now(UTC)
     from marketpulse.web.deps import get_ai_service, get_data_service
     client.app.dependency_overrides[get_data_service] = lambda: fake
     client.app.dependency_overrides[get_ai_service] = lambda: _MdAi()
@@ -608,3 +610,74 @@ def test_holdings_monthly_card_zero_axis_split(client, monkeypatch, db_session):
     assert "mp-monthly-bar__bar--pos" in r.text
     assert "mp-monthly-bar__bar--neg" in r.text
     client.app.dependency_overrides.clear()
+
+
+def test_risk_card_shows_relative_time_on_cache_hit(client: TestClient, monkeypatch):
+    """Cache-hit responses must show e.g. '5 分钟前', not '刚刚生成'."""
+    _login(client, monkeypatch)
+    fake = _FakeData()
+    class _StaleAi:
+        def portfolio_risk(self, **kwargs):
+            raise AssertionError("cached path returns timestamp directly")
+        def portfolio_risk_cached(self, **kwargs):
+            from datetime import UTC, datetime, timedelta
+            # Simulate row generated 7 minutes ago
+            return "缓存内容", datetime.now(UTC) - timedelta(minutes=7)
+    from marketpulse.web.deps import get_ai_service, get_data_service
+    client.app.dependency_overrides[get_data_service] = lambda: fake
+    client.app.dependency_overrides[get_ai_service] = lambda: _StaleAi()
+    try:
+        client.post("/trades", data={
+            "ticker": "TST", "action": "buy", "quantity": 1, "price": 10,
+        })
+        res = client.get("/holdings/risk-analysis")
+        assert res.status_code == 200
+        assert "7 分钟前" in res.text
+        assert "刚刚生成" not in res.text
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_risk_card_shows_just_generated_on_fresh_call(client: TestClient, monkeypatch):
+    """Fresh call (now()) should still render '刚刚生成' bucket."""
+    _login(client, monkeypatch)
+    fake = _FakeData()
+    class _FreshAi:
+        def portfolio_risk(self, **kwargs):
+            return "fresh"
+        def portfolio_risk_cached(self, **kwargs):
+            from datetime import UTC, datetime
+            return self.portfolio_risk(**kwargs), datetime.now(UTC)
+    from marketpulse.web.deps import get_ai_service, get_data_service
+    client.app.dependency_overrides[get_data_service] = lambda: fake
+    client.app.dependency_overrides[get_ai_service] = lambda: _FreshAi()
+    try:
+        client.post("/trades", data={
+            "ticker": "TST2", "action": "buy", "quantity": 1, "price": 10,
+        })
+        res = client.get("/holdings/risk-analysis")
+        assert res.status_code == 200
+        assert "刚刚生成" in res.text
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_risk_card_shows_hours_for_older_cache(client: TestClient, monkeypatch):
+    """Cache from 3h ago renders '3 小时前'."""
+    _login(client, monkeypatch)
+    fake = _FakeData()
+    class _OldAi:
+        def portfolio_risk_cached(self, **kwargs):
+            from datetime import UTC, datetime, timedelta
+            return "old", datetime.now(UTC) - timedelta(hours=3, minutes=5)
+    from marketpulse.web.deps import get_ai_service, get_data_service
+    client.app.dependency_overrides[get_data_service] = lambda: fake
+    client.app.dependency_overrides[get_ai_service] = lambda: _OldAi()
+    try:
+        client.post("/trades", data={
+            "ticker": "TST3", "action": "buy", "quantity": 1, "price": 10,
+        })
+        res = client.get("/holdings/risk-analysis")
+        assert "3 小时前" in res.text
+    finally:
+        client.app.dependency_overrides.clear()

@@ -209,8 +209,9 @@ def holdings_risk_analysis(
                             "market_value", "pl_dollars", "pl_pct") if k in r}
         for r in rows
     ]
+    generated_at = None
     try:
-        analysis_markdown = ai.portfolio_risk_cached(
+        analysis_markdown, generated_at = ai.portfolio_risk_cached(
             holdings=holdings_payload,
             totals=totals,
             allocation=allocation,
@@ -223,7 +224,7 @@ def holdings_risk_analysis(
 
     return templates.TemplateResponse(
         request, "partials/holdings_risk_card.html",
-        {"analysis_markdown": analysis_markdown, "generated_at": None},
+        {"analysis_markdown": analysis_markdown, "generated_at": generated_at},
     )
 
 

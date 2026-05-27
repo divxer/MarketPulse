@@ -66,6 +66,31 @@ def _sparkpoints(values: list[float] | None, width: int, height: int) -> str:
 templates.env.filters["sparkpoints"] = _sparkpoints
 
 
+def _relative_zh(ts) -> str:
+    """Render a datetime as a Chinese relative-time phrase ("3 分钟前").
+
+    Buckets: <1min "刚刚生成"; <60min "N 分钟前"; <24h "N 小时前";
+    older "N 天前". `None` → "刚刚生成" (preserves pre-cache-timestamp UX).
+    """
+    if ts is None:
+        return "刚刚生成"
+    from datetime import UTC, datetime
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=UTC)
+    delta = datetime.now(UTC) - ts
+    secs = int(delta.total_seconds())
+    if secs < 60:
+        return "刚刚生成"
+    if secs < 3600:
+        return f"{secs // 60} 分钟前"
+    if secs < 86400:
+        return f"{secs // 3600} 小时前"
+    return f"{secs // 86400} 天前"
+
+
+templates.env.filters["relative_zh"] = _relative_zh
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
     configure_logging(settings.log_level)
