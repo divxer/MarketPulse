@@ -36,6 +36,14 @@ consume, before the underlying metric semantics are pinned down.
 - `Depends(require_auth)` consistent with other `/lab/*` routes.
 - Parses `settings.database_url` via `sqlalchemy.engine.url.make_url`; resolves manifest path as
   `<dbpath>.parent / "backups" / "latest.json"`.
+- **SQLite detection uses `drivername.startswith("sqlite")`** so both `sqlite` and `sqlite+pysqlite`
+  drivers are treated as SQLite.
+- **Path resolution invariant:** `database_url` must resolve to the same absolute filesystem path
+  used by PR1's `run_db_backup` job. Both call sites use `Path(parsed.database).resolve()`, so
+  relative URLs are resolved against the **same process working directory** (the FastAPI app and
+  the APScheduler job share the same container CWD). If a deployment ever splits these into
+  different working directories, PR2 will look in the wrong place; pin both to absolute paths in
+  that case.
 - Non-SQLite URL → calls `build_charter_metrics(..., backup_unavailable_reason="sqlite database_url required for backup manifest discovery")`.
 - Returns the dict; FastAPI auto-serializes to `application/json`.
 - HTTP 200 on **every** outcome (ok / failed / missing). This is observability, not liveness.
@@ -90,14 +98,17 @@ consume, before the underlying metric semantics are pinned down.
 | File unreadable (permission, dir, etc.)   | `"missing"` | `null`           | `true`     | `"manifest unreadable: <exception>"`              |
 | JSON invalid                              | `"missing"` | `null`           | `true`     | `"manifest json invalid: <exception>"`            |
 | Manifest missing required key             | `"missing"` | `null`           | `true`     | `"manifest malformed: missing key '<name>'"`      |
+| Manifest `timestamp` value is not ISO-8601 | `"missing"` | `null`           | `true`     | `"manifest malformed: invalid timestamp"`         |
 | Manifest `status="ok"`, age ≤ 25h         | `"ok"`      | from manifest    | `false`    | `null`                                            |
 | Manifest `status="ok"`, age > 25h         | `"ok"`      | from manifest    | `true`     | `null`                                            |
 | Manifest `status="failed"`, age ≤ 25h     | `"failed"`  | from manifest    | `false`    | passed through from manifest                      |
 | Manifest `status="failed"`, age > 25h     | `"failed"`  | from manifest    | `true`     | passed through from manifest                      |
 | `backup_unavailable_reason` kwarg passed  | `"missing"` | `null`           | `true`     | the reason string (manifest is NOT read)          |
 
-Required keys checked for "malformed" detection: `timestamp`, `status`, `integrity_check`. Optional keys
-(`source`, `destination`, `size_bytes`, `duration_ms`, `error`) default to `null` if absent.
+Required keys checked for "malformed" detection: `timestamp`, `status`, `integrity_check`, `duration_ms`.
+Optional keys (`source`, `destination`, `size_bytes`, `error`) default to `null` if absent.
+`timestamp` is additionally validated as parseable by `datetime.fromisoformat`; a non-parseable value
+triggers the `"manifest malformed: invalid timestamp"` failure mode.
 
 ## Module Layout & Interfaces
 
@@ -155,7 +166,7 @@ def lab_charter_metrics(
 ) -> dict[str, Any]:
     settings = get_settings()
     parsed = make_url(settings.database_url)
-    if parsed.drivername != "sqlite" or not parsed.database:
+    if not parsed.drivername.startswith("sqlite") or not parsed.database:
         return build_charter_metrics(
             manifest_path=Path("/dev/null"),
             now=datetime.now(UTC),
@@ -178,12 +189,14 @@ def lab_charter_metrics(
 | `test_unreadable_manifest`                 | path is a directory → `status="missing"`, error contains `"unreadable"`       |
 | `test_json_invalid`                        | manifest body is `{not json}` → `status="missing"`, error contains `"json invalid"` |
 | `test_malformed_missing_key`               | manifest missing `timestamp` → `status="missing"`, error contains `"malformed: missing key"` |
+| `test_malformed_missing_duration_ms`       | manifest missing `duration_ms` → `status="missing"`, error contains `"malformed: missing key 'duration_ms'"` |
+| `test_malformed_invalid_timestamp`         | manifest `timestamp="bad-date"` → `status="missing"`, error contains `"invalid timestamp"` |
 | `test_ok_recent`                           | valid manifest, `now = manifest_time + 1h` → `status="ok"`, `is_stale=false`  |
 | `test_ok_stale`                            | valid manifest, `now = manifest_time + 26h` → `status="ok"`, `is_stale=true`  |
 | `test_failed_recent`                       | manifest `status="failed"`, recent → outer `status="failed"`, `is_stale=false`, error passed through |
 | `test_failed_stale`                        | manifest `status="failed"`, >25h old → `status="failed"`, `is_stale=true`     |
 | `test_backup_unavailable_reason`           | reason kwarg set → `status="missing"`, error=reason, `is_stale=true`, manifest NOT read |
-| `test_schema_v1_lock`                      | response has exactly the locked top-level keys + locked backup keys           |
+| `test_schema_v1_lock`                      | top-level required keys present (subset check, PR3-expandable); `operational_floor.backup` keys exact-match the locked set |
 | `test_north_star_diagnostics_placeholders` | both sections present with `status="not_implemented"`                         |
 | `test_timestamp_uses_injected_now`         | response `timestamp == injected_now.isoformat()`                              |
 
@@ -214,6 +227,14 @@ curl -sf -b cookies.txt http://localhost:8088/lab/charter-metrics \
 5. Manual smoke: endpoint returns HTTP 200 with `operational_floor.backup.status="ok"`
    on the running container after the next 09:00 UTC cron fire (or after a manual `run_db_backup()`).
 6. Spec and code never reference HTML, HTMX, or a Jinja template for this route.
+
+### Schema lock policy
+
+`test_schema_v1_lock` uses a **subset check** at the top level (asserts `schema_version`,
+`timestamp`, `operational_floor`, `north_star`, `diagnostics` are all present) and an **exact-set
+check** on `operational_floor.backup` keys. This lets PR3 add new top-level sections (e.g.
+`audit`, `slo`) without breaking the test, while still preventing accidental drift of the
+backup contract.
 
 ## Forward Compatibility Notes
 
