@@ -12,3 +12,18 @@ overrides:
   TNA: leveraged_small_cap
   QBTS: quantum_compute
   QUBT: quantum_compute
+  # Common equities held / traded — pinned here so the SectorExposureGate
+  # in paper_trading_tick doesn't reject on first-call yfinance latency or
+  # rate-limit failures. yfinance-backed fallback in
+  # marketpulse/trading/risk_gates/_sector.py still works for everything
+  # else; these are just the high-frequency offenders observed 2026-05-27.
+  AAPL: Technology
+  AMAT: Technology
+  AMD: Technology
+  AMSC: Industrials
+  GOOG: Communication Services
+  GOOGL: Communication Services
+  LRCX: Technology
+  META: Communication Services
+  MSFT: Technology
+  NVDA: Technology
