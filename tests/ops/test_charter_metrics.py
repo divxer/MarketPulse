@@ -132,3 +132,80 @@ def test_malformed_missing_duration_ms(tmp_path):
     backup = result["operational_floor"]["backup"]
     assert backup["status"] == "missing"
     assert "missing key 'duration_ms'" in backup["error"]
+
+
+def test_malformed_invalid_timestamp(tmp_path):
+    payload = {
+        "status": "ok",
+        "timestamp": "bad-date",
+        "integrity_check": "ok",
+        "duration_ms": 100,
+    }
+    manifest_path = tmp_path / "latest.json"
+    _write_manifest(manifest_path, payload)
+    now = datetime(2026, 5, 28, 14, 0, 0, tzinfo=UTC)
+
+    result = build_charter_metrics(manifest_path=manifest_path, now=now)
+
+    backup = result["operational_floor"]["backup"]
+    assert backup["status"] == "missing"
+    assert "invalid timestamp" in backup["error"]
+
+
+def test_z_suffix_timestamp_accepted(tmp_path):
+    # External tooling may rewrite timestamp with trailing 'Z'.
+    payload = {
+        "status": "ok",
+        "timestamp": "2026-05-28T09:00:00Z",
+        "integrity_check": "ok",
+        "duration_ms": 100,
+    }
+    manifest_path = tmp_path / "latest.json"
+    _write_manifest(manifest_path, payload)
+    now = datetime(2026, 5, 28, 10, 0, 0, tzinfo=UTC)
+
+    result = build_charter_metrics(manifest_path=manifest_path, now=now)
+
+    backup = result["operational_floor"]["backup"]
+    assert backup["status"] == "ok"
+    assert backup["is_stale"] is False
+    assert backup["last_backup_at"] == "2026-05-28T09:00:00Z"  # preserved verbatim
+
+
+def test_malformed_naive_timestamp(tmp_path):
+    """Naive timestamp (no tz) cannot be subtracted from aware `now`.
+    PR2 rejects it as malformed at the contract boundary."""
+    payload = {
+        "status": "ok",
+        "timestamp": "2026-05-28T09:00:00",  # no offset, no Z
+        "integrity_check": "ok",
+        "duration_ms": 100,
+    }
+    manifest_path = tmp_path / "latest.json"
+    _write_manifest(manifest_path, payload)
+    now = datetime(2026, 5, 28, 10, 0, 0, tzinfo=UTC)
+
+    result = build_charter_metrics(manifest_path=manifest_path, now=now)
+
+    backup = result["operational_floor"]["backup"]
+    assert backup["status"] == "missing"
+    assert "missing timezone" in backup["error"]
+
+
+def test_malformed_invalid_status(tmp_path):
+    """status enum is locked to {ok, failed}. Unknown values are malformed."""
+    payload = {
+        "status": "weird",
+        "timestamp": "2026-05-28T09:00:00+00:00",
+        "integrity_check": "ok",
+        "duration_ms": 100,
+    }
+    manifest_path = tmp_path / "latest.json"
+    _write_manifest(manifest_path, payload)
+    now = datetime(2026, 5, 28, 10, 0, 0, tzinfo=UTC)
+
+    result = build_charter_metrics(manifest_path=manifest_path, now=now)
+
+    backup = result["operational_floor"]["backup"]
+    assert backup["status"] == "missing"
+    assert "invalid status" in backup["error"]
