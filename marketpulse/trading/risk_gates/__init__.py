@@ -8,7 +8,7 @@ clarification in spec § 2)."""
 
 from __future__ import annotations
 
-from marketpulse.trading.risk_gates._sector import strict_sector
+from marketpulse.trading.risk_gates._sector import safe_sector, strict_sector
 from marketpulse.trading.risk_gates.composite import CompositeRiskGate
 from marketpulse.trading.risk_gates.config_provider import (
     DailyLossConfig,
@@ -40,6 +40,7 @@ __all__ = [
     "StrategyRiskConfig",
     "StrategySizeGate",
     "build_standard_composite",
+    "safe_sector",
     "strict_sector",
     "validate_paper_tick_in_placement_window",
 ]

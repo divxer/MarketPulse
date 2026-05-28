@@ -5,8 +5,10 @@
 # - Leveraged ETFs (3x bull / bear)
 # - Thematic ETFs without natural GICS sector
 # - Crypto / digital asset proxies
-#
-# Equity tickers (AAPL, GOOGL, AMSC, etc.) fall through to yfinance default.
+# - Common equities pinned defensively (so SectorExposureGate doesn't
+#   reject on first-call yfinance latency / rate-limit / DNS flakes).
+#   The strict_sector wrapper in marketpulse/trading/risk_gates/_sector.py
+#   falls back to yfinance for equities not listed here.
 overrides:
   TQQQ: leveraged_qqq
   TNA: leveraged_small_cap
