@@ -134,6 +134,7 @@ _REQUIRED_MANIFEST_KEYS: tuple[str, ...] = (
 _OPTIONAL_MANIFEST_KEYS: tuple[str, ...] = (
     "source", "destination", "size_bytes", "error",
 )
+_ALLOWED_MANIFEST_STATUSES: frozenset[str] = frozenset({"ok", "failed"})
 
 
 def build_charter_metrics(
@@ -170,9 +171,18 @@ def _build_backup_section(
     if read_error is not None:
         return _missing_backup(error=read_error)
 
-    # manifest is a dict at this point
-    last_backup_at = _parse_timestamp(manifest["timestamp"])
-    is_stale = (now - last_backup_at) > timedelta(hours=STALE_AFTER_HOURS)
+    # Defensive: _read_manifest already validated these, but the contract
+    # promise is "never raises", so re-guard at the boundary.
+    try:
+        last_backup_at = _parse_timestamp(str(manifest["timestamp"]))
+    except (ValueError, TypeError):
+        return _missing_backup(error="manifest malformed: invalid timestamp")
+    if last_backup_at.tzinfo is None or last_backup_at.utcoffset() is None:
+        return _missing_backup(error="manifest malformed: timestamp missing timezone")
+    try:
+        is_stale = (now - last_backup_at) > timedelta(hours=STALE_AFTER_HOURS)
+    except TypeError:
+        return _missing_backup(error="manifest malformed: timestamp missing timezone")
     return {
         "status": manifest["status"],
         "is_stale": is_stale,
@@ -220,11 +230,16 @@ def _read_manifest(manifest_path: Path) -> tuple[dict | None, str | None]:
     for key in _REQUIRED_MANIFEST_KEYS:
         if key not in parsed:
             return None, f"manifest malformed: missing key '{key}'"
-    # timestamp parse-validation
+    # status enum validation — PR2 is the contract boundary; reject unknown values.
+    if parsed["status"] not in _ALLOWED_MANIFEST_STATUSES:
+        return None, "manifest malformed: invalid status"
+    # timestamp parse-validation (accepts Z suffix).
     try:
-        _parse_timestamp(parsed["timestamp"])
-    except ValueError:
+        dt = _parse_timestamp(str(parsed["timestamp"]))
+    except (ValueError, TypeError):
         return None, "manifest malformed: invalid timestamp"
+    if dt.tzinfo is None or dt.utcoffset() is None:
+        return None, "manifest malformed: timestamp missing timezone"
     return parsed, None
 
 
@@ -394,6 +409,45 @@ def test_z_suffix_timestamp_accepted(tmp_path):
     assert backup["status"] == "ok"
     assert backup["is_stale"] is False
     assert backup["last_backup_at"] == "2026-05-28T09:00:00Z"  # preserved verbatim
+
+
+def test_malformed_naive_timestamp(tmp_path):
+    """Naive timestamp (no tz) cannot be subtracted from aware `now`.
+    PR2 rejects it as malformed at the contract boundary."""
+    payload = {
+        "status": "ok",
+        "timestamp": "2026-05-28T09:00:00",  # no offset, no Z
+        "integrity_check": "ok",
+        "duration_ms": 100,
+    }
+    manifest_path = tmp_path / "latest.json"
+    _write_manifest(manifest_path, payload)
+    now = datetime(2026, 5, 28, 10, 0, 0, tzinfo=UTC)
+
+    result = build_charter_metrics(manifest_path=manifest_path, now=now)
+
+    backup = result["operational_floor"]["backup"]
+    assert backup["status"] == "missing"
+    assert "missing timezone" in backup["error"]
+
+
+def test_malformed_invalid_status(tmp_path):
+    """status enum is locked to {ok, failed}. Unknown values are malformed."""
+    payload = {
+        "status": "weird",
+        "timestamp": "2026-05-28T09:00:00+00:00",
+        "integrity_check": "ok",
+        "duration_ms": 100,
+    }
+    manifest_path = tmp_path / "latest.json"
+    _write_manifest(manifest_path, payload)
+    now = datetime(2026, 5, 28, 10, 0, 0, tzinfo=UTC)
+
+    result = build_charter_metrics(manifest_path=manifest_path, now=now)
+
+    backup = result["operational_floor"]["backup"]
+    assert backup["status"] == "missing"
+    assert "invalid status" in backup["error"]
 ```
 
 - [ ] **Step 2: Run tests**
@@ -501,7 +555,7 @@ git commit -m "test(charter_metrics): is_stale + failed-status pass-through"
 **Files:**
 - Modify: `tests/ops/test_charter_metrics.py`
 
-- [ ] **Step 1: Add the remaining 4 unit tests**
+- [ ] **Step 1: Add the remaining unit tests**
 
 Append to `tests/ops/test_charter_metrics.py`:
 
@@ -576,7 +630,8 @@ def test_timestamp_uses_injected_now(tmp_path):
 - [ ] **Step 2: Run tests**
 
 Run: `pytest tests/ops/test_charter_metrics.py -v`
-Expected: PASS — all 16 tests (2 constants + 14 spec cases)
+Expected: PASS — 18 tests total (2 constants + 16 spec-derived cases, including the
+2 boundary-defense additions for `invalid status` and `naive timestamp`)
 
 - [ ] **Step 3: Commit**
 
@@ -754,6 +809,7 @@ import json
 from pathlib import Path
 
 import pytest
+from sqlalchemy.engine.url import make_url
 
 
 def _seed_failed_manifest(db_path: Path) -> Path:
@@ -779,8 +835,10 @@ def test_endpoint_returns_200_when_backup_failed(
     client: TestClient, monkeypatch, db_url: str,
 ):
     _login(client, monkeypatch)
-    # db_url is sqlite:///<tmp>/test.db — derive the path.
-    db_path = Path(db_url.replace("sqlite:///", "", 1))
+    # Derive db path the same way the route does, via SQLAlchemy's URL parser,
+    # so the test matches production behavior across sqlite:/// and
+    # sqlite+pysqlite:/// URL forms.
+    db_path = Path(make_url(db_url).database).resolve()
     _seed_failed_manifest(db_path)
 
     r = client.get("/lab/charter-metrics")
@@ -892,7 +950,7 @@ gh pr create --title "feat(charter-metrics): /lab/charter-metrics JSON endpoint 
 Charter top-3 priority #1, second half. Spec: `docs/superpowers/specs/2026-05-28-pr2-charter-metrics-design.md`.
 
 ## Test Plan
-- [ ] `pytest tests/ops/test_charter_metrics.py -v` — 14 unit cases (missing/unreadable/json-invalid/malformed/timestamp/ok/failed/stale/kwarg/schema-lock/placeholders/now-injection)
+- [ ] `pytest tests/ops/test_charter_metrics.py -v` — 18 unit tests total, covering 16 spec-derived cases plus 2 constants (missing/unreadable/json-invalid/malformed-key/invalid-timestamp/Z-suffix/naive-timestamp/invalid-status/ok-recent/ok-stale/failed-recent/failed-stale/kwarg/schema-lock/placeholders/now-injection)
 - [ ] `pytest tests/web/test_charter_route.py -v` — 5 route cases (auth, missing, failed, non-sqlite, content-type)
 - [ ] `pytest -x` — full suite green, no regressions
 - [ ] `ruff check .` — clean
@@ -905,16 +963,20 @@ EOF
 
 - [ ] **Step 5: Post-deploy verification (after PR merged + container restart)**
 
-On the NAS:
+From the host (or any machine on the LAN, replacing `localhost` with the NAS host):
 
 ```bash
-ssh divxer@192.168.50.29
-echo Latex@2022 | sudo -S -p '' /usr/local/bin/docker exec marketpulse \
-  curl -sf -b /tmp/cookies.txt http://localhost:8000/lab/charter-metrics \
+# Step 1: login and save session cookie.
+curl -s -c /tmp/mp-cookies.txt -X POST http://localhost:8088/login \
+  -d "password=$APP_PASSWORD"
+
+# Step 2: hit the endpoint with the saved cookie.
+curl -sf -b /tmp/mp-cookies.txt http://localhost:8088/lab/charter-metrics \
   | jq '.operational_floor.backup.status'
 ```
 
-Or trigger via the host with login first. Expected: `"ok"` after the cron has fired at least once.
+Expected: `"ok"` after the next 09:00 UTC cron fire (or after a manual
+`run_db_backup()` from inside the container).
 
 ---
 
@@ -932,6 +994,8 @@ Or trigger via the host with login first. Expected: `"ok"` after the cron has fi
 | Failure: missing key `duration_ms` | Task 2 |
 | Failure: invalid timestamp | Task 3 |
 | Z-suffix compatibility | Task 3 |
+| Failure: naive timestamp (no tz) — defense at boundary | Task 3 |
+| Failure: invalid `status` enum — defense at boundary | Task 3 |
 | `is_stale` true when age > 25h | Task 4 |
 | `status="failed"` pass-through + `is_stale` orthogonal | Task 4 |
 | `backup_unavailable_reason` kwarg short-circuits read | Task 5 |
