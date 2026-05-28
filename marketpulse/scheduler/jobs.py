@@ -137,6 +137,8 @@ def run_db_backup() -> None:
     Never raises — a failed backup writes a status="failed" manifest and
     logs a warning. The scheduler must not crash because of this job.
     """
+    from sqlalchemy.engine.url import make_url
+
     from marketpulse.ops.backup import (
         MANIFEST_FILENAME,
         prune_old_backups,
@@ -145,12 +147,13 @@ def run_db_backup() -> None:
     )
     settings = get_settings()
     db_url = settings.database_url
-    if not db_url.startswith("sqlite:///"):
-        # No-op on non-sqlite (no current production target, but defensive
-        # for tests / future dev environments).
+    # Parse via SQLAlchemy so absolute (sqlite:////data/x.db) and relative
+    # (sqlite:///./x.db) URLs both resolve correctly without slash-counting.
+    parsed = make_url(db_url)
+    if parsed.drivername != "sqlite" or not parsed.database:
         log.info("db_backup_skipped_not_sqlite", database_url=db_url)
         return
-    source = Path(db_url.removeprefix("sqlite:///"))
+    source = Path(parsed.database).resolve()
     backups_dir = source.parent / "backups"
     log.info("db_backup_start", source=str(source), destination_dir=str(backups_dir))
     result = run_backup(source=source, backups_dir=backups_dir)

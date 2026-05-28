@@ -132,10 +132,13 @@ def test_prune_old_backups_keeps_recent_only(tmp_path):
     backups_dir = tmp_path / "backups"
     backups_dir.mkdir()
     now = datetime(2026, 5, 28, 9, 0, 0, tzinfo=UTC)
-    # Create 10 fake backup files with mtime spread across 14 days.
+    # Production filename format: marketpulse-YYYY-MM-DD.db. Use real
+    # dated names so the tightened glob (marketpulse-????-??-??.db) matches.
     for offset_days in range(14):
+        file_date = (now - timedelta(days=offset_days)).date()
         p = backups_dir / (
-            f"{BACKUP_FILENAME_PREFIX}fake-{offset_days}{BACKUP_FILENAME_SUFFIX}"
+            f"{BACKUP_FILENAME_PREFIX}{file_date.isoformat()}"
+            f"{BACKUP_FILENAME_SUFFIX}"
         )
         p.write_bytes(b"x")
         target_time = (now - timedelta(days=offset_days)).timestamp()
@@ -152,6 +155,31 @@ def test_prune_old_backups_keeps_recent_only(tmp_path):
     )
     assert len(remaining) == 8  # offsets 0..7 = 8 files
     assert len(pruned) == 6     # offsets 8..13 = 6 files
+
+
+def test_prune_old_backups_ignores_non_date_named_files(tmp_path):
+    """The tightened glob `marketpulse-????-??-??.db` only deletes
+    date-formatted snapshots. A manual recovery file dropped in the
+    backups dir (e.g. `marketpulse-preupgrade.db`) survives retention.
+    """
+    backups_dir = tmp_path / "backups"
+    backups_dir.mkdir()
+    now = datetime(2026, 5, 28, 9, 0, 0, tzinfo=UTC)
+    # Manual recovery file, ancient mtime.
+    manual = backups_dir / f"{BACKUP_FILENAME_PREFIX}preupgrade{BACKUP_FILENAME_SUFFIX}"
+    manual.write_bytes(b"recovery")
+    ancient = (now - timedelta(days=30)).timestamp()
+    os.utime(manual, (ancient, ancient))
+    # Real dated backup, also ancient.
+    dated = backups_dir / f"{BACKUP_FILENAME_PREFIX}2026-04-28{BACKUP_FILENAME_SUFFIX}"
+    dated.write_bytes(b"old daily")
+    os.utime(dated, (ancient, ancient))
+
+    pruned = prune_old_backups(backups_dir=backups_dir, keep_days=7, now=now)
+
+    assert dated not in [p for p in backups_dir.iterdir()]  # deleted
+    assert manual.exists()  # survived
+    assert pruned == [dated]
 
 
 def test_prune_old_backups_no_dir_is_noop(tmp_path):

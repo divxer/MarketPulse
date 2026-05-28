@@ -33,6 +33,10 @@ log = get_logger(__name__)
 BACKUP_FILENAME_PREFIX = "marketpulse-"
 BACKUP_FILENAME_SUFFIX = ".db"
 MANIFEST_FILENAME = "latest.json"
+# Tightened from `marketpulse-*.db` so manual recovery files (e.g.
+# `marketpulse-preupgrade.db`) survive retention even if dropped into the
+# backups dir. Production filenames are always `marketpulse-YYYY-MM-DD.db`.
+_BACKUP_GLOB_PATTERN = f"{BACKUP_FILENAME_PREFIX}????-??-??{BACKUP_FILENAME_SUFFIX}"
 
 
 @dataclass(frozen=True)
@@ -104,7 +108,11 @@ def run_backup(*, source: Path, backups_dir: Path) -> BackupResult:
     src_conn: sqlite3.Connection | None = None
     dst_conn: sqlite3.Connection | None = None
     try:
-        src_conn = sqlite3.connect(source_str)
+        # Open source read-only. `Connection.backup()` does not need write
+        # access, and the URI form prevents the backup process from ever
+        # accidentally mutating the production DB (defensive against future
+        # code drift).
+        src_conn = sqlite3.connect(f"file:{source_str}?mode=ro", uri=True)
         dst_conn = sqlite3.connect(str(dest_path))
         src_conn.backup(dst_conn)
         # Integrity-check the FRESHLY WRITTEN destination, not the source.
@@ -165,8 +173,7 @@ def prune_old_backups(
     pruned: list[Path] = []
     if not backups_dir.exists():
         return pruned
-    pattern = f"{BACKUP_FILENAME_PREFIX}*{BACKUP_FILENAME_SUFFIX}"
-    for path in backups_dir.glob(pattern):
+    for path in backups_dir.glob(_BACKUP_GLOB_PATTERN):
         try:
             mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
         except OSError:
