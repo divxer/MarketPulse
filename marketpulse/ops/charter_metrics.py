@@ -20,9 +20,6 @@ STALE_AFTER_HOURS = 25
 _REQUIRED_MANIFEST_KEYS: tuple[str, ...] = (
     "timestamp", "status", "integrity_check", "duration_ms",
 )
-_OPTIONAL_MANIFEST_KEYS: tuple[str, ...] = (
-    "source", "destination", "size_bytes", "error",
-)
 _ALLOWED_MANIFEST_STATUSES: frozenset[str] = frozenset({"ok", "failed"})
 
 
