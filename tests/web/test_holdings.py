@@ -35,6 +35,37 @@ class _FakeData:
                             eps=1, sector="t", industry="i")
 
 
+def test_route_enrichment_uses_worker_factory_for_real_data_service(
+    client, monkeypatch, db_session
+):
+    from marketpulse.data.service import DataService
+    from marketpulse.db.models import Holding
+    from marketpulse.web.routes import holdings as route
+
+    h = Holding(ticker="AAPL", quantity=1.0, avg_cost=100.0, sort_order=0)
+    db_session.add(h)
+    db_session.commit()
+
+    captured = {"factory_seen": False}
+    data = DataService(db_session, object())
+
+    def fake_enrich(holdings, data_arg, *, data_factory=None):
+        assert holdings == [h]
+        assert data_arg is data
+        assert data_factory is not None
+        with data_factory() as worker_data:
+            assert isinstance(worker_data, DataService)
+            assert worker_data is not data
+            assert worker_data.session is not db_session
+        captured["factory_seen"] = True
+        return []
+
+    monkeypatch.setattr(route, "enrich_holdings", fake_enrich)
+
+    assert route._enrich_route_holdings([h], data) == []
+    assert captured["factory_seen"] is True
+
+
 def test_holdings_page_empty(client: TestClient, monkeypatch):
     _login(client, monkeypatch)
     res = client.get("/holdings")

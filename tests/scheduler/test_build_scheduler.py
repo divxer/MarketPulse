@@ -12,7 +12,7 @@ from marketpulse.scheduler.jobs import build_scheduler
 
 def test_daily_critical_jobs_have_no_misfire_grace():
     sched = build_scheduler()
-    for job_id in ("paper_trading_tick", "outcome_computation", "flex_sync"):
+    for job_id in ("paper_trading_tick", "outcome_computation", "flex_sync", "sector_backfill"):
         job = sched.get_job(job_id)
         assert job is not None, f"missing job {job_id}"
         assert job.misfire_grace_time is None, (

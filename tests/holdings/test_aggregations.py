@@ -536,6 +536,110 @@ def test_enrich_holdings_runs_concurrently(db_session):
     assert elapsed < 0.7, f"enrich_holdings ran sequentially: {elapsed:.3f}s"
 
 
+def test_enrich_holdings_can_use_worker_local_data_factory(db_session):
+    """Session-backed DataService instances must not be shared across workers."""
+    from contextlib import contextmanager
+    from datetime import UTC, datetime
+    from itertools import count
+    from threading import Lock
+
+    from marketpulse.data.types import Quote
+    from marketpulse.db.models import Holding
+    from marketpulse.holdings.service import enrich_holdings
+
+    for i, t in enumerate(["AAA", "BBB", "CCC"]):
+        db_session.add(Holding(ticker=t, quantity=1, avg_cost=10, sort_order=i))
+    db_session.commit()
+    holdings = db_session.query(Holding).order_by(Holding.sort_order).all()
+
+    class _WorkerData:
+        def __init__(self, label: int) -> None:
+            self.label = label
+
+        def get_quote(self, ticker):
+            return Quote(
+                ticker=ticker, price=100.0 + self.label, change_pct=0.0,
+                volume=1, avg_volume_20d=1, fetched_at=datetime.now(UTC),
+            )
+
+        def get_history(self, ticker, period="30d"):
+            return []
+
+    next_label = count(1)
+    labels: list[int] = []
+    labels_lock = Lock()
+
+    @contextmanager
+    def factory():
+        label = next(next_label)
+        with labels_lock:
+            labels.append(label)
+        yield _WorkerData(label)
+
+    rows = enrich_holdings(holdings, object(), data_factory=factory)
+
+    assert [r["ticker"] for r in rows] == ["AAA", "BBB", "CCC"]
+    assert sorted(labels) == [1, 2, 3]
+    assert sorted(r["current_price"] for r in rows) == [101.0, 102.0, 103.0]
+
+
+def test_enrich_holdings_serializes_real_data_service_without_factory(db_session):
+    """A real DataService owns one Session and must not be shared across threads."""
+    import time
+    from datetime import UTC, date, datetime
+    from threading import Lock
+
+    from marketpulse.data.service import DataService
+    from marketpulse.data.types import Bar, Quote
+    from marketpulse.db.models import Holding
+    from marketpulse.holdings.service import enrich_holdings
+
+    class _GuardedYf:
+        def __init__(self) -> None:
+            self.active_history_calls = 0
+            self.concurrent_history_seen = False
+            self.lock = Lock()
+
+        def fetch_quote(self, ticker):
+            return Quote(
+                ticker=ticker, price=100.0, change_pct=0.0,
+                volume=1, avg_volume_20d=1, fetched_at=datetime.now(UTC),
+            )
+
+        def fetch_history(self, ticker, period="30d"):
+            with self.lock:
+                self.active_history_calls += 1
+                if self.active_history_calls > 1:
+                    self.concurrent_history_seen = True
+            try:
+                time.sleep(0.05)
+                return [
+                    Bar(
+                        date=date(2026, 5, day),
+                        open=100.0,
+                        high=101.0,
+                        low=99.0,
+                        close=100.0 + day,
+                        volume=100,
+                    )
+                    for day in range(1, 4)
+                ]
+            finally:
+                with self.lock:
+                    self.active_history_calls -= 1
+
+    for i, t in enumerate(["AAA", "BBB", "CCC"]):
+        db_session.add(Holding(ticker=t, quantity=1, avg_cost=10, sort_order=i))
+    db_session.commit()
+    holdings = db_session.query(Holding).order_by(Holding.sort_order).all()
+    yf = _GuardedYf()
+
+    rows = enrich_holdings(holdings, DataService(db_session, yf))
+
+    assert yf.concurrent_history_seen is False
+    assert [r["sparkline"] for r in rows] == [[101.0, 102.0, 103.0]] * 3
+
+
 def test_enrich_holdings_empty_returns_empty():
     from marketpulse.holdings.service import enrich_holdings
     assert enrich_holdings([], object()) == []

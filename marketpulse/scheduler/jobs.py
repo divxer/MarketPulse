@@ -507,7 +507,7 @@ def build_scheduler() -> BackgroundScheduler:
         trigger=CronTrigger(hour=4, minute=0, timezone="UTC"),
         id="sector_backfill",
         replace_existing=True,
-        misfire_grace_time=3600,
+        misfire_grace_time=None,
         coalesce=True,
     )
     # Daily split-detection: runs once at 17:00 ET (after the daily recap)

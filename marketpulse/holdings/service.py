@@ -5,6 +5,9 @@ service (to include holdings P&L in the daily AI commentary).
 """
 
 from collections import defaultdict
+from collections.abc import Callable
+from contextlib import AbstractContextManager
+from dataclasses import dataclass
 from datetime import date
 from typing import Any, Protocol
 
@@ -22,6 +25,27 @@ class _DataLike(Protocol):
     def get_history(self, ticker: str, period: str = "30d") -> list[Any]: ...
 
 
+@dataclass(frozen=True)
+class _HoldingSnapshot:
+    id: int | None
+    ticker: str
+    quantity: float
+    avg_cost: float
+    notes: str | None
+    sector: str | None
+
+
+def _snapshot_holding(h: Holding) -> _HoldingSnapshot:
+    return _HoldingSnapshot(
+        id=h.id,
+        ticker=h.ticker,
+        quantity=h.quantity,
+        avg_cost=h.avg_cost,
+        notes=h.notes,
+        sector=h.sector,
+    )
+
+
 def _fetch_sparkline(data: "_DataLike", ticker: str) -> list[float]:
     """Return last 30 daily closes; [] on fetch failure.
 
@@ -35,7 +59,7 @@ def _fetch_sparkline(data: "_DataLike", ticker: str) -> list[float]:
         return []
 
 
-def _enrich_one(h: Holding, data: _DataLike) -> dict[str, Any]:
+def _enrich_one(h: _HoldingSnapshot, data: _DataLike) -> dict[str, Any]:
     """Build one enriched row. Tolerates quote/history fetch failures —
     the row still renders with cost-basis info. Extracted so the outer
     loop can fan out across a ThreadPoolExecutor.
@@ -77,7 +101,10 @@ ENRICH_MAX_WORKERS = 8
 
 
 def enrich_holdings(
-    holdings: list[Holding], data: _DataLike,
+    holdings: list[Holding],
+    data: _DataLike,
+    *,
+    data_factory: Callable[[], AbstractContextManager[_DataLike]] | None = None,
 ) -> list[dict[str, Any]]:
     """Attach live quote + computed P&L to each holding. Live fetch failures
     are tolerated — the row still renders with cost-basis info.
@@ -91,12 +118,33 @@ def enrich_holdings(
     """
     if not holdings:
         return []
+    snapshots = [_snapshot_holding(h) for h in holdings]
     workers = min(ENRICH_MAX_WORKERS, len(holdings))
+    if data_factory is None:
+        from marketpulse.data.service import DataService
+
+        if isinstance(data, DataService):
+            workers = 1
     if workers <= 1:
-        return [_enrich_one(h, data) for h in holdings]
+        if data_factory is None:
+            return [_enrich_one(h, data) for h in snapshots]
+        rows: list[dict[str, Any]] = []
+        for h in snapshots:
+            with data_factory() as worker_data:
+                rows.append(_enrich_one(h, worker_data))
+        return rows
     from concurrent.futures import ThreadPoolExecutor
+
+    if data_factory is not None:
+        def enrich_with_worker_data(h: _HoldingSnapshot) -> dict[str, Any]:
+            with data_factory() as worker_data:
+                return _enrich_one(h, worker_data)
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            return list(pool.map(enrich_with_worker_data, snapshots))
+
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        return list(pool.map(lambda h: _enrich_one(h, data), holdings))
+        return list(pool.map(lambda h: _enrich_one(h, data), snapshots))
 
 
 def compute_totals(rows: list[dict[str, Any]]) -> dict[str, float]:
