@@ -172,3 +172,164 @@ def test_persisted_cache_loaded_on_first_call(monkeypatch):
         result = ss_mod.strict_sector("BAZ_FROM_DISK")
     yf_mock.assert_not_called()
     assert result == "Energy"
+
+
+# === Integration regression: composite gate composition ===
+
+
+def test_composite_gate_resolves_yaml_and_yfinance(monkeypatch, tmp_path):
+    """End-to-end shape check: build the production composite, feed it
+    a YAML-pinned ticker and a yfinance-resolvable ticker, and verify
+    the sector_exposure gate sees real sectors (not 'unknown').
+
+    Guards against regressions where sector_provider wiring drifts at
+    factory or paper_trading_tick.py composition root — the 2026-05-27
+    outage class.
+    """
+    from datetime import UTC, datetime
+    from datetime import date as date_cls
+    from datetime import time as time_cls
+    from decimal import Decimal
+
+    from marketpulse.trading import risk_gates as rg
+    from marketpulse.trading.calendar import NYTradingCalendar
+    from marketpulse.trading.clock import WallClock
+    from marketpulse.trading.types import (
+        AllocationRunId,
+        OrderRequest,
+        RiskIntent,
+    )
+
+    class _FakeRepo:
+        def projected_sector_exposure(self, *, ticker, sector, projected_notional):
+            return Decimal("0"), Decimal("0")
+
+        def realized_pl_today(self, *, today_ny):
+            return Decimal("0")
+
+    class _FakeCfgProvider:
+        def global_config(self):
+            return rg.RiskGateConfig(
+                market_hours=rg.MarketHoursConfig(
+                    enabled=False, exchange="XNYS",
+                    allow_regular_session=True, allow_post_close=True,
+                    post_close_until=time_cls(18, 0),
+                    allow_premarket=False,
+                ),
+                daily_loss=rg.DailyLossConfig(
+                    enabled=False, daily_loss_limit=Decimal("0"),
+                ),
+                sector_exposure=rg.SectorExposureConfig(
+                    enabled=True, max_sector_exposure_pct=0.99,
+                    configured_max_capital_in_use=Decimal("10000"),
+                ),
+            )
+
+        def strategy_config(self, _strategy):
+            return rg.StrategyRiskConfig(
+                max_position_notional=Decimal("100000"),
+            )
+
+    class _YfTechTicker:
+        info = {"sector": "Technology"}
+
+    composite = rg.build_standard_composite(
+        config_provider=_FakeCfgProvider(),
+        repository=_FakeRepo(),
+        calendar=NYTradingCalendar(),
+        clock=WallClock(),
+        sector_provider=rg.strict_sector,  # production wiring
+    )
+
+    def _order(ticker: str) -> OrderRequest:
+        return OrderRequest(
+            strategy="general", ticker=ticker, quantity=1,
+            event_time=datetime.now(UTC),
+            allocation_date=date_cls.today(),
+            event_price=Decimal("100"),
+            horizon_date=date_cls.today(),
+            horizon_price=Decimal("105"),
+            allocation_run_id=AllocationRunId("paper-test"),
+            strategy_version="v1",
+            allocator_version="phase6a-v1",
+            execution_engine_version="phase6a-v1",
+            weight=1.0, raw_bid_weight=1.0, pool_corr=0.1,
+            contribution_multiplier=1.0, adjusted_bid_weight=1.0,
+            effective_corr_window=60,
+            rewarded_for_negative_corr=False,
+            would_change_rank=False,
+            size_clamped_by_override=False,
+            risk_intent=RiskIntent.OPEN,
+        )
+
+    # AMSC is pinned in YAML — no yfinance call.
+    with patch("yfinance.Ticker") as yf_mock:
+        amsc_result = composite.check_pre_trade(order_request=_order("AMSC"))
+    yf_mock.assert_not_called()
+    amsc_sector_gate = next(
+        g for g in amsc_result.context["per_gate"]
+        if g["gate_name"] == "sector_exposure"
+    )
+    assert amsc_sector_gate["reason"] != "unknown_sector", amsc_result
+
+    # ZZQQ_FAKE not in YAML → falls through to yfinance fallback.
+    with patch("yfinance.Ticker", return_value=_YfTechTicker()) as yf_mock:
+        fake_result = composite.check_pre_trade(order_request=_order("ZZQQ_FAKE"))
+    yf_mock.assert_called_once_with("ZZQQ_FAKE")
+    fake_sector_gate = next(
+        g for g in fake_result.context["per_gate"]
+        if g["gate_name"] == "sector_exposure"
+    )
+    assert fake_sector_gate["reason"] != "unknown_sector", fake_result
+
+
+def test_safe_sector_returns_unknown_string_for_unresolved(monkeypatch):
+    """Allocator-facing wrapper returns "unknown" (str), not None."""
+    from marketpulse.trading.risk_gates import safe_sector
+    with patch("yfinance.Ticker", side_effect=RuntimeError("rate limited")):
+        result = safe_sector("UNRESOLVABLE_XYZ")
+    assert result == "unknown"
+
+
+def test_safe_sector_returns_yaml_match(monkeypatch):
+    """YAML hit returns the pinned sector — no yfinance touch."""
+    from marketpulse.trading.risk_gates import safe_sector
+    with patch("yfinance.Ticker") as yf_mock:
+        assert safe_sector("TQQQ") == "leveraged_qqq"
+    yf_mock.assert_not_called()
+
+
+def test_persisted_cache_load_failure_retries(monkeypatch):
+    """A transient load failure must not disable persisted-cache reads forever."""
+    import marketpulse.trading.risk_gates._sector as ss_mod
+
+    calls = 0
+
+    def flaky_load(_path):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("temporary read failure")
+        return {"RETRY_FROM_DISK": "Industrials"}
+
+    monkeypatch.setattr(ss_mod, "load_sector_cache", flaky_load)
+
+    with patch("yfinance.Ticker", side_effect=RuntimeError("network unavailable")):
+        assert ss_mod.strict_sector("RETRY_FROM_DISK") is None
+    with patch("yfinance.Ticker") as yf_mock:
+        assert ss_mod.strict_sector("RETRY_FROM_DISK") == "Industrials"
+
+    yf_mock.assert_not_called()
+    assert calls == 2
+
+
+def test_safe_sector_returns_unknown_for_unresolved(monkeypatch):
+    """Allocator-facing provider keeps a string contract while sharing lookup code."""
+    from marketpulse.trading.risk_gates._sector import safe_sector
+
+    monkeypatch.setattr(
+        "marketpulse.trading.risk_gates._sector._get_sector",
+        lambda t, **kw: "unknown",
+    )
+
+    assert safe_sector("NOPE") == "unknown"
