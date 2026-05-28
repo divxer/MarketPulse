@@ -107,8 +107,12 @@ consume, before the underlying metric semantics are pinned down.
 
 Required keys checked for "malformed" detection: `timestamp`, `status`, `integrity_check`, `duration_ms`.
 Optional keys (`source`, `destination`, `size_bytes`, `error`) default to `null` if absent.
-`timestamp` is additionally validated as parseable by `datetime.fromisoformat`; a non-parseable value
-triggers the `"manifest malformed: invalid timestamp"` failure mode.
+`timestamp` is additionally validated as parseable; the implementation accepts both
+`"2026-05-28T09:00:00+00:00"` and `"2026-05-28T09:00:00Z"` by normalizing a trailing `Z` to
+`+00:00` before calling `datetime.fromisoformat`. A non-parseable value triggers the
+`"manifest malformed: invalid timestamp"` failure mode. PR1 currently writes `+00:00` form, but
+the `Z` shim is kept for forward compatibility with external tooling that might rewrite the
+manifest.
 
 ## Module Layout & Interfaces
 
@@ -222,7 +226,7 @@ curl -sf -b cookies.txt http://localhost:8088/lab/charter-metrics \
 
 1. `ruff check .` clean.
 2. Full `pytest` suite green.
-3. `tests/ops/test_charter_metrics.py` covers all 12 unit cases above.
+3. `tests/ops/test_charter_metrics.py` covers all 14 unit cases above.
 4. `tests/web/test_charter_route.py` covers all 5 route cases above.
 5. Manual smoke: endpoint returns HTTP 200 with `operational_floor.backup.status="ok"`
    on the running container after the next 09:00 UTC cron fire (or after a manual `run_db_backup()`).
