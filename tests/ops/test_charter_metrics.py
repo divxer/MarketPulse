@@ -60,3 +60,75 @@ def test_ok_recent(tmp_path):
     assert backup["error"] is None
     assert result["timestamp"] == now.isoformat()
     assert result["schema_version"] == 1
+
+
+def test_missing_manifest(tmp_path):
+    manifest_path = tmp_path / "nope.json"
+    now = datetime(2026, 5, 28, 14, 0, 0, tzinfo=UTC)
+
+    result = build_charter_metrics(manifest_path=manifest_path, now=now)
+
+    backup = result["operational_floor"]["backup"]
+    assert backup["status"] == "missing"
+    assert backup["is_stale"] is True
+    assert backup["last_backup_at"] is None
+    assert backup["error"] == "manifest file not found"
+
+
+def test_unreadable_manifest(tmp_path):
+    # A directory at the manifest path is "unreadable" as a file.
+    manifest_path = tmp_path / "latest.json"
+    manifest_path.mkdir()
+    now = datetime(2026, 5, 28, 14, 0, 0, tzinfo=UTC)
+
+    result = build_charter_metrics(manifest_path=manifest_path, now=now)
+
+    backup = result["operational_floor"]["backup"]
+    assert backup["status"] == "missing"
+    assert backup["is_stale"] is True
+    assert "unreadable" in backup["error"]
+
+
+def test_json_invalid(tmp_path):
+    manifest_path = tmp_path / "latest.json"
+    manifest_path.write_text("{not valid json", encoding="utf-8")
+    now = datetime(2026, 5, 28, 14, 0, 0, tzinfo=UTC)
+
+    result = build_charter_metrics(manifest_path=manifest_path, now=now)
+
+    backup = result["operational_floor"]["backup"]
+    assert backup["status"] == "missing"
+    assert "json invalid" in backup["error"]
+
+
+def test_malformed_missing_key(tmp_path):
+    # Missing required key `timestamp`
+    payload = {
+        "status": "ok", "integrity_check": "ok", "duration_ms": 100,
+    }
+    manifest_path = tmp_path / "latest.json"
+    _write_manifest(manifest_path, payload)
+    now = datetime(2026, 5, 28, 14, 0, 0, tzinfo=UTC)
+
+    result = build_charter_metrics(manifest_path=manifest_path, now=now)
+
+    backup = result["operational_floor"]["backup"]
+    assert backup["status"] == "missing"
+    assert "malformed: missing key 'timestamp'" in backup["error"]
+
+
+def test_malformed_missing_duration_ms(tmp_path):
+    payload = {
+        "status": "ok",
+        "timestamp": "2026-05-28T09:00:00+00:00",
+        "integrity_check": "ok",
+    }
+    manifest_path = tmp_path / "latest.json"
+    _write_manifest(manifest_path, payload)
+    now = datetime(2026, 5, 28, 14, 0, 0, tzinfo=UTC)
+
+    result = build_charter_metrics(manifest_path=manifest_path, now=now)
+
+    backup = result["operational_floor"]["backup"]
+    assert backup["status"] == "missing"
+    assert "missing key 'duration_ms'" in backup["error"]
