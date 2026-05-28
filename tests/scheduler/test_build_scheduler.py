@@ -12,7 +12,10 @@ from marketpulse.scheduler.jobs import build_scheduler
 
 def test_daily_critical_jobs_have_no_misfire_grace():
     sched = build_scheduler()
-    for job_id in ("paper_trading_tick", "outcome_computation", "flex_sync", "sector_backfill"):
+    for job_id in (
+        "paper_trading_tick", "outcome_computation", "flex_sync",
+        "sector_backfill", "db_backup",
+    ):
         job = sched.get_job(job_id)
         assert job is not None, f"missing job {job_id}"
         assert job.misfire_grace_time is None, (
@@ -30,3 +33,13 @@ def test_sector_backfill_job_registered():
     trigger_repr = str(job.trigger)
     # Daily at 04:00 UTC
     assert "hour='4'" in trigger_repr or "hour=4" in trigger_repr, trigger_repr
+
+
+def test_db_backup_job_registered():
+    """Charter top-3 priority #1: SQLite safety floor at 09:00 UTC daily."""
+    sched = build_scheduler()
+    job = sched.get_job("db_backup")
+    assert job is not None, "db_backup cron must be registered"
+    trigger_repr = str(job.trigger)
+    assert "hour='9'" in trigger_repr or "hour=9" in trigger_repr, trigger_repr
+    assert "minute='0'" in trigger_repr or "minute=0" in trigger_repr, trigger_repr

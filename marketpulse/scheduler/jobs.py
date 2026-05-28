@@ -1,4 +1,5 @@
 from datetime import UTC, date, datetime, time, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -124,6 +125,50 @@ def run_sector_backfill() -> None:
         log.info("sector_backfill_done", rows_filled=n)
     finally:
         db.close()
+
+
+def run_db_backup() -> None:
+    """Charter top-3 priority #1: SQLite safety floor.
+
+    Online snapshot of marketpulse.db to /data/backups/, integrity-check
+    the snapshot, update latest.json manifest, prune backups older than
+    7 days. See docs/superpowers/specs/2026-05-28-db-backup-design.md.
+
+    Never raises — a failed backup writes a status="failed" manifest and
+    logs a warning. The scheduler must not crash because of this job.
+    """
+    from marketpulse.ops.backup import (
+        MANIFEST_FILENAME,
+        prune_old_backups,
+        run_backup,
+        write_manifest,
+    )
+    settings = get_settings()
+    db_url = settings.database_url
+    if not db_url.startswith("sqlite:///"):
+        # No-op on non-sqlite (no current production target, but defensive
+        # for tests / future dev environments).
+        log.info("db_backup_skipped_not_sqlite", database_url=db_url)
+        return
+    source = Path(db_url.removeprefix("sqlite:///"))
+    backups_dir = source.parent / "backups"
+    log.info("db_backup_start", source=str(source), destination_dir=str(backups_dir))
+    result = run_backup(source=source, backups_dir=backups_dir)
+    write_manifest(
+        manifest_path=backups_dir / MANIFEST_FILENAME, result=result,
+    )
+    if result.status == "ok":
+        pruned = prune_old_backups(backups_dir=backups_dir)
+        log.info(
+            "db_backup_done",
+            destination=result.destination, size_bytes=result.size_bytes,
+            duration_ms=result.duration_ms, pruned=len(pruned),
+        )
+    else:
+        log.warning(
+            "db_backup_failed",
+            error=result.error, duration_ms=result.duration_ms,
+        )
 
 
 def run_news_purge() -> None:
@@ -506,6 +551,18 @@ def build_scheduler() -> BackgroundScheduler:
         run_sector_backfill,
         trigger=CronTrigger(hour=4, minute=0, timezone="UTC"),
         id="sector_backfill",
+        replace_existing=True,
+        misfire_grace_time=None,
+        coalesce=True,
+    )
+    # Charter top-3 priority #1: SQLite safety floor. Daily 09:00 UTC
+    # snapshot (= 05:00 NY pre-market) — low-traffic window, before any
+    # paper_trading_tick activity. misfire_grace_time=None + coalesce
+    # so a missed run during deploy gets caught up on next start.
+    sched.add_job(
+        run_db_backup,
+        trigger=CronTrigger(hour=9, minute=0, timezone="UTC"),
+        id="db_backup",
         replace_existing=True,
         misfire_grace_time=None,
         coalesce=True,
