@@ -26,6 +26,10 @@ don't pay the full yfinance round-trip again.
 from __future__ import annotations
 
 import logging
+import os
+import tempfile
+import threading
+from contextlib import suppress
 from pathlib import Path
 
 from marketpulse.backtest.sector import (
@@ -39,9 +43,10 @@ from marketpulse.backtest.sector import (
 
 log = logging.getLogger(__name__)
 
-__all__ = ["strict_sector"]
+__all__ = ["safe_sector", "strict_sector"]
 
 _PERSISTED_LOADED = False
+_PERSIST_LOCK = threading.Lock()
 
 
 class _LazyYfSectorClient:
@@ -51,7 +56,7 @@ class _LazyYfSectorClient:
     backtest/sector.get_sector(yf_client=...). Returns None on any failure
     so the caller's fail-closed path fires. Successful lookups are cached
     in-process via _SECTOR_CACHE (populated by get_sector) and persisted
-    to disk by strict_sector after each call.
+    to disk by strict_sector / safe_sector after each call.
     """
 
     def get_sector(self, ticker: str) -> str | None:  # noqa: D401
@@ -78,12 +83,13 @@ def _ensure_persisted_loaded() -> None:
     """Lazy-load data/sector_cache.json into _SECTOR_CACHE once per process.
 
     Survives container restarts: lookups persisted last session avoid the
-    yfinance round-trip on first cron tick after restart.
+    yfinance round-trip on first cron tick after restart. The loaded flag
+    is set only after a successful read so transient filesystem errors can
+    retry on the next call.
     """
     global _PERSISTED_LOADED
     if _PERSISTED_LOADED:
         return
-    _PERSISTED_LOADED = True
     try:
         loaded = load_sector_cache(_CACHE_PATH)
     except Exception as exc:  # noqa: BLE001
@@ -91,9 +97,31 @@ def _ensure_persisted_loaded() -> None:
         return
     for t, s in loaded.items():
         _SECTOR_CACHE.setdefault(t, s)
+    _PERSISTED_LOADED = True
 
 
-def strict_sector(ticker: str) -> str | None:
+def _atomic_save_cache() -> None:
+    """Persist _SECTOR_CACHE with an atomic same-directory replace."""
+    target = _CACHE_PATH
+    snapshot = dict(_SECTOR_CACHE)
+    with _PERSIST_LOCK:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            prefix=".sector_cache.",
+            suffix=".json.tmp",
+            dir=str(target.parent),
+        )
+        os.close(tmp_fd)
+        try:
+            save_sector_cache(snapshot, Path(tmp_path))
+            os.replace(tmp_path, target)
+        except Exception:
+            with suppress(OSError):
+                os.unlink(tmp_path)
+            raise
+
+
+def _resolve(ticker: str) -> str:
     _ensure_persisted_loaded()
     before = _SECTOR_CACHE.get(ticker)
     s = _get_sector(ticker, yf_client=_YF_CLIENT)
@@ -103,9 +131,23 @@ def strict_sector(ticker: str) -> str | None:
     after = _SECTOR_CACHE.get(ticker)
     if before is None and after is not None:
         try:
-            save_sector_cache(_SECTOR_CACHE, _CACHE_PATH)
+            _atomic_save_cache()
         except Exception as exc:  # noqa: BLE001
             log.warning("strict_sector cache save failed: %s", exc)
+    return s
+
+
+def strict_sector(ticker: str) -> str | None:
+    s = _resolve(ticker)
     if not s or s == "unknown":
         return None
     return s
+
+
+def safe_sector(ticker: str) -> str:
+    """Allocator-facing sector provider using the same resolution chain.
+
+    The allocator wants a string bucket, while the gate wants None to
+    fail closed. Keep both paths on the same YAML/cache/yfinance policy.
+    """
+    return _resolve(ticker) or "unknown"

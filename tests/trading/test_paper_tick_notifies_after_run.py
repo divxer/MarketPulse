@@ -101,6 +101,31 @@ def test_paper_trading_tick_job_default_notifier_is_settings_driven(
     module.paper_trading_tick_job()
 
 
+def test_paper_trading_tick_job_passes_safe_sector_to_daily_cycle(
+    patched_scheduler,
+    monkeypatch,
+):
+    module, _ = patched_scheduler
+    captured = {}
+
+    def fake_run(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            tick_date=date(2026, 5, 22),
+            orders_placed=0,
+            exits_materialized=0,
+            entries_materialized=0,
+            tick_errors=(),
+        )
+
+    monkeypatch.setattr(module.daily_cycle, "run", fake_run)
+    monkeypatch.setattr(module, "notify_paper_tick_events", lambda **kwargs: None)
+
+    module.paper_trading_tick_job(notifier=CapturingNotifier())
+
+    assert captured["sector_provider"] is module.rg.safe_sector
+
+
 def test_paper_trading_tick_job_signature_compatible_with_apscheduler():
     from marketpulse.scheduler.paper_trading_tick import paper_trading_tick_job
 

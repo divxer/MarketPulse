@@ -16,7 +16,6 @@ from pathlib import Path
 
 from marketpulse.alerts.notifier import Notifier, get_notifier_from_settings
 from marketpulse.backtest.allocation import allocate_for_day
-from marketpulse.backtest.sector import get_sector
 from marketpulse.config import get_settings
 from marketpulse.data.yfinance_client import YFinanceClient
 from marketpulse.db.base import session_scope
@@ -91,7 +90,11 @@ def paper_trading_tick_job(*, notifier: Notifier | None = None) -> None:
             daily_curves={},
             daily_strategy_contribution_returns={},
             daily_pool_returns=[],
-            sector_provider=get_sector,
+            # Keep allocator sector resolution aligned with SectorExposureGate:
+            # YAML overrides, persisted cache, then yfinance fallback. The
+            # allocator contract wants a string, so safe_sector returns
+            # "unknown" where strict_sector returns None for fail-closed gates.
+            sector_provider=rg.safe_sector,
         )
         log.info(
             "paper_trading_tick done: tick_date=%s placed=%d exits=%d entries=%d errors=%d",
