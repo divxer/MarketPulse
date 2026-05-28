@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
@@ -6,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from marketpulse.ai.service import AiService
 from marketpulse.data.service import DataService
+from marketpulse.db.base import session_scope
 from marketpulse.db.models import Holding
 from marketpulse.holdings.dividends import (
     DividendError,
@@ -38,6 +40,29 @@ router = APIRouter()
 log = get_logger(__name__)
 
 
+def _enrich_route_holdings(
+    holdings: list[Holding],
+    data: DataService,
+) -> list[dict]:
+    if not isinstance(data, DataService):
+        return enrich_holdings(holdings, data)
+
+    @contextmanager
+    def worker_data_service():
+        gen = session_scope()
+        worker_db = next(gen)
+        try:
+            yield DataService(
+                worker_db,
+                data.yf,
+                news_ttl_days=data.news_cache.ttl_days,
+            )
+        finally:
+            gen.close()
+
+    return enrich_holdings(holdings, data, data_factory=worker_data_service)
+
+
 @router.get("/holdings", response_class=HTMLResponse)
 def holdings_page(
     request: Request,
@@ -50,7 +75,7 @@ def holdings_page(
     # calls @ ~1-2s each). NULL sectors now render as "未分类" until the
     # next scheduler tick fills them in.
     holdings = db.query(Holding).order_by(Holding.sort_order, Holding.id).all()
-    rows = enrich_holdings(holdings, data)
+    rows = _enrich_route_holdings(holdings, data)
     totals = compute_totals(rows)
     dividends_by_ticker = per_ticker_dividends(db)
     for r in rows:
@@ -197,7 +222,7 @@ def holdings_risk_analysis(
             {"analysis_markdown": "暂无持仓,无需风险分析。", "generated_at": None},
         )
 
-    rows = enrich_holdings(holdings, data)
+    rows = _enrich_route_holdings(holdings, data)
     totals = compute_totals(rows)
     allocation = allocation_breakdown(rows)
     realized = total_realized_pl(db)
@@ -257,7 +282,7 @@ def holdings_export_csv(
         holdings = db.query(Holding).order_by(Holding.sort_order, Holding.id).all()
         if not holdings:
             return
-        rows = enrich_holdings(holdings, data)
+        rows = _enrich_route_holdings(holdings, data)
         divs_by_ticker = per_ticker_dividends(db)
         for r in rows:
             divs = divs_by_ticker.get(r["ticker"], 0.0)
