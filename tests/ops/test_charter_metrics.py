@@ -209,3 +209,65 @@ def test_malformed_invalid_status(tmp_path):
     backup = result["operational_floor"]["backup"]
     assert backup["status"] == "missing"
     assert "invalid status" in backup["error"]
+
+
+def test_ok_stale(tmp_path):
+    manifest_time = datetime(2026, 5, 27, 9, 0, 0, tzinfo=UTC)
+    now = manifest_time + timedelta(hours=26)  # > 25h threshold
+    manifest_path = tmp_path / "latest.json"
+    _write_manifest(manifest_path, _ok_manifest(when=manifest_time))
+
+    result = build_charter_metrics(manifest_path=manifest_path, now=now)
+
+    backup = result["operational_floor"]["backup"]
+    assert backup["status"] == "ok"
+    assert backup["is_stale"] is True
+
+
+def test_failed_recent(tmp_path):
+    manifest_time = datetime(2026, 5, 28, 9, 0, 0, tzinfo=UTC)
+    now = manifest_time + timedelta(hours=1)
+    failed_payload = {
+        "status": "failed",
+        "timestamp": manifest_time.isoformat(),
+        "source": "/data/marketpulse.db",
+        "destination": None,
+        "size_bytes": None,
+        "integrity_check": "not_run",
+        "duration_ms": 42,
+        "error": "OSError: disk full",
+    }
+    manifest_path = tmp_path / "latest.json"
+    _write_manifest(manifest_path, failed_payload)
+
+    result = build_charter_metrics(manifest_path=manifest_path, now=now)
+
+    backup = result["operational_floor"]["backup"]
+    assert backup["status"] == "failed"
+    assert backup["is_stale"] is False
+    assert backup["error"] == "OSError: disk full"
+    assert backup["integrity_check"] == "not_run"
+
+
+def test_failed_stale(tmp_path):
+    manifest_time = datetime(2026, 5, 26, 9, 0, 0, tzinfo=UTC)
+    now = manifest_time + timedelta(hours=48)
+    failed_payload = {
+        "status": "failed",
+        "timestamp": manifest_time.isoformat(),
+        "source": "/data/marketpulse.db",
+        "destination": None,
+        "size_bytes": None,
+        "integrity_check": "not_run",
+        "duration_ms": 5,
+        "error": "permission denied",
+    }
+    manifest_path = tmp_path / "latest.json"
+    _write_manifest(manifest_path, failed_payload)
+
+    result = build_charter_metrics(manifest_path=manifest_path, now=now)
+
+    backup = result["operational_floor"]["backup"]
+    assert backup["status"] == "failed"
+    assert backup["is_stale"] is True
+    assert backup["error"] == "permission denied"
