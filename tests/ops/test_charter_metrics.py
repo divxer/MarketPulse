@@ -271,3 +271,70 @@ def test_failed_stale(tmp_path):
     assert backup["status"] == "failed"
     assert backup["is_stale"] is True
     assert backup["error"] == "permission denied"
+
+
+def test_backup_unavailable_reason(tmp_path):
+    # Even if manifest exists, reason kwarg short-circuits the read.
+    manifest_path = tmp_path / "latest.json"
+    _write_manifest(manifest_path, _ok_manifest(
+        when=datetime(2026, 5, 28, 9, 0, 0, tzinfo=UTC),
+    ))
+    now = datetime(2026, 5, 28, 14, 0, 0, tzinfo=UTC)
+
+    result = build_charter_metrics(
+        manifest_path=manifest_path,
+        now=now,
+        backup_unavailable_reason="sqlite database_url required for backup manifest discovery",
+    )
+
+    backup = result["operational_floor"]["backup"]
+    assert backup["status"] == "missing"
+    assert backup["is_stale"] is True
+    assert backup["error"] == (
+        "sqlite database_url required for backup manifest discovery"
+    )
+    # Confirm manifest fields were NOT read (would have been "ok").
+    assert backup["last_backup_at"] is None
+
+
+def test_schema_v1_lock(tmp_path):
+    """Top-level: required-subset (PR3-expandable).
+    operational_floor.backup: exact-set (locked)."""
+    manifest_time = datetime(2026, 5, 28, 9, 0, 0, tzinfo=UTC)
+    now = manifest_time + timedelta(hours=1)
+    manifest_path = tmp_path / "latest.json"
+    _write_manifest(manifest_path, _ok_manifest(when=manifest_time))
+
+    result = build_charter_metrics(manifest_path=manifest_path, now=now)
+
+    required_top_level = {
+        "schema_version", "timestamp",
+        "operational_floor", "north_star", "diagnostics",
+    }
+    assert required_top_level.issubset(result.keys())
+
+    expected_backup_keys = {
+        "status", "is_stale", "stale_after_hours",
+        "last_backup_at", "source", "destination", "size_bytes",
+        "integrity_check", "duration_ms", "error",
+    }
+    assert set(result["operational_floor"]["backup"].keys()) == expected_backup_keys
+
+
+def test_north_star_diagnostics_placeholders(tmp_path):
+    manifest_path = tmp_path / "missing.json"
+    now = datetime(2026, 5, 28, 14, 0, 0, tzinfo=UTC)
+
+    result = build_charter_metrics(manifest_path=manifest_path, now=now)
+
+    assert result["north_star"] == {"status": "not_implemented"}
+    assert result["diagnostics"] == {"status": "not_implemented"}
+
+
+def test_timestamp_uses_injected_now(tmp_path):
+    manifest_path = tmp_path / "missing.json"
+    now = datetime(2026, 5, 28, 14, 30, 45, 123456, tzinfo=UTC)
+
+    result = build_charter_metrics(manifest_path=manifest_path, now=now)
+
+    assert result["timestamp"] == now.isoformat()
