@@ -139,6 +139,7 @@ def create_app() -> FastAPI:
         auth,
         backtest,
         broker,
+        charter,
         health,
         holdings,
         home,
@@ -164,6 +165,7 @@ def create_app() -> FastAPI:
     app.include_router(backtest.router)
     app.include_router(broker.router)
     app.include_router(reconcile.router)
+    app.include_router(charter.router)
 
     from fastapi import HTTPException
 
