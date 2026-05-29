@@ -87,3 +87,107 @@ def test_force_replace_snapshot(db_session):
 
 def test_get_latest_snapshot_empty(db_session):
     assert get_latest_snapshot(db_session) is None
+
+
+from marketpulse.portfolio.snapshot_repo import (
+    count_snapshots_in_window,
+    get_earliest_snapshot,
+    get_recent_snapshot_dates,
+    get_snapshot_series,
+    get_spy_anchor,
+)
+
+
+def test_get_snapshot_series_range_ascending(db_session):
+    for i in range(5):
+        insert_snapshot(db_session, _make_snapshot(date(2026, 5, 24 + i)))
+    db_session.commit()
+    series = get_snapshot_series(
+        db_session,
+        window_start=date(2026, 5, 25),
+        window_end=date(2026, 5, 27),
+    )
+    assert [s.trading_date for s in series] == [
+        date(2026, 5, 25), date(2026, 5, 26), date(2026, 5, 27),
+    ]
+
+
+def test_get_recent_snapshot_dates_ascending(db_session):
+    for i in range(40):
+        insert_snapshot(db_session, _make_snapshot(date(2026, 4, 1) + __import__("datetime").timedelta(days=i)))
+    db_session.commit()
+    dates = get_recent_snapshot_dates(db_session, limit=30)
+    assert len(dates) == 30
+    assert dates == sorted(dates)
+    # Should be the most-recent 30 (last 30 calendar dates inserted).
+    from datetime import timedelta
+    expected_first = date(2026, 4, 1) + timedelta(days=40 - 30)
+    assert dates[0] == expected_first
+
+
+def test_count_snapshots_in_window_caps_at_size(db_session):
+    """200 snapshots → window_size=90 returns 90 (trading-day cap, L11)."""
+    from datetime import timedelta
+    base = date(2026, 1, 1)
+    for i in range(200):
+        insert_snapshot(db_session, _make_snapshot(base + timedelta(days=i)))
+    db_session.commit()
+    count = count_snapshots_in_window(
+        db_session, window_end=base + timedelta(days=199), window_size=90,
+    )
+    assert count == 90
+
+
+def test_count_snapshots_in_window_below_cap(db_session):
+    """12 snapshots → window_size=90 returns 12."""
+    from datetime import timedelta
+    base = date(2026, 1, 1)
+    for i in range(12):
+        insert_snapshot(db_session, _make_snapshot(base + timedelta(days=i)))
+    db_session.commit()
+    count = count_snapshots_in_window(
+        db_session, window_end=base + timedelta(days=11), window_size=90,
+    )
+    assert count == 12
+
+
+def test_get_spy_anchor_none_when_no_anchors(db_session):
+    insert_snapshot(db_session, _make_snapshot(date(2026, 5, 28)))
+    db_session.commit()
+    assert get_spy_anchor(db_session) is None
+
+
+def test_get_spy_anchor_returns_earliest_non_null(db_session):
+    """L16: earliest snapshot with non-null anchor_spy_close."""
+    from marketpulse.db.models import PaperNavSnapshot
+
+    # Day 1: no SPY (null anchor)
+    insert_snapshot(db_session, _make_snapshot(date(2026, 5, 26)))
+    # Day 2: SPY available — set anchor_spy_close explicitly
+    insert_snapshot(db_session, _make_snapshot(date(2026, 5, 27)))
+    row = db_session.get(PaperNavSnapshot, date(2026, 5, 27))
+    row.anchor_spy_close = Decimal("500")
+    row.spy_close = Decimal("500")
+    # Day 3: also SPY available
+    insert_snapshot(db_session, _make_snapshot(date(2026, 5, 28)))
+    row3 = db_session.get(PaperNavSnapshot, date(2026, 5, 28))
+    row3.anchor_spy_close = Decimal("500")
+    row3.spy_close = Decimal("505")
+    db_session.commit()
+
+    anchor = get_spy_anchor(db_session)
+    assert anchor == Decimal("500")
+
+
+def test_get_earliest_snapshot_empty(db_session):
+    assert get_earliest_snapshot(db_session) is None
+
+
+def test_get_earliest_snapshot_returns_first(db_session):
+    insert_snapshot(db_session, _make_snapshot(date(2026, 5, 27), nav="111"))
+    insert_snapshot(db_session, _make_snapshot(date(2026, 5, 26), nav="222"))
+    insert_snapshot(db_session, _make_snapshot(date(2026, 5, 28), nav="333"))
+    db_session.commit()
+    earliest = get_earliest_snapshot(db_session)
+    assert earliest.trading_date == date(2026, 5, 26)
+    assert earliest.portfolio_nav == Decimal("222")
