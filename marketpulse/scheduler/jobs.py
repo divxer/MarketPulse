@@ -141,7 +141,13 @@ def _run_nav_snapshot_safely(session, *, tick_date) -> None:
     """
     try:
         run_nav_snapshot(session, trading_date=tick_date)
+        # The runner only add()+flush()es; session_scope/the tick wrapper do
+        # NOT commit on close, so without this commit the snapshot is rolled
+        # back when the tick session closes (prod: ticks ran but
+        # paper_nav_snapshot stayed empty). Commit so the row persists.
+        session.commit()
     except Exception as exc:  # noqa: BLE001
+        session.rollback()
         log.warning(
             "nav_snapshot_failed",
             extra={"tick_date": str(tick_date), "exception": str(exc)},
