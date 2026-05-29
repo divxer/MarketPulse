@@ -14,6 +14,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import and_
+from sqlalchemy import func as _func
+from sqlalchemy import select as _select
 from sqlalchemy.orm import Session
 
 from marketpulse.portfolio.snapshot_repo import (
@@ -100,6 +103,128 @@ def build_north_star_section(
     }
 
 
+def _empty_diagnostic() -> dict[str, Any]:
+    return {
+        "value": None,
+        "observations": 0,
+        "required_observations": DIAGNOSTICS_REQUIRED,
+        "coverage_ratio": 0,
+        "is_sufficient": False,
+    }
+
+
+def _empty_diagnostics() -> dict[str, Any]:
+    return {
+        "tick_success_rate_30d": _empty_diagnostic(),
+        "order_rejection_rate_30d": _empty_diagnostic(),
+        "paper_trade_count_30d": _empty_diagnostic(),
+    }
+
+
+def build_diagnostics_section(
+    session: Session | None, *, now,  # noqa: ARG001
+) -> dict[str, Any]:
+    """L11: window = last 30 snapshot trading_dates (or all if fewer).
+    L17: ratios → float. DB-backed builder (NOT pure)."""
+    if session is None:
+        return _empty_diagnostics()
+
+    recent = get_recent_snapshot_dates(session, limit=DIAGNOSTICS_REQUIRED)
+    if not recent:
+        return _empty_diagnostics()
+
+    from datetime import datetime as _dt, time as _time
+    window_start_eod = _dt.combine(recent[0], _time.min, tzinfo=UTC)
+    window_end_eod = _dt.combine(recent[-1], _time.max, tzinfo=UTC)
+    snapshot_count = len(recent)
+    coverage_ratio = min(snapshot_count / DIAGNOSTICS_REQUIRED, 1.0)
+    is_sufficient = snapshot_count >= DIAGNOSTICS_REQUIRED
+
+    from marketpulse.db.models import (
+        PaperAuditEvent as _Audit,
+        PaperFill as _Fill,
+    )
+
+    # 1. tick_success_rate_30d
+    tick_completed = session.scalar(
+        _select(_func.count(_Audit.id)).where(
+            and_(
+                _Audit.event_type == "TICK_COMPLETED",
+                _Audit.timestamp >= window_start_eod,
+                _Audit.timestamp <= window_end_eod,
+            ),
+        ),
+    ) or 0
+    engine_error = session.scalar(
+        _select(_func.count(_Audit.id)).where(
+            and_(
+                _Audit.event_type == "ENGINE_INVARIANT_ERROR",
+                _Audit.timestamp >= window_start_eod,
+                _Audit.timestamp <= window_end_eod,
+            ),
+        ),
+    ) or 0
+    tick_total = tick_completed + engine_error
+    tick_dict = _empty_diagnostic()
+    if tick_total > 0:
+        tick_dict["value"] = tick_completed / tick_total
+        tick_dict["observations"] = tick_total
+        tick_dict["coverage_ratio"] = min(tick_total / DIAGNOSTICS_REQUIRED, 1.0)
+        tick_dict["is_sufficient"] = tick_total >= DIAGNOSTICS_REQUIRED
+
+    # 2. order_rejection_rate_30d (L12: PLACED + REJECTED mutually exclusive)
+    placed = session.scalar(
+        _select(_func.count(_Audit.id)).where(
+            and_(
+                _Audit.event_type == "ORDER_PLACED",
+                _Audit.timestamp >= window_start_eod,
+                _Audit.timestamp <= window_end_eod,
+            ),
+        ),
+    ) or 0
+    rejected = session.scalar(
+        _select(_func.count(_Audit.id)).where(
+            and_(
+                _Audit.event_type == "ORDER_REJECTED",
+                _Audit.timestamp >= window_start_eod,
+                _Audit.timestamp <= window_end_eod,
+            ),
+        ),
+    ) or 0
+    decisions = placed + rejected
+    rej_dict = _empty_diagnostic()
+    if decisions > 0:
+        rej_dict["value"] = rejected / decisions
+        rej_dict["observations"] = decisions
+        rej_dict["coverage_ratio"] = min(decisions / DIAGNOSTICS_REQUIRED, 1.0)
+        rej_dict["is_sufficient"] = decisions >= DIAGNOSTICS_REQUIRED
+
+    # 3. paper_trade_count_30d (L13: paper_fill ENTRY rows)
+    trade_count = session.scalar(
+        _select(_func.count(_Fill.id)).where(
+            and_(
+                _Fill.side == "ENTRY",
+                _Fill.position_id.is_not(None),
+                _Fill.filled_at >= window_start_eod,
+                _Fill.filled_at <= window_end_eod,
+            ),
+        ),
+    ) or 0
+    trade_dict = {
+        "value": int(trade_count),
+        "observations": snapshot_count,
+        "required_observations": DIAGNOSTICS_REQUIRED,
+        "coverage_ratio": coverage_ratio,
+        "is_sufficient": is_sufficient,
+    }
+
+    return {
+        "tick_success_rate_30d": tick_dict,
+        "order_rejection_rate_30d": rej_dict,
+        "paper_trade_count_30d": trade_dict,
+    }
+
+
 def build_charter_metrics(
     *,
     manifest_path: Path,
@@ -118,7 +243,7 @@ def build_charter_metrics(
         "timestamp": now.isoformat(),
         "operational_floor": {"backup": backup},
         "north_star": build_north_star_section(session, now=now),
-        "diagnostics": {"status": "not_implemented"},
+        "diagnostics": build_diagnostics_section(session, now=now),
     }
 
 

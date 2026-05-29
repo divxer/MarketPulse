@@ -321,17 +321,18 @@ def test_schema_v1_lock(tmp_path):
     assert set(result["operational_floor"]["backup"].keys()) == expected_backup_keys
 
 
-def test_north_star_section_present(tmp_path):
+def test_north_star_diagnostics_sections_present(tmp_path):
     manifest_path = tmp_path / "missing.json"
     now = datetime(2026, 5, 28, 14, 0, 0, tzinfo=UTC)
 
     result = build_charter_metrics(manifest_path=manifest_path, now=now)
 
-    # session=None (default) → db_session_unavailable fallback
+    # session=None (default) → db_session_unavailable / empty diagnostics
     assert result["north_star"]["error"] == "db_session_unavailable"
     assert result["north_star"]["value"] is None
-    # diagnostics still placeholder for Task 11
-    assert result["diagnostics"] == {"status": "not_implemented"}
+    assert "tick_success_rate_30d" in result["diagnostics"]
+    assert "order_rejection_rate_30d" in result["diagnostics"]
+    assert "paper_trade_count_30d" in result["diagnostics"]
 
 
 def test_timestamp_uses_injected_now(tmp_path):
