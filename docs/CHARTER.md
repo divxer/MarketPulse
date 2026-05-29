@@ -91,6 +91,28 @@ Marked archived; no new work, existing code may stay until next cleanup.
 - **Phase 8b ML predictions** — gated on the 8a+8b shadow experiment (above) showing statistically meaningful improvement in `ai_verdict_hit_rate_h5`. If no meaningful improvement after sufficient sample accumulation, 8b is abandoned and 8a stays parked/frozen. "Statistically meaningful" and "sufficient sample" are experiment-plan decisions made at unpark.
 - **6e ShadowPoolOptimizer** — gated on the north-star metric stagnating near zero. If `paper_portfolio_excess_return_vs_spy_90d` stays in [-2%, +2%] over a sustained period, the optimizer becomes the next priority (the heuristic-to-optimal residual is then a candidate for non-trivial alpha). The exact "sustained period" is a re-evaluation parameter, not charter-locked.
 
+### Future research-platform options — PARKED (evaluated 2026-05-29)
+
+**Status:** Parked — not under consideration. Not a permanent rejection; "not now, show me the trigger."
+
+**Options reviewed:** Qlib (MS, ML/factor research), QuantConnect Lean (full backtest+live platform), Backtrader (Python backtest).
+
+**Verdict: No adoption.** Build-vs-buy is the wrong axis right now — the binding constraint is **evidence of edge, not research infrastructure**. Specifics:
+- The "save 6–12 months" framing is a greenfield claim; this system is 7 phases deep (paper engine, evaluation framework, IBKR sync, dashboard all exist). The marginal move would be *integration/migration*, which **adds** time.
+- Qlib solves factor discovery / alpha mining — a capability whose *absence is not the current bottleneck*. Adding it now is complexity on an unvalidated system (the Charter anti-pattern).
+- Backtrader would *replace* the working, tested Phase 4/5 engine (re-platforming) and is effectively unmaintained since ~2021 — a downgrade.
+- Lean migration: re-platforming working code; rejected.
+- The advice "don't rewrite backtest/metrics/indicators from scratch" is already satisfied (Phase 4/5 uses `empyrical`); it is not a reason to add anything.
+
+**Reconsideration trigger — ALL must hold:**
+1. North-star has ≥ 30 valid trading days (`paper_nav_snapshot`).
+2. The measurement loop is stable and trusted.
+3. The existing strategy set + allocator are validated against SPY.
+4. Performance sits in the Charter stagnation band ([-2%, +2%], per 6e) — i.e. a real research bottleneck, not an infra gap.
+5. A concrete research bottleneck has been named.
+
+Until then: P0/P1 unchanged; **no migration, integration, or evaluation work is authorized.** Anyone re-proposing Qlib / Lean / Backtrader can be answered with: *evaluated 2026-05-29, verdict no adoption, trigger required.*
+
 ---
 
 ## Operational unlock conditions
