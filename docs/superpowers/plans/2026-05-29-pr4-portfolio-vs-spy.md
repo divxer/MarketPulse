@@ -400,7 +400,7 @@ Expected: PASS (all chart_run tests + Task 2 formatters).
 
 ```bash
 git add marketpulse/portfolio/portfolio_vs_spy_view.py tests/portfolio/test_portfolio_vs_spy_view.py
-git commit -m "feat(pr4): _compute_chart_run contiguous suffix + prefix/gap accounting (L2,L15)"
+git commit -m "feat(pr4): _compute_chart_run contiguous chart run + prefix/gap accounting (L2,L15)"
 ```
 
 ---
@@ -589,6 +589,12 @@ def _build_chart_data(chart_run: list[NavSnapshot]) -> ChartData:
     """
     plotted = _downsample(chart_run)
     n = len(plotted)
+    # chart_run only contains all-three-non-null rows (L2); narrow for the type
+    # checker so the Decimal arithmetic below sees no `| None`.
+    for s in plotted:
+        assert s.portfolio_index is not None
+        assert s.spy_index is not None
+        assert s.excess_return is not None
     port_vals = [s.portfolio_index for s in plotted]
     spy_vals = [s.spy_index for s in plotted]
     exc_vals = [s.excess_return for s in plotted]
