@@ -688,15 +688,16 @@ def _settings(monkeypatch, **over):
 
 def test_disabled_records_disabled_summary_no_analyze(wired, monkeypatch):
     _settings(monkeypatch, ai_eval_enabled=False)
-    fake_ai = MagicMock()
-    monkeypatch.setattr(jobs_mod, "AiService", lambda *a, **kw: fake_ai)
+    ai_factory = MagicMock(return_value=MagicMock())   # the AiService class itself
+    monkeypatch.setattr(jobs_mod, "AiService", ai_factory)
 
     run_eval_analysis_job()
 
     from marketpulse.scheduler.eval_state import get_eval_last_run_summary
     got = get_eval_last_run_summary(wired)
     assert got["status"] == "disabled"
-    fake_ai.analyze.assert_not_called()
+    ai_factory.assert_not_called()                     # AiService never even constructed
+    ai_factory.return_value.analyze.assert_not_called()
 
 
 def test_happy_path_records_ok(wired, monkeypatch):
@@ -820,7 +821,10 @@ def run_eval_analysis_job() -> None:
             except Exception as exc:
                 log.warning("ai_eval_summary_persist_failed", error=str(exc))
         if gen is not None:
-            gen.close()                              # runs the generator's finally → db.close()
+            try:
+                gen.close()                          # runs the generator's finally → db.close()
+            except Exception:                        # never mask the real outcome
+                pass
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -1035,6 +1039,13 @@ git commit -m "chore(task-57): final integration — full suite + ruff clean" ||
 3. Watch `/health/scheduler` for the first `status="ok"` summary; confirm
    `analyzed_fresh ≈ universe_size`, `errors=0`.
 4. After ~5 sessions, confirm `/lab/ai-track` h1/h5 outcome counts grow materially.
+
+**PR-description note:** `misfire_grace_time=None` + `coalesce=True` mean a missed
+run (e.g. container restarting past 21:00 UTC) is caught up as **one** run on next
+boot — this is "don't silently skip the job," NOT a historical as-of backfill. A
+catch-up run analyzes the *current* market state under the current `run_date`
+(`analyze()` uses live quotes), so it produces a fresh verdict for that calendar
+slot, not a reconstruction of the missed day.
 
 ---
 
