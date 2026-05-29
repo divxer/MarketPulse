@@ -23,10 +23,10 @@
 | `marketpulse/ops/charter_review_aggregator.py` (new) | db | `build_payload` + private helpers. DB read-only. |
 | `marketpulse/ops/charter_review.py` (new) | orchestration | `generate_charter_review`, `_read_backup_manifest`, `_atomic_write_text`, `CharterReviewError`, success log (L20). |
 | `marketpulse/scheduler/jobs.py` (modify) | scheduler | Add `run_charter_review_weekly`, `_last_sunday_on_or_before`, register cron in `build_scheduler`. |
-| `tests/ops/test_charter_review_renderer.py` (new) | test | 13 renderer tests. |
-| `tests/ops/test_charter_review_aggregator.py` (new) | test | 14 aggregator tests. |
-| `tests/ops/test_charter_review_orchestration.py` (new) | test | 10 orchestration tests. |
-| `tests/scheduler/test_charter_review_scheduler.py` (new) | test | 4 scheduler tests. |
+| `tests/ops/test_charter_review_renderer.py` (new) | test | Formatting primitives (pct / int / index / delta) + reason normalization + full section integration. |
+| `tests/ops/test_charter_review_aggregator.py` (new) | test | Payload assembly + diagnostics + null-observation handling + L19 normalization. |
+| `tests/ops/test_charter_review_orchestration.py` (new) | test | Manifest read + atomic write + `generate_charter_review` flow + rollback. |
+| `tests/scheduler/test_charter_review_scheduler.py` (new) | test | Cron-driver isolation + SQLite detection (incl. `sqlite+pysqlite`). |
 | `tests/scheduler/test_build_scheduler.py` (modify) | test | Extend daily-critical-jobs lock + add registration test. |
 
 ---
@@ -468,7 +468,7 @@ def render_charter_review(*, payload: CharterReviewPayload) -> str:
 - [ ] **Step 4: Verify passing**
 
 Run: `uv run pytest tests/ops/test_charter_review_renderer.py -v`
-Expected: PASS — 12 primitive tests pass; `render_charter_review` not exercised yet.
+Expected: PASS — all primitive formatting tests pass (`_fmt_pct`, `_fmt_int`, `_fmt_index`, `_fmt_delta_pp`, `_fmt_delta_int`, `_fmt_delta_index`). `render_charter_review` not exercised yet.
 
 - [ ] **Step 5: Commit**
 
@@ -532,7 +532,7 @@ Expected: FAIL — `_fmt_reason` not defined.
 
 - [ ] **Step 3: Implement `_fmt_reason`**
 
-Insert into `marketpulse/ops/charter_review_renderer.py` (after `_fmt_delta_int`, before `render_charter_review`):
+Insert into `marketpulse/ops/charter_review_renderer.py` AFTER all formatting primitives (`_fmt_pct`, `_fmt_int`, `_fmt_delta_pp`, `_fmt_delta_int`, `_fmt_index`, `_fmt_delta_index`) and BEFORE the section helpers (`_section_*`, added in Task 4):
 
 ```python
 def _fmt_reason(reason: str) -> str:
