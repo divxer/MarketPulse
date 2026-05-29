@@ -77,3 +77,14 @@ def test_nav_contains_all_lab_links(client, monkeypatch):
         "/lab/paper-trading", "/lab/broker", "/lab/reconcile",
     ):
         assert f'href="{href}"' in r.text
+
+
+def test_page_width_matches_lab_group(client, monkeypatch):
+    """The page (and its nav) must use the lab-group width max-w-[2400px],
+    not base's max-w-5xl — otherwise the frame/nav width jumps when switching
+    between this page and sibling lab pages."""
+    _login(client, monkeypatch)
+    r = client.get("/lab/portfolio-vs-spy")
+    assert r.status_code == 200
+    assert "max-w-[2400px]" in r.text
+    assert "max-w-5xl" not in r.text
