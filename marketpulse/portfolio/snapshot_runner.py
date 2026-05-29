@@ -11,7 +11,7 @@ import logging
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from marketpulse.db.models import (
@@ -81,9 +81,35 @@ def _read_open_positions(
 
 
 def _read_price_lookup(session: Session, trading_date: date):
-    """L5/L19: price_cache.close as-is; Float → Decimal at the boundary."""
+    """Mark-to-last-available-close: latest close per ticker ON OR BEFORE
+    trading_date.
+
+    `price_cache` lags ~1 trading day — the daily fetch runs mid-session and
+    yfinance only publishes COMPLETED daily bars, so the current day's close
+    is not in the cache when the snapshot runs. An exact-date match
+    (`date == trading_date`) would therefore leave every same-day snapshot
+    degenerate (all positions unpriced, SPY None). Using the latest close
+    `<= trading_date` values positions/SPY at their last known close — the
+    standard EOD-NAV "mark to last available price" convention. The `<=`
+    bound (never `>`) prevents lookahead bias. Float → Decimal at the boundary.
+    """
+    latest = (
+        select(
+            PriceCacheEntry.ticker,
+            func.max(PriceCacheEntry.date).label("max_date"),
+        )
+        .where(PriceCacheEntry.date <= trading_date)
+        .group_by(PriceCacheEntry.ticker)
+        .subquery()
+    )
     rows = session.scalars(
-        select(PriceCacheEntry).where(PriceCacheEntry.date == trading_date),
+        select(PriceCacheEntry).join(
+            latest,
+            and_(
+                PriceCacheEntry.ticker == latest.c.ticker,
+                PriceCacheEntry.date == latest.c.max_date,
+            ),
+        ),
     ).all()
     table = {r.ticker: Decimal(str(r.close)) for r in rows}
 

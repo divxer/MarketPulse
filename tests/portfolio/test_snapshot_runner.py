@@ -311,3 +311,41 @@ def test_later_snapshots_inherit_earliest_eligible_anchor(db_session):
     assert d2.portfolio_nav == Decimal("102100")         # 100000 + 10*210
     assert d2.anchor_spy_close == Decimal("500")
     assert d2.spy_index == Decimal("550") / Decimal("500")
+
+
+def test_price_lookup_marks_to_last_available_close(db_session):
+    """PR3a price-lag fix: price_cache lags ~1 trading day (the daily fetch
+    runs mid-session; yfinance only has completed bars). A snapshot for D must
+    price from the latest close <= D, not an exact-date match — otherwise every
+    same-day snapshot is degenerate (no SPY, all positions unpriced)."""
+    _seed_cash(db_session, "100000", datetime(2026, 5, 27, 13, 0, tzinfo=UTC))
+    _seed_position(db_session, ticker="AAPL", qty=10,
+                   opened=datetime(2026, 5, 27, 14, 0, tzinfo=UTC))
+    # Prices only on 5/28; snapshot is for 5/29 (today, close not yet fetched).
+    _seed_price(db_session, "AAPL", date(2026, 5, 28), 200.0)
+    _seed_price(db_session, "SPY", date(2026, 5, 28), 500.0)
+    db_session.commit()
+
+    snap = run_nav_snapshot(db_session, trading_date=date(2026, 5, 29))
+    db_session.commit()
+    assert snap.unpriced_positions_count == 0           # marked to last close
+    assert snap.holdings_mtm == Decimal("2000")         # 10 * 200 (5/28 close)
+    assert snap.spy_close == Decimal("500")
+    assert snap.spy_index is not None
+    assert snap.excess_return is not None
+
+
+def test_price_lookup_ignores_future_prices_no_lookahead(db_session):
+    """Only closes ON OR BEFORE trading_date may be used — a future-dated close
+    must NOT leak in (no lookahead bias)."""
+    _seed_cash(db_session, "100000", datetime(2026, 5, 27, 13, 0, tzinfo=UTC))
+    _seed_position(db_session, ticker="AAPL", qty=10,
+                   opened=datetime(2026, 5, 27, 14, 0, tzinfo=UTC))
+    _seed_price(db_session, "AAPL", date(2026, 5, 30), 999.0)  # AFTER trading_date
+    db_session.commit()
+
+    snap = run_nav_snapshot(db_session, trading_date=date(2026, 5, 29))
+    db_session.commit()
+    assert snap.unpriced_positions_count == 1
+    assert snap.unpriced_tickers == ("AAPL",)
+    assert snap.holdings_mtm == Decimal("0")
