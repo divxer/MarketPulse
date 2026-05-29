@@ -20,6 +20,7 @@ from marketpulse.config import get_settings
 from marketpulse.data.yfinance_client import YFinanceClient
 from marketpulse.db.base import session_scope
 from marketpulse.observability.paper_tick_notifier import notify_paper_tick_events
+from marketpulse.scheduler.jobs import _run_nav_snapshot_safely
 from marketpulse.trading import daily_cycle
 from marketpulse.trading import risk_gates as rg
 from marketpulse.trading.bid_aggregator import BidAggregator
@@ -111,5 +112,9 @@ def paper_trading_tick_job(*, notifier: Notifier | None = None) -> None:
             )
         except Exception as exc:  # pragma: no cover - belt-and-braces guard
             log.warning("paper_tick_notify_failed: %s", exc)
+
+        # Charter top-3 #1 PR3a — EOD NAV snapshot. Piggybacks on tick
+        # fill settlement to avoid race against in-flight fills.
+        _run_nav_snapshot_safely(session, tick_date=result.tick_date)
     finally:
         session.close()

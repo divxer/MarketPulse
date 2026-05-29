@@ -22,6 +22,7 @@ from marketpulse.holdings.quantity_history import quantity_as_of
 from marketpulse.holdings.splits import SplitError, record_split
 from marketpulse.holdings.trades import recompute_ticker
 from marketpulse.logging import get_logger
+from marketpulse.portfolio.snapshot_runner import run_nav_snapshot
 from marketpulse.recap.push import push_recap_summary
 from marketpulse.recap.service import RecapService
 from marketpulse.scheduler.state import record_run_summary
@@ -125,6 +126,25 @@ def run_sector_backfill() -> None:
         log.info("sector_backfill_done", rows_filled=n)
     finally:
         db.close()
+
+
+def _run_nav_snapshot_safely(session, *, tick_date) -> None:
+    """PR3a — EOD NAV snapshot. Piggybacks on tick fill settlement.
+
+    L4: only non-PK persistence errors are caught here; PK conflicts are
+    handled INSIDE run_nav_snapshot (idempotent re-run). The tick is
+    never aborted by snapshot failure.
+
+    `exception` (not `error`) in the extra dict avoids collision with
+    stdlib LogRecord field names and most structured-logging formatters.
+    """
+    try:
+        run_nav_snapshot(session, trading_date=tick_date)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "nav_snapshot_failed",
+            extra={"tick_date": str(tick_date), "exception": str(exc)},
+        )
 
 
 def run_db_backup() -> None:
