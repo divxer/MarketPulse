@@ -218,3 +218,16 @@ def get_earliest_snapshot(session: Session) -> NavSnapshot | None:
         .limit(1),
     ).first()
     return _row_to_dc(row) if row is not None else None
+
+
+def get_all_snapshots(session: Session) -> list[NavSnapshot]:
+    """All snapshots, ascending by trading_date.
+
+    Read-only UI helper for /lab/portfolio-vs-spy (L12). NOT used by snapshot
+    computation or anchor-recovery paths.
+    """
+    rows = session.scalars(
+        select(PaperNavSnapshot)
+        .order_by(PaperNavSnapshot.trading_date.asc()),
+    ).all()
+    return [_row_to_dc(r) for r in rows]
