@@ -66,3 +66,14 @@ def test_route_insufficient_shows_banner_and_hero(client, monkeypatch, db_url):
     assert "Portfolio" in r.text
     assert "SPY" in r.text
     assert "Excess Return" in r.text
+
+
+def test_nav_contains_all_lab_links(client, monkeypatch):
+    _login(client, monkeypatch)
+    r = client.get("/lab/portfolio-vs-spy")
+    assert r.status_code == 200
+    for href in (
+        "/lab/portfolio-vs-spy", "/lab/ai-track", "/lab/backtest",
+        "/lab/paper-trading", "/lab/broker", "/lab/reconcile",
+    ):
+        assert f'href="{href}"' in r.text
