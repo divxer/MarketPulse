@@ -1,0 +1,11 @@
+<section class="mp-card"><div class="mp-card__body">
+  <table class="mp-kpi-table">
+    <tr><td>Excess Return</td><td>{{ view.hero_excess_return_label }}</td></tr>
+    <tr><td>Portfolio Index</td><td>{{ view.portfolio_index_label }}</td></tr>
+    <tr><td>SPY Index</td><td>{{ view.spy_index_label }}</td></tr>
+    <tr><td>Coverage</td><td>{{ view.coverage_label }}</td></tr>
+    <tr><td>Sufficient</td>
+        <td class="{% if not view.is_sufficient %}mp-text-warn{% endif %}">
+          {{ "Yes" if view.is_sufficient else "No" }}</td></tr>
+  </table>
+</div></section>

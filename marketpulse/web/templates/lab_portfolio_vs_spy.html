@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 class="mp-page-title">Portfolio vs SPY</h1>
+
+{% if not view.has_data %}
+  <section class="mp-card"><div class="mp-card__body">
+    <p class="muted" style="text-align:center; padding:32px;">
+      No snapshots yet — the daily NAV snapshot job hasn't recorded data.
+    </p>
+  </div></section>
+{% else %}
+  {% if view.show_insufficiency_banner %}
+    {% include "partials/pvs_banner.html" %}
+  {% endif %}
+  {% include "partials/pvs_hero.html" %}
+  {% include "partials/pvs_kpi_strip.html" %}
+
+  {% if view.chartable %}
+    {% if view.dropped_prefix_count > 0 %}
+      <p class="muted" style="font-size:12px;">
+        Chart starts from first snapshot with SPY benchmark data.
+      </p>
+    {% endif %}
+    {% if view.excluded_nonprefix_count > 0 %}
+      <p class="muted" style="font-size:12px;">
+        Chart truncated at a gap in benchmark data.
+      </p>
+    {% endif %}
+    {% include "partials/pvs_index_chart.html" %}
+    {% include "partials/pvs_excess_chart.html" %}
+  {% else %}
+    <section class="mp-card"><div class="mp-card__body">
+      <p class="muted" style="text-align:center; padding:24px;">
+        Snapshots exist but benchmark/chart not ready (need ≥2 days with SPY data).
+      </p>
+    </div></section>
+  {% endif %}
+{% endif %}
+{% endblock %}

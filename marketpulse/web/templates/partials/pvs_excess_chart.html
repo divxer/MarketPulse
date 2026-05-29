@@ -1,0 +1,14 @@
+<section class="mp-card">
+  <div class="mp-card__head"><span class="mp-card__title">
+    <span class="material-symbols-outlined">trending_up</span>Excess Return
+  </span></div>
+  <div class="mp-card__body">
+    <svg viewBox="0 0 {{ view.chart.viewbox_w }} {{ view.chart.viewbox_h }}" width="100%" height="180">
+      <line x1="0" y1="{{ '%.1f'|format(view.chart.zero_y) }}"
+            x2="{{ view.chart.viewbox_w }}" y2="{{ '%.1f'|format(view.chart.zero_y) }}"
+            stroke="var(--ns-outline-variant)" stroke-dasharray="2 4" />
+      <polyline points="{{ view.chart.excess_points }}" fill="none"
+                stroke="#16a34a" stroke-width="2"><title>Excess Return</title></polyline>
+    </svg>
+  </div>
+</section>

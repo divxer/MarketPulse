@@ -26,5 +26,5 @@ def lab_portfolio_vs_spy(
 ):
     view = build_portfolio_vs_spy_view(get_all_snapshots(db))
     return templates.TemplateResponse(
-        "lab_portfolio_vs_spy.html", {"request": request, "view": view},
+        request, "lab_portfolio_vs_spy.html", {"view": view},
     )

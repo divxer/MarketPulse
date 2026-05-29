@@ -1,0 +1,9 @@
+<section class="mp-card">
+  <div class="mp-card__body" style="display:flex; align-items:baseline; gap:12px;">
+    <span class="mp-card__sub">Portfolio Excess Return vs SPY</span>
+    <span style="font-size:32px; font-weight:700;">{{ view.hero_excess_return_label }}</span>
+    <span class="mp-chip {% if view.is_sufficient %}mp-chip--ok{% else %}mp-chip--warn{% endif %}">
+      {{ view.badge }}
+    </span>
+  </div>
+</section>
