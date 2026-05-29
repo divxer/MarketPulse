@@ -63,6 +63,8 @@ def _fmt_excess_label(value: Decimal | None) -> str:
     if value is None:
         return VALUE_NA
     pct = (Decimal(value) * Decimal("100")).quantize(Decimal("0.1"))
+    if pct == 0:
+        pct = abs(pct)  # normalize negative zero so tiny negatives don't show "+-0.0%"
     return f"+{pct}%" if pct >= 0 else f"{pct}%"
 
 

@@ -35,6 +35,12 @@ def test_fmt_excess_label_none():
     assert _fmt_excess_label(None) == "N/A"
 
 
+def test_fmt_excess_label_tiny_negative_rounds_to_plus_zero():
+    # Values in the ±0.0005 band round to 0.0; must NOT render "+-0.0%".
+    assert _fmt_excess_label(Decimal("-0.0001")) == "+0.0%"
+    assert _fmt_excess_label(Decimal("-0.0004")) == "+0.0%"
+
+
 def test_fmt_index_label():
     assert _fmt_index_label(Decimal("1.0413")) == "1.041"
 
