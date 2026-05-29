@@ -642,6 +642,18 @@ def build_scheduler() -> BackgroundScheduler:
         misfire_grace_time=None,
         coalesce=True,
     )
+    # PR3b: weekly charter review. Runs every Monday 09:30 UTC, AFTER the
+    # 09:00 UTC db_backup so the report reads a fresh backup manifest.
+    sched.add_job(
+        run_charter_review_weekly,
+        trigger=CronTrigger(
+            day_of_week="mon", hour=9, minute=30, timezone="UTC",
+        ),
+        id="charter_review_weekly",
+        replace_existing=True,
+        misfire_grace_time=None,
+        coalesce=True,
+    )
     # Daily split-detection: runs once at 17:00 ET (after the daily recap)
     # so any same-day splits show up in the next morning's view.
     sched.add_job(
