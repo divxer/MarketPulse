@@ -42,8 +42,11 @@ The point is not visualization. The point is to make the charter's "is the syste
 | L13 | `paper_trade_count_30d` primary source = `paper_fill` rows with `position_id IS NOT NULL AND side='BUY' AND filled_at` in window. Audit-event count remains a diagnostic cross-check only. **`side='BUY'` assumes the current long-only paper engine.** If short positions are introduced, entry-fill detection must switch to position/opening-fill semantics rather than `side='BUY'` — this metric needs a spec revision at that point. |
 | L14 | `quantity` is `Decimal` in the typed boundary (dataclass), even though the current paper engine writes integers. The portfolio layer must not pre-commit to integer-only quantities. |
 | L15 | `unpriced_tickers` is dedup'd and sorted: `tuple(sorted({...}))`. `unpriced_positions_count` still counts lots. |
-| L16 | **SPY benchmark anchor is established lazily by the first snapshot with a non-null `spy_close`.** All snapshots before that point have `anchor_spy_close=null`, `spy_index=null`, `excess_return=null`; their portfolio side (`portfolio_index`) is still authoritative. Once established, every later snapshot reads the anchor from `get_first_spy_anchor()` (earliest snapshot with a non-null `anchor_spy_close`). The asymmetry (portfolio anchors at row 1; SPY anchors at first SPY-available row) is intentional and documented; it means the SPY benchmark series may start later than the NAV series. |
+| L16 | **SPY benchmark anchor is established lazily by the first snapshot with a non-null `spy_close`.** All snapshots before that point have `anchor_spy_close=null`, `spy_index=null`, `excess_return=null`; their portfolio side (`portfolio_index`) is still authoritative. Once established, every later snapshot reads the anchor from `get_spy_anchor()` (earliest snapshot with a non-null `anchor_spy_close`). The asymmetry (portfolio anchors at row 1; SPY anchors at first SPY-available row) is intentional and documented; it means the SPY benchmark series may start later than the NAV series. |
 | L17 | **JSON serialization rule:** the `/lab/charter-metrics` builder MUST convert all `Decimal` values to `float` for ratios / returns / index fields (`portfolio_index`, `spy_index`, `excess_return`, `value`, `coverage_ratio`). Money fields (`cash_balance`, `holdings_mtm`, `portfolio_nav`, `anchor_portfolio_nav`, `anchor_spy_close`, `spy_close`) are NOT exposed via JSON in PR3a — they remain `Decimal` in the DB and dataclass only. This avoids FastAPI's default Decimal-handling ambiguity. |
+| L18 | **Empty cash ledger → runner raises.** If `paper_cash_ledger` has no row with `created_at <= EOD(trading_date)`, `run_nav_snapshot` raises `NoCashLedgerForDate` (not silently 0 — that would produce a misleading NAV). The scheduler's generic `except Exception` (L4) catches and logs; the tick is not aborted. |
+| L19 | **Price source contract.** `price_lookup` reads `price_cache.close` directly as written by the existing price ingestion path. PR3a does **not** transform prices — no adjusted/unadjusted conversion, no split correction, no FX. Whatever `price_cache` stores is what NAV uses. If the project later changes `price_cache` semantics, the snapshot table inherits the new semantics from that day forward (earlier rows stay frozen per L1). |
+| L20 | **`unpriced_tickers` text encoding.** DB column is comma-separated TEXT. Parsing: `None → ()`, `"" → ()`, `"QUBT,TQQQ" → ("QUBT", "TQQQ")`. Writing: `() → NULL`, non-empty tuple → `",".join(sorted(set(t)))`. Tickers MUST NOT contain commas; the existing ingestion path already enforces ticker grammar. |
 
 ## Architecture & Boundaries
 
@@ -299,7 +302,7 @@ def get_recent_snapshot_dates(
     session: Session, *, limit: int,
 ) -> list[date]:
     """Most-recent N trading_dates, returned in ASCENDING order."""
-def get_first_spy_anchor(session: Session) -> Decimal | None:
+def get_spy_anchor(session: Session) -> Decimal | None:
     """Earliest non-null anchor_spy_close in the snapshot table.
     Used by snapshot_runner to enforce L16 (lazy SPY anchor)."""
 def count_snapshots_in_window(
@@ -330,7 +333,7 @@ Flow:
 4. `spy_close`: `price_cache` row for `('SPY', trading_date)`. None if missing (L5).
 5. Anchors:
    - **Portfolio**: earliest snapshot's `portfolio_nav`, or self-anchor on first run.
-   - **SPY (L16)**: earliest snapshot with a non-null `anchor_spy_close` via `snapshot_repo.get_first_spy_anchor()`. If no prior SPY anchor exists AND current `spy_close` is non-null, current `spy_close` becomes the anchor. If `spy_close` is None AND no prior anchor exists, `anchor_spy_close=None`, `spy_index=None`, `excess_return=None`. Once a snapshot writes a non-null `anchor_spy_close`, it is referenced by all future snapshots — earlier null-anchor rows stay frozen (L1 immutability).
+   - **SPY (L16)**: earliest snapshot with a non-null `anchor_spy_close` via `snapshot_repo.get_spy_anchor()`. If no prior SPY anchor exists AND current `spy_close` is non-null, current `spy_close` becomes the anchor. If `spy_close` is None AND no prior anchor exists, `anchor_spy_close=None`, `spy_index=None`, `excess_return=None`. Once a snapshot writes a non-null `anchor_spy_close`, it is referenced by all future snapshots — earlier null-anchor rows stay frozen (L1 immutability).
 6. `trading_days_observed = count_snapshots_in_window(window_end, 90) + 1`.
 7. `compute_nav_snapshot(...)`.
 8. `insert_snapshot(session, snapshot)` → on `SnapshotAlreadyExists` return existing row + warn (idempotent on PK conflict only).
@@ -436,6 +439,7 @@ def lab_charter_metrics(
 | `test_run_nav_snapshot_partial_pricing` | 3 positions, 1 unpriced → unpriced_count=1, MTM reflects only priced |
 | `test_run_nav_snapshot_no_network` | monkeypatch any yfinance shim to raise; snapshot still succeeds — proves L5 |
 | `test_run_nav_snapshot_spy_anchor_late_establishment` | snapshot day-1 with SPY missing → row has `anchor_spy_close=null, spy_index=null`. Day-2 with SPY present → row's `anchor_spy_close` = its own `spy_close`. Day-3 with SPY present → reads anchor from day-2; day-1 row stays frozen (L16) |
+| `test_run_nav_snapshot_empty_cash_ledger_raises` | `paper_cash_ledger` has no row by EOD → runner raises `NoCashLedgerForDate` (L18); no row inserted |
 
 ### Scheduler isolation — `tests/scheduler/test_paper_trading_tick.py`
 
@@ -468,6 +472,7 @@ def lab_charter_metrics(
 | `test_endpoint_no_network_call` | monkeypatch any yfinance shim to raise; endpoint returns 200 — read-path is DB-only |
 | `test_endpoint_decimals_serialized_as_floats` | response JSON: `north_star.value`, `portfolio_index`, `spy_index`, `coverage_ratio` and each diagnostic's `value` / `coverage_ratio` are JSON numbers (not strings); `type(parsed_value) is float` (L17) |
 | `test_endpoint_data_quality_is_complete` | snapshot row with `unpriced_positions_count=0` → `data_quality.is_complete=True`; row with count=1 → `is_complete=False` |
+| `test_endpoint_coverage_ratio_roundtrip` | seed snapshot with `coverage_ratio=Decimal("0.4")` → JSON `north_star.coverage_ratio == 0.4` (float); assert `float(latest_snapshot_row.coverage_ratio) == response_body[...]` |
 
 ### Migration — `tests/migrations/test_0012_paper_nav_snapshot.py`
 
