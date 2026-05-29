@@ -45,6 +45,9 @@ NOT allowed: inferred root causes, subsystem attribution, YAML expert rules, AI-
 | L15 | Appendix may include money fields (`cash_balance`, `holdings_mtm`, `portfolio_nav`). This is consistent with PR3a's L17 (Decimal → float for JSON API) because PR3b is a local filesystem artifact, never serialized to JSON. |
 | L16 | `_fmt_reason` normalization (locked order): (a) replace `\n` and `\r` with space, (b) escape `|` as `\|`, (c) truncate to 200 chars + `…` if longer. |
 | L17 | `generated_at` is part of the payload. Same `(payload including generated_at)` → byte-identical markdown. Test: `render(p) == render(p)`. |
+| L18 | All dataclasses (`CharterReviewPayload`, `WeekWindow`, `NorthStarWeek`, `DiagnosticWeek`, `DiagnosticsWeek`, `OperationalFloor`, `SnapshotAppendix`, `ReasonCount`) live in `marketpulse/ops/charter_review_types.py`. Both aggregator and renderer import from this module — single source of truth, no circular-import risk. |
+| L19 | Null / empty `reason` from `paper_audit_event` is normalized to the literal string `"(no reason)"` BEFORE forming `ReasonCount`. This happens in the aggregator's `_top_reasons` helper, not the renderer. Renderer-side `_fmt_reason` operates on already-normalized text. |
+| L20 | On successful `generate_charter_review` return, orchestration emits ONE info log: `charter_review_generated`, with `extra={"week_ending": <iso>, "path": <abs>, "generated_at": <iso>}`. This is the hook future delivery integrations (email / Slack / web UI) can subscribe to without code changes here. |
 
 ## Architecture & Boundaries
 
@@ -279,6 +282,36 @@ Observation window: first snapshot {first_date}, last snapshot {last_date}.
 
 ## Module Interfaces
 
+### `marketpulse/ops/charter_review_types.py` (L18)
+
+```python
+# Layer: pure
+"""Shared frozen dataclasses for the PR3b charter review pipeline.
+
+L18: Both aggregator and renderer import from here. No circular imports.
+No runtime logic — types only.
+"""
+
+@dataclass(frozen=True)
+class ReasonCount: ...
+@dataclass(frozen=True)
+class WeekWindow: ...
+@dataclass(frozen=True)
+class NorthStarWeek: ...
+@dataclass(frozen=True)
+class DiagnosticWeek: ...
+@dataclass(frozen=True)
+class DiagnosticsWeek: ...
+@dataclass(frozen=True)
+class OperationalFloor: ...
+@dataclass(frozen=True)
+class SnapshotAppendix: ...
+@dataclass(frozen=True)
+class CharterReviewPayload: ...
+```
+
+(Full definitions are the ones in the Data Contract section above.)
+
 ### `marketpulse/ops/charter_review.py`
 
 ```python
@@ -303,7 +336,9 @@ def generate_charter_review(
     Returns the path to the written .md.
 
     May raise CharterReviewError on DB / FS / render failures (L4).
-    Validates week_ending.weekday() == 6 (Sunday) at entry (L12)."""
+    Validates week_ending.weekday() == 6 (Sunday) at entry (L12).
+    On success, emits one info log `charter_review_generated` (L20)
+    with week_ending / path / generated_at."""
 
 
 def _read_backup_manifest(path: Path) -> dict | None:
@@ -346,7 +381,11 @@ def _top_reasons(session, *, event_type: str,
                  window_start_eod, window_end_eod, limit: int = 3,
                  ) -> tuple[ReasonCount, ...]:
     """SELECT reason, COUNT(*) GROUP BY reason ORDER BY count DESC, reason ASC
-    LIMIT {limit}. Deterministic ordering (L8)."""
+    LIMIT {limit}. Deterministic ordering (L8).
+
+    L19: NULL or empty-string reason is normalized to the literal "(no reason)"
+    BEFORE COUNT. Two NULL reasons + one "" reason all collapse into a single
+    "(no reason)" bucket with count=3. Renderer never sees a blank reason."""
 
 def _operational_floor(manifest: dict | None) -> OperationalFloor:
     """Manifest dict → OperationalFloor. L14: None or malformed →
@@ -455,7 +494,7 @@ scheduler.add_job(
 | `test_render_delta_pp_signed_strings` | `_fmt_delta_pp(0.032, 0.018)` → `"+1.4 pp vs prior week"`; `(0.012, 0.030)` → `"−1.8 pp vs prior week"` |
 | `test_render_delta_prior_week_na` | `_fmt_delta_pp(0.032, None)` → `"prior week N/A"` |
 | `test_render_top_reasons_deterministic_order` | Two reasons same count → sorted by reason ASC |
-| `test_render_reason_pipe_escaped` | reason `"alloc \| failed"` → `"alloc \\| failed"` in output (L16) |
+| `test_render_reason_pipe_escaped` | Input reason = the literal string `alloc \| failed` (one pipe, single-backslash from the source, no escape) → rendered output contains `alloc \| failed` where the backslash is a real character in the markdown (the `\|` two-char sequence preserves the pipe inside markdown tables). Python literal: `assert "alloc \\| failed" in output` (L16) |
 | `test_render_reason_truncated` | 250-char reason → first 200 + `…` (L16) |
 | `test_render_reason_strips_newlines` | reason `"a\\nb\\rc"` → `"a b c"` (L16) |
 | `test_render_this_week_empty` | trading_days_observed=0 → "No snapshots in this calendar week." line present |
@@ -476,6 +515,7 @@ scheduler.add_job(
 | `test_build_payload_trade_count_uses_fills` | Audit ORDER_ENTRY_FILLED present but absent paper_fill ENTRY → value=0 (L5) |
 | `test_build_payload_engine_errors_observations` | engine_invariant_errors.observations = TICK_COMPLETED + ENGINE_INVARIANT_ERROR (L6) |
 | `test_build_payload_engine_errors_reasons_only_from_engine` | Seed ORDER_REJECTED reasons in window — must NOT appear in engine_invariant_errors.top_reasons (L6) |
+| `test_build_payload_top_reasons_null_normalized` | Seed 2 ENGINE_INVARIANT_ERROR rows with reason=NULL and 1 with reason="" → top_reasons returns single `ReasonCount("(no reason)", 3)` (L19) |
 | `test_build_payload_manifest_none` | backup_manifest=None → manifest_available=False, backup_status="missing", backup_is_stale=True (L14) |
 | `test_build_payload_manifest_ok` | status="ok" dict → manifest_available=True, fields populated |
 | `test_build_payload_appendix_snapshot_latest` | 3 snapshots in week, dates D1<D2<D3 → appendix.trading_date == D3, money fields from D3 |
@@ -492,8 +532,10 @@ scheduler.add_job(
 | `test_generate_malformed_manifest_lands_file` | Manifest `{not json}` → markdown still written; manifest_available=False |
 | `test_generate_idempotent_same_week_same_now` | Two runs same `week_ending` + same `now` → byte-identical file content |
 | `test_generate_atomic_write_no_orphan_tempfiles` | After successful run, no `.tmp` files in recaps_dir |
-| `test_generate_atomic_write_preserves_old_md_on_failure` | Pre-existing `2026-08-16.md` + `os.replace` patched to raise → old file unchanged, no `.tmp` orphan, no partial new content (L11) |
+| `test_generate_atomic_write_preserves_old_md_on_failure` | Pre-existing `2026-08-16.md` + `os.replace` patched to raise on the .md write → old file unchanged, no `.tmp` orphan, no partial new content (L11) |
+| `test_generate_atomic_write_preserves_old_latest_json_on_failure` | Pre-existing `latest.json` + `os.replace` patched to raise on the latest.json write (after .md succeeded) → old `latest.json` unchanged, no `.tmp` orphan (L11) |
 | `test_generate_latest_json_atomic_replace` | Second run overwrites `latest.json`; no `.tmp` lingering |
+| `test_generate_success_emits_info_log` | Successful run emits one info log `charter_review_generated` with extra={week_ending, path, generated_at} (L20) |
 | `test_generate_db_query_failure_raises_typed` | Force aggregator to raise OperationalError → caller sees `CharterReviewError` wrapping the original |
 
 ### Scheduler (`tests/scheduler/test_charter_review_scheduler.py`)
