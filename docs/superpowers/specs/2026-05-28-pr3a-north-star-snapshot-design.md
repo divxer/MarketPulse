@@ -39,9 +39,11 @@ The point is not visualization. The point is to make the charter's "is the syste
 | L10 | `build_charter_metrics(session=None)` is a unit-test / CLI affordance only. Production route always passes the session. |
 | L11 | Diagnostics window = the last 30 snapshot `trading_date` values (or all of them if fewer than 30 exist). Calendar dates are not used for windowing. |
 | L12 | `ORDER_PLACED` and `ORDER_REJECTED` are mutually exclusive terminal decisions in MarketPulse's audit model. Rejection denominator = `PLACED + REJECTED`. If the audit model ever evolves to non-exclusive events, this metric must be revisited. |
-| L13 | `paper_trade_count_30d` primary source = `paper_fill` rows with `position_id IS NOT NULL AND side='BUY' AND filled_at` in window. Audit-event count remains a diagnostic cross-check only. |
+| L13 | `paper_trade_count_30d` primary source = `paper_fill` rows with `position_id IS NOT NULL AND side='BUY' AND filled_at` in window. Audit-event count remains a diagnostic cross-check only. **`side='BUY'` assumes the current long-only paper engine.** If short positions are introduced, entry-fill detection must switch to position/opening-fill semantics rather than `side='BUY'` — this metric needs a spec revision at that point. |
 | L14 | `quantity` is `Decimal` in the typed boundary (dataclass), even though the current paper engine writes integers. The portfolio layer must not pre-commit to integer-only quantities. |
 | L15 | `unpriced_tickers` is dedup'd and sorted: `tuple(sorted({...}))`. `unpriced_positions_count` still counts lots. |
+| L16 | **SPY benchmark anchor is established lazily by the first snapshot with a non-null `spy_close`.** All snapshots before that point have `anchor_spy_close=null`, `spy_index=null`, `excess_return=null`; their portfolio side (`portfolio_index`) is still authoritative. Once established, every later snapshot reads the anchor from `get_first_spy_anchor()` (earliest snapshot with a non-null `anchor_spy_close`). The asymmetry (portfolio anchors at row 1; SPY anchors at first SPY-available row) is intentional and documented; it means the SPY benchmark series may start later than the NAV series. |
+| L17 | **JSON serialization rule:** the `/lab/charter-metrics` builder MUST convert all `Decimal` values to `float` for ratios / returns / index fields (`portfolio_index`, `spy_index`, `excess_return`, `value`, `coverage_ratio`). Money fields (`cash_balance`, `holdings_mtm`, `portfolio_nav`, `anchor_portfolio_nav`, `anchor_spy_close`, `spy_close`) are NOT exposed via JSON in PR3a — they remain `Decimal` in the DB and dataclass only. This avoids FastAPI's default Decimal-handling ambiguity. |
 
 ## Architecture & Boundaries
 
@@ -99,7 +101,8 @@ PR2 reserved `north_star.status = "not_implemented"` and `diagnostics.status = "
     "window_end": "2026-08-14",
     "data_quality": {
       "unpriced_positions_count": 0,
-      "unpriced_tickers": []
+      "unpriced_tickers": [],
+      "is_complete": true
     },
     "error": null
   },
@@ -159,7 +162,8 @@ PR2 reserved `north_star.status = "not_implemented"` and `diagnostics.status = "
   "window_end": null,
   "data_quality": {
     "unpriced_positions_count": 0,
-    "unpriced_tickers": []
+    "unpriced_tickers": [],
+    "is_complete": true
   },
   "error": "no_snapshots_yet"
 }
@@ -295,9 +299,16 @@ def get_recent_snapshot_dates(
     session: Session, *, limit: int,
 ) -> list[date]:
     """Most-recent N trading_dates, returned in ASCENDING order."""
+def get_first_spy_anchor(session: Session) -> Decimal | None:
+    """Earliest non-null anchor_spy_close in the snapshot table.
+    Used by snapshot_runner to enforce L16 (lazy SPY anchor)."""
 def count_snapshots_in_window(
     session: Session, *, window_end: date, window_size: int,
-) -> int: ...
+) -> int:
+    """Count of most-recent snapshot rows with trading_date <= window_end,
+    capped at window_size. Trading-day semantics (L11) — NEVER calendar:
+    if 200 snapshots exist and window_size=90, returns 90, regardless of
+    calendar gap from earliest snapshot to window_end."""
 ```
 
 ### `marketpulse/portfolio/snapshot_runner.py` (orchestration)
@@ -317,7 +328,9 @@ Flow:
 2. `open_positions`: historical-safe SQL (L7).
 3. `price_lookup`: `price_cache` rows for `trading_date`, returning `Decimal | None`.
 4. `spy_close`: `price_cache` row for `('SPY', trading_date)`. None if missing (L5).
-5. Anchors: earliest snapshot's `portfolio_nav` and `spy_close` (or self-anchor on first run).
+5. Anchors:
+   - **Portfolio**: earliest snapshot's `portfolio_nav`, or self-anchor on first run.
+   - **SPY (L16)**: earliest snapshot with a non-null `anchor_spy_close` via `snapshot_repo.get_first_spy_anchor()`. If no prior SPY anchor exists AND current `spy_close` is non-null, current `spy_close` becomes the anchor. If `spy_close` is None AND no prior anchor exists, `anchor_spy_close=None`, `spy_index=None`, `excess_return=None`. Once a snapshot writes a non-null `anchor_spy_close`, it is referenced by all future snapshots — earlier null-anchor rows stay frozen (L1 immutability).
 6. `trading_days_observed = count_snapshots_in_window(window_end, 90) + 1`.
 7. `compute_nav_snapshot(...)`.
 8. `insert_snapshot(session, snapshot)` → on `SnapshotAlreadyExists` return existing row + warn (idempotent on PK conflict only).
@@ -328,14 +341,13 @@ In `marketpulse/scheduler/jobs.py` `run_paper_trading_tick`, after fills + recon
 
 ```python
 # Charter top-3 #1 PR3a — EOD NAV snapshot. Piggybacks on tick fill
-# settlement to avoid race conditions.
+# settlement to avoid race conditions. PK conflicts (re-run same date)
+# are handled INSIDE the runner — scheduler does NOT need to catch
+# SnapshotAlreadyExists. Only non-PK persistence errors surface here.
 try:
     run_nav_snapshot(session, trading_date=tick_date, settings=settings)
-except SnapshotAlreadyExists:
-    # Idempotent re-run; already handled inside runner via log.
-    pass
 except Exception as exc:
-    # L4: persistence errors are visible; tick is never aborted.
+    # L4: non-PK persistence errors are visible here; tick is never aborted.
     log.warning("nav_snapshot_failed", error=str(exc), tick_date=str(tick_date))
 ```
 
@@ -409,7 +421,8 @@ def lab_charter_metrics(
 | `test_get_latest_snapshot_empty` | returns None |
 | `test_get_snapshot_series_range_ascending` | 5 inserted; range returned inclusive, ordered ascending by trading_date |
 | `test_get_recent_snapshot_dates_ascending` | 40 inserted; `limit=30` returns 30 dates in ascending order (consumer-friendly) |
-| `test_count_snapshots_in_window` | end=D, size=90 → rows in `[D-89, D]` counted |
+| `test_count_snapshots_in_window_caps_at_size` | 200 snapshots inserted; `window_size=90` returns 90 (trading-day cap, NOT calendar `[D-89, D]`) |
+| `test_count_snapshots_in_window_below_cap` | 12 snapshots inserted; `window_size=90` returns 12 (fewer than cap) |
 
 ### Runner — `tests/portfolio/test_snapshot_runner.py`
 
@@ -422,6 +435,7 @@ def lab_charter_metrics(
 | `test_run_nav_snapshot_no_spy_in_cache` | price_cache lacks SPY → snapshot persists with spy_close/spy_index/excess_return all None |
 | `test_run_nav_snapshot_partial_pricing` | 3 positions, 1 unpriced → unpriced_count=1, MTM reflects only priced |
 | `test_run_nav_snapshot_no_network` | monkeypatch any yfinance shim to raise; snapshot still succeeds — proves L5 |
+| `test_run_nav_snapshot_spy_anchor_late_establishment` | snapshot day-1 with SPY missing → row has `anchor_spy_close=null, spy_index=null`. Day-2 with SPY present → row's `anchor_spy_close` = its own `spy_close`. Day-3 with SPY present → reads anchor from day-2; day-1 row stays frozen (L16) |
 
 ### Scheduler isolation — `tests/scheduler/test_paper_trading_tick.py`
 
@@ -452,6 +466,8 @@ def lab_charter_metrics(
 | `test_endpoint_north_star_with_snapshot` | seed 1 snapshot row → 200; numeric values present |
 | `test_endpoint_diagnostics_populated` | seed audit + snapshots → 200; diagnostics carry values + coverage_ratio |
 | `test_endpoint_no_network_call` | monkeypatch any yfinance shim to raise; endpoint returns 200 — read-path is DB-only |
+| `test_endpoint_decimals_serialized_as_floats` | response JSON: `north_star.value`, `portfolio_index`, `spy_index`, `coverage_ratio` and each diagnostic's `value` / `coverage_ratio` are JSON numbers (not strings); `type(parsed_value) is float` (L17) |
+| `test_endpoint_data_quality_is_complete` | snapshot row with `unpriced_positions_count=0` → `data_quality.is_complete=True`; row with count=1 → `is_complete=False` |
 
 ### Migration — `tests/migrations/test_0012_paper_nav_snapshot.py`
 
