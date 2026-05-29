@@ -203,3 +203,53 @@ def test_run_nav_snapshot_spy_anchor_late_establishment(db_session):
     persisted_d1 = get_snapshot(db_session, date(2026, 5, 26))
     assert persisted_d1.anchor_spy_close is None
     assert persisted_d1.spy_index is None
+
+
+def test_run_nav_snapshot_partial_pricing(db_session):
+    """3 positions, 1 unpriced → unpriced_count=1, MTM reflects only priced."""
+    _seed_cash(db_session, "100000", datetime(2026, 5, 28, 13, 0, tzinfo=UTC))
+    for ticker in ("AAPL", "GOOGL", "XYZ"):
+        _seed_position(
+            db_session, ticker=ticker, qty=5,
+            opened=datetime(2026, 5, 28, 14, 0, tzinfo=UTC),
+        )
+    _seed_price(db_session, "AAPL", date(2026, 5, 28), 100.0)
+    _seed_price(db_session, "GOOGL", date(2026, 5, 28), 200.0)
+    # XYZ intentionally absent.
+    db_session.commit()
+
+    snap = run_nav_snapshot(db_session, trading_date=date(2026, 5, 28))
+    assert snap.holdings_mtm == Decimal("1500")  # 5*100 + 5*200
+    assert snap.unpriced_positions_count == 1
+    assert snap.unpriced_tickers == ("XYZ",)
+
+
+def test_run_nav_snapshot_no_network(db_session, monkeypatch):
+    """L5: snapshot runner does NOT touch yfinance. Even if any yfinance
+    import is monkeypatched to raise, the snapshot still succeeds."""
+    import marketpulse.data.yfinance_client as yf_mod
+
+    def boom(*a, **kw):  # noqa: ANN001
+        raise RuntimeError("yfinance must not be called from snapshot path")
+
+    monkeypatch.setattr(yf_mod.YFinanceClient, "__init__", boom, raising=False)
+
+    _seed_cash(db_session, "100000", datetime(2026, 5, 28, 13, 0, tzinfo=UTC))
+    db_session.commit()
+    snap = run_nav_snapshot(db_session, trading_date=date(2026, 5, 28))
+    assert snap.portfolio_nav == Decimal("100000")
+
+
+def test_run_nav_snapshot_repo_error_propagates(db_session, monkeypatch):
+    """L4: non-PK persistence errors are NOT swallowed by the runner."""
+    _seed_cash(db_session, "100000", datetime(2026, 5, 28, 13, 0, tzinfo=UTC))
+    db_session.commit()
+
+    def boom(session, snapshot):  # noqa: ANN001
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(
+        "marketpulse.portfolio.snapshot_runner.insert_snapshot", boom,
+    )
+    with pytest.raises(RuntimeError, match="disk full"):
+        run_nav_snapshot(db_session, trading_date=date(2026, 5, 28))
