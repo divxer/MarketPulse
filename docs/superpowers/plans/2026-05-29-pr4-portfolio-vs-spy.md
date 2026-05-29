@@ -260,7 +260,7 @@ def _fmt_index_label(value: Decimal | None) -> str:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/portfolio/test_portfolio_vs_spy_view.py -v`
-Expected: PASS (6 passed).
+Expected: PASS — all primitive formatting tests (`_fmt_excess_label` / `_fmt_index_label`).
 
 - [ ] **Step 5: Commit**
 
@@ -271,7 +271,7 @@ git commit -m "feat(pr4): view-model dataclasses + label formatters (L13)"
 
 ---
 
-## Task 3: `_compute_chart_run` — contiguous suffix (L2, L15)
+## Task 3: `_compute_chart_run` — contiguous chart run (L2, L15)
 
 **Files:**
 - Modify: `marketpulse/portfolio/portfolio_vs_spy_view.py`
@@ -370,9 +370,9 @@ def _compute_chart_run(
 ) -> tuple[list[NavSnapshot], int, int]:
     """Return (chart_run, dropped_prefix_count, excluded_nonprefix_count).
 
-    chart_run is the CONTIGUOUS run of all-three-non-null snapshots starting at
-    the first complete row (L2, L15). It STOPS at the first later incomplete row
-    (a mid/tail gap) rather than connecting across it.
+    chart_run is the CONTIGUOUS chart run of all-three-non-null snapshots starting
+    at the first complete row (L2, L15) — NOT necessarily a suffix. It STOPS at the
+    first later incomplete row (a mid/tail gap) rather than connecting across it.
       - dropped_prefix_count = index of first complete row (true leading prefix).
         If no complete row exists, every row is prefix -> len(series).
       - excluded_nonprefix_count = rows after `start` that were dropped because a
@@ -449,7 +449,12 @@ def _downsample(
     rows: list[NavSnapshot], max_points: int = MAX_CHART_POINTS,
 ) -> list[NavSnapshot]:
     """Deterministic stride-sample to <= max_points, ALWAYS preserving the first
-    and last rows (L5). No-op when len(rows) <= max_points."""
+    and last rows (L5). No-op when len(rows) <= max_points.
+
+    NOTE: round()+set dedup means the result caps at <= max_points but is not
+    guaranteed to be EXACTLY max_points (adjacent indices may collide). This
+    satisfies L5 (<=180); exact-180 is not required for trend rendering.
+    """
     n = len(rows)
     if n <= max_points:
         return list(rows)
@@ -838,10 +843,11 @@ def test_route_empty_db_renders_empty_state(client: TestClient, monkeypatch):
 
 
 def test_route_insufficient_shows_banner_and_hero(client, monkeypatch, db_url):
+    # The `client` fixture already binds the global engine to `db_url`
+    # (same tmp_path/test.db). Seeding via a fresh engine on the SAME url is
+    # therefore visible to the route's get_db session — no DATABASE_URL
+    # monkeypatch needed (and setting it after client init would be a no-op).
     _login(client, monkeypatch)
-    monkeypatch.setenv("DATABASE_URL", db_url)
-    from marketpulse.config import get_settings
-    get_settings.cache_clear()
     from sqlalchemy import create_engine
     from sqlalchemy.orm import Session
     engine = create_engine(db_url)
@@ -1031,6 +1037,12 @@ Expected: `test_route_empty_db_renders_empty_state` and `test_route_insufficient
 </div></section>
 ```
 
+> COLOR NOTE: the hardcoded `#2563eb` (portfolio) / `#475569` (SPY) / `#16a34a`
+> (excess) match the existing `backtest_equity_chart` palette, so they're
+> consistent with the current charts. If the project has defined CSS chart color
+> variables (e.g. `--mp-chart-portfolio`), prefer those over hex literals to
+> avoid style drift — check `static/` CSS first and substitute if they exist.
+
 - [ ] **Step 6: Create `pvs_index_chart.html`**
 
 ```html
@@ -1098,7 +1110,7 @@ git commit -m "feat(pr4): templates — shell + 5 pvs_ partials (dumb renderer, 
 In `marketpulse/web/templates/base.html`, insert the north-star entry as the FIRST lab-group link (immediately before the `/lab/ai-track` line):
 
 ```html
-      <a href="/lab/portfolio-vs-spy" class="{% if p.startswith('/lab/portfolio-vs-spy') %}mp-nav-active{% endif %}">北极星</a>
+      <a href="/lab/portfolio-vs-spy" class="{% if p.startswith('/lab/portfolio-vs-spy') %}mp-nav-active{% endif %}">北极星 / Portfolio vs SPY</a>
       <a href="/lab/ai-track" class="{% if p.startswith('/lab/ai-track') %}mp-nav-active{% endif %}">实验室</a>
 ```
 
