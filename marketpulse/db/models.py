@@ -18,6 +18,7 @@ from sqlalchemy import (
     Text,
     TypeDecorator,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.engine import Dialect
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -484,6 +485,40 @@ class PaperAuditEvent(Base):
             name="ck_paper_audit_event_type",
         ),
     )
+
+
+class PaperNavSnapshot(Base):
+    """PR3a — immutable EOD NAV snapshot.
+
+    Lock L1: normal flow is INSERT only; admin path sets is_rebuilt + reason.
+    Lock L2: one row per trading_date (PK).
+    See docs/superpowers/specs/2026-05-28-pr3a-north-star-snapshot-design.md.
+    """
+    __tablename__ = "paper_nav_snapshot"
+
+    trading_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    cash_balance: Mapped[_Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    holdings_mtm: Mapped[_Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    portfolio_nav: Mapped[_Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    anchor_portfolio_nav: Mapped[_Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    portfolio_index: Mapped[_Decimal] = mapped_column(Numeric(18, 10), nullable=False)
+    spy_close: Mapped[_Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    anchor_spy_close: Mapped[_Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    spy_index: Mapped[_Decimal | None] = mapped_column(Numeric(18, 10), nullable=True)
+    excess_return: Mapped[_Decimal | None] = mapped_column(Numeric(18, 10), nullable=True)
+    trading_days_observed: Mapped[int] = mapped_column(Integer, nullable=False)
+    coverage_ratio: Mapped[_Decimal] = mapped_column(Numeric(18, 10), nullable=False)
+    is_sufficient: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    unpriced_positions_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0"),
+    )
+    unpriced_tickers: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
+    is_rebuilt: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("0"),
+    )
+    rebuild_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class BrokerSyncRun(Base):
