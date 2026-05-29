@@ -2,10 +2,12 @@
 """PR3b — renderer formatting tests."""
 from __future__ import annotations
 
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from marketpulse.ops.charter_review_renderer import (
     DELTA_PRIOR_NA,
+    REASON_MAX_DISPLAY_LEN,
     VALUE_NA,
     _fmt_delta_index,
     _fmt_delta_int,
@@ -13,6 +15,17 @@ from marketpulse.ops.charter_review_renderer import (
     _fmt_index,
     _fmt_int,
     _fmt_pct,
+    _fmt_reason,
+    render_charter_review,
+)
+from marketpulse.ops.charter_review_types import (
+    CharterReviewPayload,
+    DiagnosticsWeek,
+    DiagnosticWeek,
+    NorthStarWeek,
+    OperationalFloor,
+    SnapshotAppendix,
+    WeekWindow,
 )
 
 
@@ -89,12 +102,6 @@ def test_fmt_delta_index_prior_na():
     assert _fmt_delta_index(Decimal("1.041"), None) == DELTA_PRIOR_NA
 
 
-from marketpulse.ops.charter_review_renderer import (
-    REASON_MAX_DISPLAY_LEN,
-    _fmt_reason,
-)
-
-
 def test_fmt_reason_strips_newlines_and_carriage_returns():
     assert _fmt_reason("a\nb\rc") == "a b c"
 
@@ -117,21 +124,6 @@ def test_fmt_reason_normalization_order_locked():
     out = _fmt_reason(src)
     assert out.endswith("…")
     assert "a\\|b c" in out
-
-
-from datetime import UTC, date, datetime
-
-from marketpulse.ops.charter_review_renderer import render_charter_review
-from marketpulse.ops.charter_review_types import (
-    CharterReviewPayload,
-    DiagnosticsWeek,
-    DiagnosticWeek,
-    NorthStarWeek,
-    OperationalFloor,
-    ReasonCount,
-    SnapshotAppendix,
-    WeekWindow,
-)
 
 
 def _diag(value=None, observations=0, top_reasons=()):

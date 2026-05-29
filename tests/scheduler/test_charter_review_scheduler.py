@@ -2,10 +2,7 @@
 """PR3b — scheduler-level isolation tests for the weekly charter review."""
 from __future__ import annotations
 
-import logging
 from datetime import date
-
-import pytest
 
 
 def test_last_sunday_on_or_before_monday():
@@ -52,8 +49,8 @@ def test_run_charter_review_weekly_failure_logged_not_raised(
 
 
 def test_run_charter_review_weekly_skipped_for_non_sqlite(monkeypatch):
-    from marketpulse.scheduler import jobs as jobs_mod
     from marketpulse.config import get_settings
+    from marketpulse.scheduler import jobs as jobs_mod
 
     real_settings = get_settings()
 
@@ -85,8 +82,8 @@ def test_run_charter_review_weekly_accepts_sqlite_pysqlite(
     """L13 / PR2 lesson: `sqlite+pysqlite:///...` MUST be treated as sqlite,
     not skipped. We don't run the full generator — just verify the driver
     check doesn't short-circuit by asserting generate_charter_review IS called."""
-    from marketpulse.scheduler import jobs as jobs_mod
     from marketpulse.config import get_settings
+    from marketpulse.scheduler import jobs as jobs_mod
 
     real_settings = get_settings()
     db_file = tmp_path / "smoke.db"

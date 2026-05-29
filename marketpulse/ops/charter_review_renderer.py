@@ -124,13 +124,17 @@ def _section_executive_summary(payload: CharterReviewPayload) -> str:
         f"- Tick success rate: {_fmt_pct(diag_this.tick_success_rate.value)} "
         f"({_fmt_delta_pp(diag_this.tick_success_rate.value, diag_prior.tick_success_rate.value)})",
     )
+    rej_val = diag_this.order_rejection_rate.value
+    rej_prior = diag_prior.order_rejection_rate.value
     lines.append(
-        f"- Order rejection rate: {_fmt_pct(diag_this.order_rejection_rate.value)} "
-        f"({_fmt_delta_pp(diag_this.order_rejection_rate.value, diag_prior.order_rejection_rate.value)})",
+        f"- Order rejection rate: {_fmt_pct(rej_val)} "
+        f"({_fmt_delta_pp(rej_val, rej_prior)})",
     )
+    fills_val = diag_this.paper_trade_count.value
+    fills_prior = diag_prior.paper_trade_count.value
     lines.append(
-        f"- Paper entry fills: {_fmt_int(diag_this.paper_trade_count.value)} "
-        f"({_fmt_delta_int(diag_this.paper_trade_count.value, diag_prior.paper_trade_count.value)})",
+        f"- Paper entry fills: {_fmt_int(fills_val)} "
+        f"({_fmt_delta_int(fills_val, fills_prior)})",
     )
     op = payload.operational_floor
     is_stale_str = "stale" if op.backup_is_stale else "fresh"
@@ -145,6 +149,9 @@ def _fmt_optional_date(d):  # date | None
 def _section_north_star(payload: CharterReviewPayload) -> str:
     this = payload.north_star_this
     prior = payload.north_star_prior
+    cov_delta = _fmt_delta_int(
+        this.week.trading_days_observed, prior.week.trading_days_observed,
+    )
     lines = [
         "## North Star",
         "",
@@ -163,7 +170,7 @@ def _section_north_star(payload: CharterReviewPayload) -> str:
         f"| {_fmt_delta_index(this.spy_index_end, prior.spy_index_end):<12} |",
         f"| Coverage                 | {this.week.trading_days_observed}/90 days   "
         f"| {prior.week.trading_days_observed}/90 days  "
-        f"| {_fmt_delta_int(this.week.trading_days_observed, prior.week.trading_days_observed):<12} |",
+        f"| {cov_delta:<12} |",
         f"| Statistically sufficient | {str(this.is_sufficient_end):<12} "
         f"| {str(prior.is_sufficient_end):<11} | —            |",
         "",
@@ -200,7 +207,10 @@ def _section_diagnostics(payload: CharterReviewPayload) -> str:
                  f"({dt.order_rejection_rate.observations} observations)")
     parts.append(f"- Prior week: {_fmt_pct(dp.order_rejection_rate.value)} "
                  f"({dp.order_rejection_rate.observations} observations)")
-    parts.append(f"- Δ: {_fmt_delta_pp(dt.order_rejection_rate.value, dp.order_rejection_rate.value)}")
+    rej_delta = _fmt_delta_pp(
+        dt.order_rejection_rate.value, dp.order_rejection_rate.value,
+    )
+    parts.append(f"- Δ: {rej_delta}")
     parts.append(f"- Top rejection reasons this week: "
                  f"{_fmt_top_reasons_line(dt.order_rejection_rate.top_reasons)}")
     parts.append("")
@@ -208,13 +218,19 @@ def _section_diagnostics(payload: CharterReviewPayload) -> str:
     parts.append("### Paper entry fills")
     parts.append(f"- This week: {_fmt_int(dt.paper_trade_count.value)}")
     parts.append(f"- Prior week: {_fmt_int(dp.paper_trade_count.value)}")
-    parts.append(f"- Δ: {_fmt_delta_int(dt.paper_trade_count.value, dp.paper_trade_count.value)}")
+    trade_delta = _fmt_delta_int(
+        dt.paper_trade_count.value, dp.paper_trade_count.value,
+    )
+    parts.append(f"- Δ: {trade_delta}")
     parts.append("")
 
     parts.append("### Engine invariant errors")
     parts.append(f"- This week: {_fmt_int(dt.engine_invariant_errors.value)}")
     parts.append(f"- Prior week: {_fmt_int(dp.engine_invariant_errors.value)}")
-    parts.append(f"- Δ: {_fmt_delta_int(dt.engine_invariant_errors.value, dp.engine_invariant_errors.value)}")
+    eng_delta = _fmt_delta_int(
+        dt.engine_invariant_errors.value, dp.engine_invariant_errors.value,
+    )
+    parts.append(f"- Δ: {eng_delta}")
     parts.append(f"- Top reasons this week: "
                  f"{_fmt_top_reasons_line(dt.engine_invariant_errors.top_reasons)}")
     return "\n".join(parts)

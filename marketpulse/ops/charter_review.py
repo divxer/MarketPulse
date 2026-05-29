@@ -19,7 +19,6 @@ from sqlalchemy.orm import Session
 
 from marketpulse.ops.charter_review_aggregator import build_payload
 from marketpulse.ops.charter_review_renderer import render_charter_review
-from marketpulse.ops.charter_review_types import CharterReviewPayload
 
 log = logging.getLogger(__name__)
 

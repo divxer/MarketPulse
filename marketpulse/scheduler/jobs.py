@@ -22,10 +22,10 @@ from marketpulse.holdings.quantity_history import quantity_as_of
 from marketpulse.holdings.splits import SplitError, record_split
 from marketpulse.holdings.trades import recompute_ticker
 from marketpulse.logging import get_logger
+from marketpulse.ops.charter_review import generate_charter_review
 from marketpulse.portfolio.snapshot_runner import run_nav_snapshot
 from marketpulse.recap.push import push_recap_summary
 from marketpulse.recap.service import RecapService
-from marketpulse.ops.charter_review import generate_charter_review
 from marketpulse.scheduler.state import record_run_summary
 
 log = get_logger(__name__)

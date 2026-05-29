@@ -5,6 +5,10 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
+from marketpulse.db.models import (
+    PaperAuditEvent,
+    PaperNavSnapshot,
+)
 from marketpulse.ops.charter_review_aggregator import (
     _week_window,
     build_payload,
@@ -50,15 +54,6 @@ def test_build_payload_empty_db(db_session):
     assert op.backup_error is None
     # Appendix empty.
     assert payload.appendix_snapshot.trading_date is None
-
-
-from marketpulse.db.models import (
-    PaperAuditEvent,
-    PaperFill,
-    PaperNavSnapshot,
-    PaperOrder,
-    PaperPosition,
-)
 
 
 def _seed_snapshot(session, d: date, **overrides):

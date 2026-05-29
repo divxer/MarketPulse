@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
-from pathlib import Path
+import json as _json
+from datetime import UTC
+from datetime import date as _date
+from datetime import datetime as _dt
 
 import pytest
 
 from marketpulse.ops.charter_review import (
+    CharterReviewError,
     _atomic_write_text,
     _read_backup_manifest,
+    generate_charter_review,
 )
 
 
@@ -64,17 +68,6 @@ def test_atomic_write_text_preserves_old_on_replace_failure(tmp_path, monkeypatc
     assert target.read_text(encoding="utf-8") == "old"
     leftovers = sorted(tmp_path.glob(".*.tmp"))
     assert leftovers == []
-
-
-import json as _json
-from datetime import date as _date
-from datetime import datetime as _dt
-import logging as _logging
-
-from marketpulse.ops.charter_review import (
-    CharterReviewError,
-    generate_charter_review,
-)
 
 
 def test_generate_writes_markdown_and_latest_json(db_session, tmp_path):
@@ -167,8 +160,16 @@ def test_generate_db_query_failure_raises_typed(db_session, tmp_path, monkeypatc
         )
 
 
-def test_generate_success_emits_info_log(db_session, tmp_path, caplog):
-    caplog.set_level(_logging.INFO, logger="marketpulse.ops.charter_review")
+def test_generate_success_emits_info_log(db_session, tmp_path, monkeypatch):
+    """Capture the log.info call directly — caplog is unreliable in the full
+    suite because earlier tests reconfigure root handlers."""
+    from marketpulse.ops import charter_review as cr_mod
+    calls: list[tuple[str, dict]] = []
+
+    def _capture(event, *args, **kwargs):
+        calls.append((event, kwargs.get("extra", {})))
+
+    monkeypatch.setattr(cr_mod.log, "info", _capture)
     generate_charter_review(
         session=db_session,
         week_ending=_date(2026, 8, 16),
@@ -176,9 +177,9 @@ def test_generate_success_emits_info_log(db_session, tmp_path, caplog):
         recaps_dir=tmp_path / "charter",
         backup_manifest_path=tmp_path / "m.json",
     )
-    matches = [r for r in caplog.records
-               if "charter_review_generated" in r.getMessage()]
+    matches = [c for c in calls if c[0] == "charter_review_generated"]
     assert len(matches) == 1
+    assert matches[0][1]["week_ending"] == "2026-08-16"
 
 
 def test_generate_atomic_write_preserves_old_md_on_failure(
