@@ -7,7 +7,9 @@ from decimal import Decimal
 
 from marketpulse.portfolio.north_star import NavSnapshot
 from marketpulse.portfolio.portfolio_vs_spy_view import (
+    MAX_CHART_POINTS,
     _compute_chart_run,
+    _downsample,
     _fmt_excess_label,
     _fmt_index_label,
 )
@@ -92,3 +94,23 @@ def test_chart_run_all_incomplete():
     assert run == []
     assert dropped == 3
     assert excluded == 0
+
+
+def test_downsample_noop_when_small():
+    rows = [_snap(date(2026, 1, 1)) for _ in range(10)]
+    out = _downsample(rows)
+    assert len(out) == 10
+    assert out == rows
+
+
+def test_downsample_caps_and_preserves_first_last():
+    rows = [_snap(date(2026, 1, 1), port=str(1.0 + i / 1000)) for i in range(500)]
+    out = _downsample(rows)
+    assert len(out) <= MAX_CHART_POINTS
+    assert out[0] is rows[0]
+    assert out[-1] is rows[-1]
+
+
+def test_downsample_deterministic():
+    rows = [_snap(date(2026, 1, 1), port=str(1.0 + i / 1000)) for i in range(500)]
+    assert _downsample(rows) == _downsample(rows)

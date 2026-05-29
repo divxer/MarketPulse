@@ -108,3 +108,23 @@ def _compute_chart_run(
         else:
             break
     return run, start, len(tail) - len(run)
+
+
+def _downsample(
+    rows: list[NavSnapshot], max_points: int = MAX_CHART_POINTS,
+) -> list[NavSnapshot]:
+    """Deterministic stride-sample to <= max_points, ALWAYS preserving the first
+    and last rows (L5). No-op when len(rows) <= max_points.
+
+    NOTE: round()+set dedup means the result caps at <= max_points but is not
+    guaranteed to be EXACTLY max_points (adjacent indices may collide). This
+    satisfies L5 (<=180); exact-180 is not required for trend rendering.
+    """
+    n = len(rows)
+    if n <= max_points:
+        return list(rows)
+    # Evenly spaced indices across [0, n-1]; i=0 -> 0, i=max-1 -> n-1.
+    idxs = sorted({
+        round(i * (n - 1) / (max_points - 1)) for i in range(max_points)
+    })
+    return [rows[i] for i in idxs]
