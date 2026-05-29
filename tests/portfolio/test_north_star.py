@@ -86,3 +86,111 @@ def test_nav_snapshot_is_frozen():
 
 def test_north_star_window_constant():
     assert NORTH_STAR_WINDOW == 90
+
+
+def test_compute_nav_unpriced_omitted():
+    """L6: unpriced position is OMITTED, not zeroed."""
+    snap = compute_nav_snapshot(
+        trading_date=date(2026, 5, 28),
+        cash_balance=Decimal("10000"),
+        open_positions=[
+            OpenPosition(ticker="AAPL", quantity=Decimal("10")),
+            OpenPosition(ticker="XYZ", quantity=Decimal("5")),  # no price
+        ],
+        price_lookup=_prices({"AAPL": Decimal("200")}),
+        spy_close=Decimal("500"),
+        anchor_portfolio_nav=Decimal("12000"),
+        anchor_spy_close=Decimal("500"),
+        trading_days_observed=1,
+    )
+    # MTM reflects only the priced position.
+    assert snap.holdings_mtm == Decimal("2000")
+    assert snap.portfolio_nav == Decimal("12000")
+    assert snap.unpriced_positions_count == 1
+    assert snap.unpriced_tickers == ("XYZ",)
+
+
+def test_compute_nav_all_unpriced():
+    snap = compute_nav_snapshot(
+        trading_date=date(2026, 5, 28),
+        cash_balance=Decimal("10000"),
+        open_positions=[
+            OpenPosition(ticker="A", quantity=Decimal("1")),
+            OpenPosition(ticker="B", quantity=Decimal("1")),
+        ],
+        price_lookup=_prices({}),
+        spy_close=Decimal("500"),
+        anchor_portfolio_nav=Decimal("10000"),
+        anchor_spy_close=Decimal("500"),
+        trading_days_observed=1,
+    )
+    assert snap.holdings_mtm == Decimal("0")
+    assert snap.portfolio_nav == Decimal("10000")
+    assert snap.unpriced_positions_count == 2
+    assert snap.unpriced_tickers == ("A", "B")
+
+
+def test_compute_nav_unpriced_tickers_dedup_sorted():
+    """L15: 3 lots of same ticker → count=3, tuple has 1 unique element."""
+    snap = compute_nav_snapshot(
+        trading_date=date(2026, 5, 28),
+        cash_balance=Decimal("10000"),
+        open_positions=[
+            OpenPosition(ticker="ZZZ", quantity=Decimal("1")),
+            OpenPosition(ticker="ZZZ", quantity=Decimal("2")),
+            OpenPosition(ticker="ZZZ", quantity=Decimal("3")),
+            OpenPosition(ticker="AAA", quantity=Decimal("1")),
+        ],
+        price_lookup=_prices({}),
+        spy_close=None,
+        anchor_portfolio_nav=Decimal("10000"),
+        anchor_spy_close=None,
+        trading_days_observed=1,
+    )
+    assert snap.unpriced_positions_count == 4
+    assert snap.unpriced_tickers == ("AAA", "ZZZ")
+
+
+def test_compute_nav_spy_missing():
+    snap = compute_nav_snapshot(
+        trading_date=date(2026, 5, 28),
+        cash_balance=Decimal("10000"),
+        open_positions=[],
+        price_lookup=_prices({}),
+        spy_close=None,
+        anchor_portfolio_nav=Decimal("10000"),
+        anchor_spy_close=None,
+        trading_days_observed=1,
+    )
+    assert snap.portfolio_nav == Decimal("10000")
+    assert snap.portfolio_index == Decimal("1")
+    assert snap.spy_index is None
+    assert snap.excess_return is None
+
+
+def test_coverage_ratio_clamped():
+    snap = compute_nav_snapshot(
+        trading_date=date(2026, 5, 28),
+        cash_balance=Decimal("1"),
+        open_positions=[],
+        price_lookup=_prices({}),
+        spy_close=None,
+        anchor_portfolio_nav=Decimal("1"),
+        anchor_spy_close=None,
+        trading_days_observed=120,  # > window
+    )
+    assert snap.coverage_ratio == Decimal("1")
+
+
+def test_is_sufficient_threshold():
+    common = dict(
+        trading_date=date(2026, 5, 28),
+        cash_balance=Decimal("1"),
+        open_positions=[],
+        price_lookup=_prices({}),
+        spy_close=None,
+        anchor_portfolio_nav=Decimal("1"),
+        anchor_spy_close=None,
+    )
+    assert compute_nav_snapshot(**common, trading_days_observed=89).is_sufficient is False
+    assert compute_nav_snapshot(**common, trading_days_observed=90).is_sufficient is True
