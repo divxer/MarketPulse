@@ -63,3 +63,48 @@ def build_eval_universe(session) -> list[str]:
     raw = [r[0] for r in watch_rows] + [p.ticker for p in holdings]
     normalized = {t.strip().upper() for t in raw if t and t.strip()}
     return sorted(normalized)
+
+
+def run_eval_analysis(session, *, ai, universe, max_calls, run_date) -> EvalAnalysisSummary:
+    """Loop the prebuilt universe calling ai.analyze() under a FRESH-call cap.
+
+    Cap semantics: cache hits and errors do NOT consume the budget; only fresh
+    (cached=False) analyses do. Reaching the cap stops the loop, sets cap_hit and
+    skipped_cap. max_calls <= 0 stops before the first call (the `fresh >=
+    max_calls` guard fires at 0 >= 0) — but only when the universe is non-empty,
+    so an empty universe never sets cap_hit.
+
+    Per-ticker errors are isolated: analyze() commits internally, so a raise can
+    leave partial uncommitted state — rollback before the next ticker. Never
+    raises; always returns a summary.
+    """
+    fresh = cache_hits = errors = 0
+    cap_hit = False
+    processed = 0
+    skipped = 0
+    for ticker in universe:
+        if fresh >= max_calls:                    # cap counts FRESH calls only
+            cap_hit = True
+            skipped = len(universe) - processed
+            log.warning(
+                "ai_eval_daily_cap_hit", fresh=fresh,
+                universe_size=len(universe), skipped=skipped,
+                run_date=str(run_date),
+            )
+            break
+        try:
+            result = ai.analyze(ticker)           # commits AiAnalysis + EvaluationEvent
+            if result.cached:
+                cache_hits += 1
+            else:
+                fresh += 1
+        except Exception as exc:                  # per-ticker isolation
+            session.rollback()                    # clean partial state before next
+            errors += 1
+            log.warning("ai_eval_ticker_failed", ticker=ticker, error=str(exc))
+        processed += 1
+    return EvalAnalysisSummary(
+        run_date=run_date, universe_size=len(universe),
+        analyzed_fresh=fresh, cache_hits=cache_hits, skipped_cap=skipped,
+        errors=errors, cap_hit=cap_hit,
+    )
