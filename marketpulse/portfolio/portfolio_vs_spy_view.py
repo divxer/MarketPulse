@@ -12,10 +12,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Literal
 
-from marketpulse.portfolio.north_star import (  # noqa: F401  # used in later PR4 tasks
-    NORTH_STAR_WINDOW,
-    NavSnapshot,
-)
+from marketpulse.portfolio.north_star import NORTH_STAR_WINDOW, NavSnapshot
 
 VIEWBOX_W = 800
 VIEWBOX_H = 280
@@ -186,4 +183,48 @@ def _build_chart_data(chart_run: list[NavSnapshot]) -> ChartData:
         index_lo=lo, index_hi=hi,
         excess_lo=elo, excess_hi=ehi,
         viewbox_w=VIEWBOX_W, viewbox_h=VIEWBOX_H,
+    )
+
+
+def build_portfolio_vs_spy_view(series: list[NavSnapshot]) -> PortfolioVsSpyView:
+    """Map the snapshot series into the view-model. Pure (L1)."""
+    if not series:
+        return PortfolioVsSpyView(
+            has_data=False, chartable=False,
+            hero_excess_return=None, hero_excess_return_label=VALUE_NA,
+            badge="PRELIMINARY", show_insufficiency_banner=False,
+            portfolio_index_latest=None, portfolio_index_label=VALUE_NA,
+            spy_index_latest=None, spy_index_label=VALUE_NA,
+            coverage_observed=0, coverage_required=NORTH_STAR_WINDOW,
+            coverage_label=f"0 / {NORTH_STAR_WINDOW}", is_sufficient=False,
+            first_date=None, last_date=None, chart_start_date=None,
+            dropped_prefix_count=0, excluded_nonprefix_count=0, chart=None,
+        )
+
+    latest = series[-1]
+    chart_run, dropped, excluded = _compute_chart_run(series)
+    chartable = len(chart_run) >= 2
+    chart = _build_chart_data(chart_run) if chartable else None
+
+    return PortfolioVsSpyView(
+        has_data=True,
+        chartable=chartable,
+        hero_excess_return=latest.excess_return,
+        hero_excess_return_label=_fmt_excess_label(latest.excess_return),
+        badge="SUFFICIENT" if latest.is_sufficient else "PRELIMINARY",
+        show_insufficiency_banner=not latest.is_sufficient,
+        portfolio_index_latest=latest.portfolio_index,
+        portfolio_index_label=_fmt_index_label(latest.portfolio_index),
+        spy_index_latest=latest.spy_index,
+        spy_index_label=_fmt_index_label(latest.spy_index),
+        coverage_observed=latest.trading_days_observed,
+        coverage_required=NORTH_STAR_WINDOW,
+        coverage_label=f"{latest.trading_days_observed} / {NORTH_STAR_WINDOW}",
+        is_sufficient=latest.is_sufficient,
+        first_date=series[0].trading_date,
+        last_date=latest.trading_date,
+        chart_start_date=chart_run[0].trading_date if chart_run else None,
+        dropped_prefix_count=dropped,
+        excluded_nonprefix_count=excluded,
+        chart=chart,
     )

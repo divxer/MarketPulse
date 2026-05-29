@@ -15,6 +15,7 @@ from marketpulse.portfolio.portfolio_vs_spy_view import (
     _downsample,
     _fmt_excess_label,
     _fmt_index_label,
+    build_portfolio_vs_spy_view,
 )
 
 
@@ -179,3 +180,72 @@ def test_chart_data_all_excess_zero_guard():
     ]
     cd = _build_chart_data(run)
     assert cd.zero_y == VIEWBOX_H / 2
+
+
+def test_view_e1_empty_series():
+    v = build_portfolio_vs_spy_view([])
+    assert v.has_data is False
+    assert v.chartable is False
+    assert v.chart is None
+    assert v.show_insufficiency_banner is False
+    assert v.hero_excess_return_label == "N/A"
+    assert v.coverage_label == "0 / 90"
+
+
+def test_view_e2_all_spy_none_not_chartable():
+    series = [_snap(date(2026, 8, 10 + i), spy=None, excess=None) for i in range(5)]
+    v = build_portfolio_vs_spy_view(series)
+    assert v.has_data is True
+    assert v.chartable is False
+    assert v.chart is None
+    assert v.chart_start_date is None
+    assert v.dropped_prefix_count == 5
+    assert v.spy_index_label == "N/A"
+    assert v.portfolio_index_label != "N/A"
+
+
+def test_view_e3_single_chart_point_not_chartable():
+    series = [
+        _snap(date(2026, 8, 10), spy=None, excess=None),
+        _snap(date(2026, 8, 11)),
+    ]
+    v = build_portfolio_vs_spy_view(series)
+    assert v.chartable is False
+    assert v.chart is None
+    assert v.hero_excess_return is not None
+
+
+def test_view_e6_latest_missing_spy_na_but_banner_from_sufficiency():
+    series = [
+        _snap(date(2026, 8, 10), sufficient=True),
+        _snap(date(2026, 8, 11), spy=None, excess=None, sufficient=True),
+    ]
+    v = build_portfolio_vs_spy_view(series)
+    assert v.hero_excess_return is None
+    assert v.hero_excess_return_label == "N/A"
+    assert v.badge == "SUFFICIENT"
+    assert v.show_insufficiency_banner is False
+
+
+def test_view_banner_when_insufficient_but_hero_value_shown():
+    series = [
+        _snap(date(2026, 8, 10), excess="0.03", sufficient=False),
+        _snap(date(2026, 8, 11), excess="0.032", sufficient=False),
+    ]
+    v = build_portfolio_vs_spy_view(series)
+    assert v.show_insufficiency_banner is True
+    assert v.badge == "PRELIMINARY"
+    assert v.hero_excess_return_label == "+3.2%"
+
+
+def test_view_e10_chart_present_points_nonempty():
+    series = [
+        _snap(date(2026, 8, 10), port="1.00", spy="1.00", excess="0.00"),
+        _snap(date(2026, 8, 11), port="1.02", spy="1.00", excess="0.02"),
+    ]
+    v = build_portfolio_vs_spy_view(series)
+    assert v.chartable is True
+    assert v.chart is not None
+    assert v.chart.portfolio_points != ""
+    assert v.chart.spy_points != ""
+    assert v.chart.excess_points != ""
