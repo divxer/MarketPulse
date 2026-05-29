@@ -8,7 +8,6 @@ comma-separated TEXT; None/"" parse to empty tuple.
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
-from decimal import Decimal
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -197,27 +196,6 @@ def count_snapshots_in_window(
         .where(PaperNavSnapshot.trading_date <= window_end),
     )
     return min(int(total or 0), window_size)
-
-
-def get_spy_anchor(session: Session) -> Decimal | None:
-    """L16: earliest non-null anchor_spy_close in the snapshot table."""
-    return session.scalar(
-        select(PaperNavSnapshot.anchor_spy_close)
-        .where(PaperNavSnapshot.anchor_spy_close.is_not(None))
-        .order_by(PaperNavSnapshot.trading_date.asc())
-        .limit(1),
-    )
-
-
-def get_earliest_snapshot(session: Session) -> NavSnapshot | None:
-    """Used by snapshot_runner to recover anchor_portfolio_nav on every
-    subsequent snapshot after the first."""
-    row = session.scalars(
-        select(PaperNavSnapshot)
-        .order_by(PaperNavSnapshot.trading_date.asc())
-        .limit(1),
-    ).first()
-    return _row_to_dc(row) if row is not None else None
 
 
 def get_earliest_eligible_snapshot(session: Session) -> NavSnapshot | None:
