@@ -128,6 +128,8 @@ ALL of the following must hold over the **rolling 90-trading-day window**. Each 
 5. **DB backup strategy in place** (currently NOT — see operational gaps below)
 6. **Reconciliation pass rate** (Phase 7c paper vs broker diff) ≥ 99%
 
+**Data-trust precondition (added 2026-05-29):** the excess-return unlock condition (#1) must NOT be evaluated from NAV snapshots unless **price-freshness telemetry is available and shows acceptable staleness**. Since #138 the snapshot marks positions/SPY to the *last available close* (`<= trading_date`) to survive the ~1-day `price_cache` lag — a correct EOD-NAV convention, but it means a NAV can be "complete" while priced from stale closes. Without the P2 freshness telemetry (below), a stale-but-complete NAV could silently flatter `excess_return`. P2 must ship and be reviewed before #1 is trusted for the unlock decision.
+
 Until these hold, `MP_IBKR_ALLOW_LIVE` stays `false` regardless of broker-account configuration. Phase 7b's DU* whitelist remains in effect as defense-in-depth.
 
 ---
@@ -149,6 +151,13 @@ The bottleneck is **data**, not features. Ranked:
 - **P2 — 8a + 8b shadow experiment** — only after P0 + P1 satisfy the unpark trigger. Run v4 and v5 prompts simultaneously and answer the ML-features question with real data instead of guessing about RSI/MACD.
 
 Anything else in the backlog (chart fixes, old branches, optimizer brainstorm, etc.) waits.
+
+### NAV snapshot follow-ups (after #138 — deferred, not on the active P0/P1/P2 plane)
+
+#138 made the snapshot *correct* (mark-to-last-available-close, surviving the ~1-day `price_cache` lag). Two deferred items remain, distinct from the priorities above:
+
+- **F1 — Move the NAV snapshot to a post-close job.** Today it piggybacks the *in-session* paper tick (which must run during market hours to place orders); aligning it with EOD-NAV semantics means **decoupling it into its own ~17:00 ET job**, not just a cron change. Not required for correctness after #138 — a timing improvement only.
+- **F2 — Price-freshness telemetry (trust/decision-readiness requirement).** Capture per snapshot: `price_asof_date`, `spy_asof_date`, `max_price_age_days`, `stale_price_count`; surface a "⚠ marked to previous close (N-day lag)" banner on the north-star / charter pages. **Gating:** before the north-star is used for the live-trading unlock decision, F2 must be present and reviewed (see the data-trust precondition under "Operational unlock conditions"). F2 is a *trust* requirement, not just observability — a stale-but-"complete" NAV could flatter `excess_return`.
 
 ---
 
