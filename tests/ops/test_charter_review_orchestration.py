@@ -2,7 +2,6 @@
 """PR3b — charter_review orchestration tests."""
 from __future__ import annotations
 
-import json
 import json as _json
 from datetime import UTC
 from datetime import date as _date
@@ -13,26 +12,8 @@ import pytest
 from marketpulse.ops.charter_review import (
     CharterReviewError,
     _atomic_write_text,
-    _read_backup_manifest,
     generate_charter_review,
 )
-
-
-def test_read_backup_manifest_missing_returns_none(tmp_path):
-    assert _read_backup_manifest(tmp_path / "nope.json") is None
-
-
-def test_read_backup_manifest_malformed_returns_none(tmp_path):
-    p = tmp_path / "manifest.json"
-    p.write_text("{not json", encoding="utf-8")
-    assert _read_backup_manifest(p) is None
-
-
-def test_read_backup_manifest_ok(tmp_path):
-    p = tmp_path / "manifest.json"
-    p.write_text(json.dumps({"status": "ok"}), encoding="utf-8")
-    parsed = _read_backup_manifest(p)
-    assert parsed == {"status": "ok"}
 
 
 def test_atomic_write_text_creates_new_file(tmp_path):
@@ -141,6 +122,41 @@ def test_generate_malformed_manifest_lands_file(db_session, tmp_path):
     )
     text = p.read_text(encoding="utf-8")
     assert "Backup manifest unavailable" in text
+
+
+def test_generate_reads_real_pr1_manifest_via_pr2_normalizer(db_session, tmp_path):
+    """Regression: a healthy backup written in PR1's RAW manifest shape
+    (`timestamp`, no `is_stale`/`last_backup_at`) must render as a real,
+    fresh backup — not 'unavailable' and not N/A. This fails if the
+    orchestration reads raw manifest keys instead of routing through PR2's
+    build_backup_section, which computes staleness from `timestamp`."""
+    manifest_path = tmp_path / "m.json"
+    # Exactly the shape marketpulse.ops.backup.write_manifest produces.
+    manifest_path.write_text(
+        _json.dumps({
+            "status": "ok",
+            "timestamp": "2026-08-17T09:00:00+00:00",
+            "source": "/data/marketpulse.db",
+            "destination": "/data/backups/marketpulse-2026-08-17.db",
+            "size_bytes": 1024,
+            "integrity_check": "ok",
+            "duration_ms": 42,
+            "error": None,
+        }),
+        encoding="utf-8",
+    )
+    p = generate_charter_review(
+        session=db_session,
+        week_ending=_date(2026, 8, 16),
+        now=_dt(2026, 8, 17, 9, 30, tzinfo=UTC),  # 30 min after backup → fresh
+        recaps_dir=tmp_path / "charter",
+        backup_manifest_path=manifest_path,
+    )
+    text = p.read_text(encoding="utf-8")
+    assert "Backup manifest unavailable" not in text
+    assert "Backup status: ok" in text
+    assert "Last successful backup: 2026-08-17T09:00:00+00:00" in text
+    assert "Stale (>25h): False" in text
 
 
 def test_generate_db_query_failure_raises_typed(db_session, tmp_path, monkeypatch):

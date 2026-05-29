@@ -28,7 +28,7 @@ def test_build_payload_empty_db(db_session):
     payload = build_payload(
         session=db_session,
         week_ending=date(2026, 8, 16),
-        backup_manifest=None,
+        backup_section=None,
         generated_at=datetime(2026, 8, 17, 9, 30, tzinfo=UTC),
     )
     assert isinstance(payload, CharterReviewPayload)
@@ -99,7 +99,7 @@ def test_build_payload_trading_days_observed(db_session):
 
     payload = build_payload(
         session=db_session, week_ending=date(2026, 8, 16),
-        backup_manifest=None,
+        backup_section=None,
         generated_at=datetime(2026, 8, 17, 9, 30, tzinfo=UTC),
     )
     assert payload.this_week.trading_days_observed == 3
@@ -113,7 +113,7 @@ def test_build_payload_week_window_inclusive(db_session):
     db_session.commit()
     payload = build_payload(
         session=db_session, week_ending=date(2026, 8, 16),
-        backup_manifest=None,
+        backup_section=None,
         generated_at=datetime(2026, 8, 17, 9, 30, tzinfo=UTC),
     )
     assert payload.this_week.trading_days_observed == 2
@@ -129,7 +129,7 @@ def test_build_payload_north_star_first_last(db_session):
     db_session.commit()
     payload = build_payload(
         session=db_session, week_ending=date(2026, 8, 16),
-        backup_manifest=None,
+        backup_section=None,
         generated_at=datetime(2026, 8, 17, 9, 30, tzinfo=UTC),
     )
     ns = payload.north_star_this
@@ -149,7 +149,7 @@ def test_build_payload_tick_success_rate(db_session):
     db_session.commit()
     payload = build_payload(
         session=db_session, week_ending=date(2026, 8, 16),
-        backup_manifest=None,
+        backup_section=None,
         generated_at=datetime(2026, 8, 17, 9, 30, tzinfo=UTC),
     )
     diag = payload.diagnostics_this.tick_success_rate
@@ -175,7 +175,7 @@ def test_build_payload_rejection_top_reasons_sorted(db_session):
     db_session.commit()
     payload = build_payload(
         session=db_session, week_ending=date(2026, 8, 16),
-        backup_manifest=None,
+        backup_section=None,
         generated_at=datetime(2026, 8, 17, 9, 30, tzinfo=UTC),
     )
     diag = payload.diagnostics_this.order_rejection_rate
@@ -196,7 +196,7 @@ def test_build_payload_trade_count_uses_fills(db_session):
     db_session.commit()
     payload = build_payload(
         session=db_session, week_ending=date(2026, 8, 16),
-        backup_manifest=None,
+        backup_section=None,
         generated_at=datetime(2026, 8, 17, 9, 30, tzinfo=UTC),
     )
     # L5: source is paper_fill, not audit event. Snapshot exists → obs>0.
@@ -209,7 +209,7 @@ def test_build_payload_trade_count_none_when_no_snapshots(db_session):
     db_session.commit()
     payload = build_payload(
         session=db_session, week_ending=date(2026, 8, 16),
-        backup_manifest=None,
+        backup_section=None,
         generated_at=datetime(2026, 8, 17, 9, 30, tzinfo=UTC),
     )
     assert payload.diagnostics_this.paper_trade_count.value is None
@@ -221,7 +221,7 @@ def test_build_payload_engine_errors_none_when_no_ticks(db_session):
     db_session.commit()
     payload = build_payload(
         session=db_session, week_ending=date(2026, 8, 16),
-        backup_manifest=None,
+        backup_section=None,
         generated_at=datetime(2026, 8, 17, 9, 30, tzinfo=UTC),
     )
     assert payload.diagnostics_this.engine_invariant_errors.value is None
@@ -239,7 +239,7 @@ def test_build_payload_engine_errors_observations(db_session):
     db_session.commit()
     payload = build_payload(
         session=db_session, week_ending=date(2026, 8, 16),
-        backup_manifest=None,
+        backup_section=None,
         generated_at=datetime(2026, 8, 17, 9, 30, tzinfo=UTC),
     )
     diag = payload.diagnostics_this.engine_invariant_errors
@@ -256,7 +256,7 @@ def test_build_payload_engine_errors_reasons_only_from_engine(db_session):
     db_session.commit()
     payload = build_payload(
         session=db_session, week_ending=date(2026, 8, 16),
-        backup_manifest=None,
+        backup_section=None,
         generated_at=datetime(2026, 8, 17, 9, 30, tzinfo=UTC),
     )
     diag = payload.diagnostics_this.engine_invariant_errors
@@ -279,7 +279,7 @@ def test_build_payload_top_reasons_empty_normalized(db_session):
     db_session.commit()
     payload = build_payload(
         session=db_session, week_ending=date(2026, 8, 16),
-        backup_manifest=None,
+        backup_section=None,
         generated_at=datetime(2026, 8, 17, 9, 30, tzinfo=UTC),
     )
     diag = payload.diagnostics_this.engine_invariant_errors
@@ -291,7 +291,7 @@ def test_build_payload_top_reasons_empty_normalized(db_session):
 def test_build_payload_manifest_none(db_session):
     payload = build_payload(
         session=db_session, week_ending=date(2026, 8, 16),
-        backup_manifest=None,
+        backup_section=None,
         generated_at=datetime(2026, 8, 17, 9, 30, tzinfo=UTC),
     )
     op = payload.operational_floor
@@ -311,7 +311,7 @@ def test_build_payload_manifest_ok(db_session):
     }
     payload = build_payload(
         session=db_session, week_ending=date(2026, 8, 16),
-        backup_manifest=manifest,
+        backup_section=manifest,
         generated_at=datetime(2026, 8, 17, 9, 30, tzinfo=UTC),
     )
     op = payload.operational_floor
@@ -319,3 +319,44 @@ def test_build_payload_manifest_ok(db_session):
     assert op.backup_status == "ok"
     assert op.backup_is_stale is False
     assert op.backup_last_at == "2026-08-17T09:00:00+00:00"
+
+
+def test_build_payload_manifest_failed_is_available_with_error(db_session):
+    """A 'failed' status is a real manifest: manifest_available=True and the
+    failure reason is surfaced (not swallowed like the 'missing' case)."""
+    section = {
+        "status": "failed",
+        "is_stale": True,
+        "last_backup_at": "2026-08-17T09:00:00+00:00",
+        "error": "OSError: disk full",
+    }
+    payload = build_payload(
+        session=db_session, week_ending=date(2026, 8, 16),
+        backup_section=section,
+        generated_at=datetime(2026, 8, 17, 9, 30, tzinfo=UTC),
+    )
+    op = payload.operational_floor
+    assert op.manifest_available is True
+    assert op.backup_status == "failed"
+    assert op.backup_error == "OSError: disk full"
+
+
+def test_build_payload_manifest_missing_status_is_unavailable(db_session):
+    """PR2 emits status='missing' for a missing/malformed manifest. That must
+    map to manifest_available=False (regression: 'missing' was previously
+    treated as an available status)."""
+    section = {
+        "status": "missing", "is_stale": True,
+        "last_backup_at": None, "error": "manifest file not found",
+    }
+    payload = build_payload(
+        session=db_session, week_ending=date(2026, 8, 16),
+        backup_section=section,
+        generated_at=datetime(2026, 8, 17, 9, 30, tzinfo=UTC),
+    )
+    op = payload.operational_floor
+    assert op.manifest_available is False
+    assert op.backup_status == "missing"
+    assert op.backup_is_stale is True
+    assert op.backup_last_at is None
+    assert op.backup_error is None

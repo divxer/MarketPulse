@@ -1,9 +1,10 @@
 # Layer: ops
 """PR3b — orchestration entry for the weekly charter review.
 
-Reads backup manifest, calls aggregator + renderer, atomically writes
-the markdown and the latest.json companion (L10/L11). May raise
-CharterReviewError; the scheduler catches at the boundary (L4).
+Normalizes the backup manifest via PR2's shared builder, calls aggregator
++ renderer, atomically writes the markdown and the latest.json companion
+(L10/L11). May raise CharterReviewError; the scheduler catches at the
+boundary (L4).
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
+from marketpulse.ops.charter_metrics import build_backup_section
 from marketpulse.ops.charter_review_aggregator import build_payload
 from marketpulse.ops.charter_review_renderer import render_charter_review
 
@@ -32,21 +34,6 @@ _os_replace = os.replace
 class CharterReviewError(Exception):
     """Surface error from the charter review pipeline. Raised by
     generate_charter_review; the scheduler boundary catches and logs."""
-
-
-def _read_backup_manifest(path: Path) -> dict | None:
-    """Returns parsed manifest dict, or None on missing/unreadable/malformed.
-    Never raises — that case becomes manifest_available=False in payload."""
-    if not path.exists():
-        return None
-    try:
-        raw = path.read_text(encoding="utf-8")
-        parsed = json.loads(raw)
-        if not isinstance(parsed, dict):
-            return None
-        return parsed
-    except (OSError, json.JSONDecodeError):
-        return None
 
 
 def _atomic_write_text(path: Path, payload: str) -> None:
@@ -97,11 +84,15 @@ def generate_charter_review(
             f"week_ending must be Sunday (weekday=6); got weekday={week_ending.weekday()}",
         )
 
-    manifest = _read_backup_manifest(backup_manifest_path)
+    # L14: normalize via PR2's shared builder so the weekly report and the
+    # /lab/charter-metrics endpoint agree on backup status + staleness.
+    backup_section = build_backup_section(
+        manifest_path=backup_manifest_path, now=now,
+    )
     try:
         payload = build_payload(
             session=session, week_ending=week_ending,
-            backup_manifest=manifest, generated_at=now,
+            backup_section=backup_section, generated_at=now,
         )
     except CharterReviewError:
         raise   # already typed; don't double-wrap

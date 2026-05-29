@@ -251,26 +251,26 @@ def _build_diagnostics(session: Session, week: WeekWindow) -> DiagnosticsWeek:
     )
 
 
-def _operational_floor(manifest: dict | None) -> OperationalFloor:
-    """L14: None or malformed manifest → missing + stale + Nones."""
-    if not manifest:
-        return OperationalFloor(
-            backup_status="missing", backup_is_stale=True,
-            backup_last_at=None, backup_error=None,
-            manifest_available=False,
-        )
-    raw_status = manifest.get("status")
-    if raw_status not in {"ok", "failed", "missing"}:
+def _operational_floor(backup: dict | None) -> OperationalFloor:
+    """Map PR2's normalized backup section (charter_metrics.build_backup_section)
+    onto OperationalFloor.
+
+    L14: a 'missing' status (also None / unknown status) means no usable
+    manifest → manifest_available=False with missing + stale + Nones. Only
+    'ok'/'failed' are real manifests; for those we read PR2's computed
+    is_stale and last_backup_at (PR2 owns the single staleness definition)."""
+    status = backup.get("status") if backup else None
+    if status not in {"ok", "failed"}:
         return OperationalFloor(
             backup_status="missing", backup_is_stale=True,
             backup_last_at=None, backup_error=None,
             manifest_available=False,
         )
     return OperationalFloor(
-        backup_status=raw_status,
-        backup_is_stale=bool(manifest.get("is_stale", True)),
-        backup_last_at=manifest.get("last_backup_at"),
-        backup_error=manifest.get("error"),
+        backup_status=status,
+        backup_is_stale=bool(backup.get("is_stale", True)),
+        backup_last_at=backup.get("last_backup_at"),
+        backup_error=backup.get("error"),
         manifest_available=True,
     )
 
@@ -308,11 +308,11 @@ def build_payload(
     *,
     session: Session,
     week_ending: date,
-    backup_manifest: dict | None,
+    backup_section: dict | None,
     generated_at: datetime,
 ) -> CharterReviewPayload:
-    """Build the payload. Diagnostics are stubbed empty in Task 5;
-    populated in Task 6."""
+    """Build the payload. `backup_section` is PR2's normalized backup dict
+    (charter_metrics.build_backup_section), or None when unavailable."""
     this_window = _week_window(week_ending)
     prior_window = _week_window(week_ending - timedelta(days=7))
     return CharterReviewPayload(
@@ -332,6 +332,6 @@ def build_payload(
         north_star_prior=_build_north_star_for_week(session, prior_window),
         diagnostics_this=_build_diagnostics(session, this_window),
         diagnostics_prior=_build_diagnostics(session, prior_window),
-        operational_floor=_operational_floor(backup_manifest),
+        operational_floor=_operational_floor(backup_section),
         appendix_snapshot=_appendix_snapshot(session, this_window),
     )
