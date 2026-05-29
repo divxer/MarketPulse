@@ -184,17 +184,21 @@ Reads only: `WatchlistItem` (model) and the open-positions helper. No mutation.
 ```python
 def run_eval_analysis_job() -> None:
     settings = get_settings()
-    run_date = date.today()
-    gen = session_scope()                          # generator helper (not a CM)
-    db = next(gen)
+    run_date = datetime.now(UTC).date()             # UTC — the cron is UTC; never
+                                                    # date.today() (container-local TZ).
+    gen = None
+    db = None
     summary = None
     status = "ok"
     try:
+        gen = session_scope()                       # generator helper (NOT a context mgr)
+        db = next(gen)
         if not settings.ai_eval_enabled:
             status = "disabled"
             summary = EvalAnalysisSummary(run_date, 0, 0, 0, 0, 0, False)
             log.info("ai_eval_disabled")
-            return
+            return                                  # early return; finally persists
+                                                    # the disabled summary below.
         data = DataService(db, _build_quote_client(),
                            news_ttl_days=settings.news_cache_ttl_days)
         ai = AiService(db, ai_client=AnthropicClient(), data=data,
@@ -206,34 +210,48 @@ def run_eval_analysis_job() -> None:
                                     max_calls=settings.ai_eval_max_calls_per_day,
                                     run_date=run_date)
         log.info("ai_eval_done", **summary.as_dict(status="ok"))
-    except Exception as exc:                        # job-boundary failure
+    except Exception as exc:                         # job-boundary failure — never re-raised
         status = "failed"
+        summary = None                               # don't let finally persist a stale ok
         log.warning("ai_eval_job_failed", error=str(exc))
-        # Best-effort failed-summary; db may be unusable.
-        try:
-            record_eval_run_summary(
-                db, EvalAnalysisSummary(run_date, 0, 0, 0, 0, 0, False)
-                    .as_dict(status="failed", error=str(exc)))
-        except Exception:
-            pass
-        return
+        if db is not None:                           # can only persist if the session opened
+            try:
+                record_eval_run_summary(
+                    db, EvalAnalysisSummary(run_date, 0, 0, 0, 0, 0, False)
+                        .as_dict(status="failed", error=str(exc)))
+            except Exception:
+                pass
+        # db is None (session never opened) → log-only, no persisted summary (physical limit).
     finally:
         if summary is not None and status in ("ok", "disabled"):
             try:
                 record_eval_run_summary(db, summary.as_dict(status=status))
             except Exception as exc:
                 log.warning("ai_eval_summary_persist_failed", error=str(exc))
-        gen.close()                                 # runs the generator's finally → db.close()
+        if gen is not None:
+            gen.close()                              # runs the generator's finally → db.close()
 ```
 
-- **Disabled** still records a `status="disabled"` summary so `/health/scheduler`
-  can explain "last run was disabled," not just "job exists."
+- **`run_date` is UTC** (`datetime.now(UTC).date()`), matching the UTC cron — never
+  `date.today()`, which would drift with the container's local timezone.
+- **`gen`/`db` initialized to `None`** before the `try`, so the `finally`'s
+  `gen.close()` can't raise `NameError` if `session_scope()`/`next(gen)` fails.
+- **Disabled** returns early; the `finally` persists the `status="disabled"`
+  summary so `/health/scheduler` can explain "last run was disabled," not just
+  "job exists."
 - **Job-boundary failure** (e.g. `build_eval_universe` raises, AiService
   construction fails) → record `status="failed"` + error, WARN, **no raise**. The
   scheduler never crashes.
-- **Session won't even open** (`next(gen)` itself raises): physically cannot write
-  an `AppSetting`. Behavior is **log warning only, no persisted failed summary** —
-  a physical limit, not a design failure. (`gen.close()` is still attempted.)
+- **Session won't even open** (`next(gen)` raises → `db is None`): physically
+  cannot write an `AppSetting`. Behavior is **log warning only, no persisted
+  summary** — a physical limit, not a design failure. (`gen.close()` is still
+  attempted since `gen` is set.)
+
+**Logging convention:** `eval_analysis.py`, `eval_state.py`, and the job use
+`log = get_logger(__name__)` (structlog, kwargs-style:
+`log.info("event", key=value)`) — matching `jobs.py` and `ai/service.py`. Do NOT
+use stdlib `logging.getLogger(...).info("event", extra={...})` (snapshot_runner's
+style); structlog accepts the kwargs / `**summary.as_dict(...)` form directly.
 
 ### Scheduler registration (unconditional + body gate)
 
@@ -289,8 +307,11 @@ The only side-effecting call in `eval_analysis.py` is `ai.analyze()`. An
 architecture-guard test asserts the module imports **nothing** from the
 order/allocation/execution/watchlist-mutation layers:
 
-**Forbidden imports** (substring match on import statements in
-`marketpulse/ai/eval_analysis.py`):
+**Forbidden imports** — the guard scans **only `import` / `from … import …`
+lines** of `marketpulse/ai/eval_analysis.py` (filter to lines whose stripped form
+starts with `import ` or `from `, so a module name appearing in a docstring or
+comment can't cause a false positive), then substring-matches each forbidden
+module:
 
 ```
 marketpulse.trading.execution_engine
@@ -319,12 +340,15 @@ holdings. Mirrors the existing P6b forward-invariant grep test.
 - cap hit mid-loop → `fresh==max_calls, skipped_cap==remaining, cap_hit=True`.
 - cache hits don't consume cap → universe ≫ cap but mostly cached → all processed,
   `fresh ≤ cap`.
-- `max_calls<=0` → `fresh=0, skipped_cap=universe_size, cap_hit=True`, WARN.
+- `max_calls<=0` with **nonempty** universe → `fresh=0,
+  skipped_cap=universe_size, cap_hit=True`, WARN.
+- `max_calls<=0` with **empty** universe → loop never enters →
+  `cap_hit=False, skipped_cap=0` (no spurious cap_hit on an empty universe).
 - per-ticker raise → `errors+=1`, **`session.rollback()` asserted called**, loop
   continues, error doesn't consume cap.
 - **mixed-path invariant** — `fresh=2, cache_hit=1, errors=1, skipped=3` over a
   `universe_size=7`: assert `processed == 4` and `processed + skipped_cap == 7`.
-- empty universe → all-zero, no error.
+- empty universe (default cap) → all-zero, `cap_hit=False`, no error.
 
 ### Universe `build_eval_universe` (db_session)
 
