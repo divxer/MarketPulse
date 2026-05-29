@@ -8,7 +8,6 @@ comma-separated TEXT; None/"" parse to empty tuple.
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
-from decimal import Decimal
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -199,21 +198,19 @@ def count_snapshots_in_window(
     return min(int(total or 0), window_size)
 
 
-def get_spy_anchor(session: Session) -> Decimal | None:
-    """L16: earliest non-null anchor_spy_close in the snapshot table."""
-    return session.scalar(
-        select(PaperNavSnapshot.anchor_spy_close)
-        .where(PaperNavSnapshot.anchor_spy_close.is_not(None))
-        .order_by(PaperNavSnapshot.trading_date.asc())
-        .limit(1),
-    )
+def get_earliest_eligible_snapshot(session: Session) -> NavSnapshot | None:
+    """Earliest snapshot fit to be the north-star inception anchor: fully
+    priced (unpriced_positions_count == 0) AND benchmarked (spy_close present).
 
-
-def get_earliest_snapshot(session: Session) -> NavSnapshot | None:
-    """Used by snapshot_runner to recover anchor_portfolio_nav on every
-    subsequent snapshot after the first."""
+    Degenerate rows — produced by pre-market manual triggers, price_cache gaps,
+    or transient SPY/position-price absence — are skipped so they never become
+    the inception baseline (which would inflate portfolio_index for the whole
+    series). Anchoring BOTH indices to one eligible day also keeps
+    excess_return = portfolio_index - spy_index coherent (shared t=0)."""
     row = session.scalars(
         select(PaperNavSnapshot)
+        .where(PaperNavSnapshot.spy_close.is_not(None))
+        .where(PaperNavSnapshot.unpriced_positions_count == 0)
         .order_by(PaperNavSnapshot.trading_date.asc())
         .limit(1),
     ).first()

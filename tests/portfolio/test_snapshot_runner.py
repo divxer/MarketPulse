@@ -256,3 +256,58 @@ def test_run_nav_snapshot_repo_error_propagates(db_session, monkeypatch):
     )
     with pytest.raises(RuntimeError, match="disk full"):
         run_nav_snapshot(db_session, trading_date=date(2026, 5, 28))
+
+
+def test_degenerate_first_row_not_used_as_anchor(db_session):
+    """Anchor-eligibility fix: a degenerate first snapshot (unpriced positions,
+    no SPY) must NOT become the north-star inception anchor. The first
+    fully-priced + SPY snapshot self-anchors to its OWN nav (index 1.0),
+    instead of inheriting the degenerate cash-only anchor."""
+    _seed_cash(db_session, "100000", datetime(2026, 5, 26, 13, 0, tzinfo=UTC))
+    _seed_position(db_session, ticker="AAPL", qty=10,
+                   opened=datetime(2026, 5, 26, 14, 0, tzinfo=UTC))
+    # Day 1: AAPL has NO price and no SPY → degenerate (unpriced=1, spy=None).
+    db_session.commit()
+    d1 = run_nav_snapshot(db_session, trading_date=date(2026, 5, 26))
+    db_session.commit()
+    assert d1.unpriced_positions_count == 1
+    assert d1.spy_close is None
+    assert d1.anchor_portfolio_nav == Decimal("100000")  # cash-only self-anchor
+
+    # Day 2: AAPL priced + SPY present → eligible. Must self-anchor to its OWN
+    # nav (102000), NOT inherit day1's cash-only 100000.
+    _seed_price(db_session, "AAPL", date(2026, 5, 27), 200.0)
+    _seed_price(db_session, "SPY", date(2026, 5, 27), 500.0)
+    db_session.commit()
+    d2 = run_nav_snapshot(db_session, trading_date=date(2026, 5, 27))
+    db_session.commit()
+    assert d2.unpriced_positions_count == 0
+    assert d2.portfolio_nav == Decimal("102000")
+    assert d2.anchor_portfolio_nav == Decimal("102000")  # self-anchored, not 100000
+    assert d2.portfolio_index == Decimal("1")
+    assert d2.anchor_spy_close == Decimal("500")
+    assert d2.spy_index == Decimal("1")
+
+
+def test_later_snapshots_inherit_earliest_eligible_anchor(db_session):
+    """Once a clean inception exists, later snapshots anchor to it (shared t=0)."""
+    _seed_cash(db_session, "100000", datetime(2026, 5, 26, 13, 0, tzinfo=UTC))
+    _seed_position(db_session, ticker="AAPL", qty=10,
+                   opened=datetime(2026, 5, 26, 14, 0, tzinfo=UTC))
+    _seed_price(db_session, "AAPL", date(2026, 5, 26), 200.0)
+    _seed_price(db_session, "SPY", date(2026, 5, 26), 500.0)
+    db_session.commit()
+    d1 = run_nav_snapshot(db_session, trading_date=date(2026, 5, 26))
+    db_session.commit()
+    assert d1.anchor_portfolio_nav == Decimal("102000")
+    assert d1.anchor_spy_close == Decimal("500")
+
+    _seed_price(db_session, "AAPL", date(2026, 5, 27), 210.0)
+    _seed_price(db_session, "SPY", date(2026, 5, 27), 550.0)
+    db_session.commit()
+    d2 = run_nav_snapshot(db_session, trading_date=date(2026, 5, 27))
+    db_session.commit()
+    assert d2.anchor_portfolio_nav == Decimal("102000")  # inherited from d1
+    assert d2.portfolio_nav == Decimal("102100")         # 100000 + 10*210
+    assert d2.anchor_spy_close == Decimal("500")
+    assert d2.spy_index == Decimal("550") / Decimal("500")

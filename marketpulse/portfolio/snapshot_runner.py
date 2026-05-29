@@ -28,9 +28,8 @@ from marketpulse.portfolio.north_star import (
 from marketpulse.portfolio.snapshot_repo import (
     SnapshotAlreadyExists,
     count_snapshots_in_window,
-    get_earliest_snapshot,
+    get_earliest_eligible_snapshot,
     get_snapshot,
-    get_spy_anchor,
     insert_snapshot,
 )
 
@@ -120,25 +119,31 @@ def run_nav_snapshot(
     open_positions = _read_open_positions(session, trading_date)
     price_lookup, spy_close = _read_price_lookup(session, trading_date)
 
-    # Portfolio anchor — earliest snapshot's, or self-anchor on first run.
-    # L6: self-anchor preview uses the SAME omit-unpriced rule as the pure
-    # compute function — never `(price or 0)`. Otherwise the anchor would
-    # silently include phantom zero-price MTM and corrupt portfolio_index.
-    earliest = get_earliest_snapshot(session)
-    if earliest is None:
+    # North-star anchor (PR3a + anchor-eligibility fix): anchor BOTH indices to
+    # the earliest ELIGIBLE snapshot — fully priced (unpriced_positions_count==0)
+    # AND benchmarked (spy_close present). Degenerate rows (pre-market manual
+    # triggers, price_cache gaps, transient SPY/position-price absence) are
+    # skipped so they never pollute the inception baseline; otherwise a
+    # cash-only first row would inflate portfolio_index for the entire series.
+    # A shared inception day also keeps excess_return coherent.
+    eligible = get_earliest_eligible_snapshot(session)
+    if eligible is not None:
+        anchor_portfolio_nav = eligible.portfolio_nav
+        anchor_spy_close = eligible.spy_close
+    else:
+        # No clean inception yet. Self-anchor THIS row for internal consistency
+        # (index 1.0). If this row is itself ineligible (no SPY / unpriced
+        # positions) it is NOT inherited — the first later eligible snapshot
+        # becomes the true inception and re-anchors the series.
+        # L6: preview omits unpriced positions (never `(price or 0)`), matching
+        # the pure compute function, so the self-anchor can't include phantom
+        # zero-price MTM.
         portfolio_nav_preview = cash_balance
         for pos in open_positions:
             price = price_lookup(pos.ticker)
             if price is not None:
                 portfolio_nav_preview += pos.quantity * price
         anchor_portfolio_nav = portfolio_nav_preview
-    else:
-        anchor_portfolio_nav = earliest.anchor_portfolio_nav
-
-    # L16: SPY lazy anchor — earliest non-null anchor_spy_close in DB; if
-    # none and current SPY is available, current becomes the anchor.
-    anchor_spy_close = get_spy_anchor(session)
-    if anchor_spy_close is None and spy_close is not None:
         anchor_spy_close = spy_close
 
     trading_days_observed = count_snapshots_in_window(
