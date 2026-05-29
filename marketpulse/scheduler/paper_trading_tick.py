@@ -111,5 +111,10 @@ def paper_trading_tick_job(*, notifier: Notifier | None = None) -> None:
             )
         except Exception as exc:  # pragma: no cover - belt-and-braces guard
             log.warning("paper_tick_notify_failed: %s", exc)
+
+        # Charter top-3 #1 PR3a — EOD NAV snapshot. Piggybacks on tick
+        # fill settlement to avoid race against in-flight fills.
+        from marketpulse.scheduler.jobs import _run_nav_snapshot_safely
+        _run_nav_snapshot_safely(session, tick_date=result.tick_date)
     finally:
         session.close()
