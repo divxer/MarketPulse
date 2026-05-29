@@ -108,6 +108,149 @@ def _empty_diagnostics() -> DiagnosticsWeek:
     )
 
 
+def _normalize_reason(raw: str | None) -> str:
+    """L19: NULL or empty → '(no reason)'. Anything else passes through."""
+    if raw is None or raw == "":
+        return NO_REASON
+    return raw
+
+
+def _top_reasons(
+    session: Session, *, event_types: tuple[str, ...],
+    window_start: datetime, window_end: datetime, limit: int = 3,
+) -> tuple[ReasonCount, ...]:
+    """SELECT reason, COUNT(*) GROUP BY reason; normalize empties to
+    "(no reason)" then re-aggregate; ORDER BY count DESC, reason ASC LIMIT."""
+    rows = session.execute(
+        select(PaperAuditEvent.reason, func.count(PaperAuditEvent.id))
+        .where(and_(
+            PaperAuditEvent.event_type.in_(event_types),
+            PaperAuditEvent.timestamp >= window_start,
+            PaperAuditEvent.timestamp <= window_end,
+        ))
+        .group_by(PaperAuditEvent.reason),
+    ).all()
+    bucket: dict[str, int] = {}
+    for raw_reason, n in rows:
+        key = _normalize_reason(raw_reason)
+        bucket[key] = bucket.get(key, 0) + int(n)
+    ordered = sorted(bucket.items(), key=lambda kv: (-kv[1], kv[0]))
+    return tuple(ReasonCount(reason=r, count=c) for r, c in ordered[:limit])
+
+
+def _count_audit(
+    session: Session, *, event_type: str,
+    window_start: datetime, window_end: datetime,
+) -> int:
+    return int(session.scalar(
+        select(func.count(PaperAuditEvent.id))
+        .where(and_(
+            PaperAuditEvent.event_type == event_type,
+            PaperAuditEvent.timestamp >= window_start,
+            PaperAuditEvent.timestamp <= window_end,
+        )),
+    ) or 0)
+
+
+def _build_tick_success_rate(
+    session: Session, week: WeekWindow,
+) -> DiagnosticWeek:
+    start, end = _eod_window(week)
+    completed = _count_audit(session, event_type="TICK_COMPLETED",
+                              window_start=start, window_end=end)
+    errored = _count_audit(session, event_type="ENGINE_INVARIANT_ERROR",
+                            window_start=start, window_end=end)
+    total = completed + errored
+    if total == 0:
+        return _empty_diagnostic()
+    value = Decimal(completed) / Decimal(total)
+    return DiagnosticWeek(
+        value=value, observations=total,
+        top_reasons=_top_reasons(
+            session, event_types=("ENGINE_INVARIANT_ERROR",),
+            window_start=start, window_end=end,
+        ),
+    )
+
+
+def _build_order_rejection_rate(
+    session: Session, week: WeekWindow,
+) -> DiagnosticWeek:
+    start, end = _eod_window(week)
+    placed = _count_audit(session, event_type="ORDER_PLACED",
+                           window_start=start, window_end=end)
+    rejected = _count_audit(session, event_type="ORDER_REJECTED",
+                             window_start=start, window_end=end)
+    total = placed + rejected
+    if total == 0:
+        return _empty_diagnostic()
+    value = Decimal(rejected) / Decimal(total)
+    return DiagnosticWeek(
+        value=value, observations=total,
+        top_reasons=_top_reasons(
+            session, event_types=("ORDER_REJECTED",),
+            window_start=start, window_end=end,
+        ),
+    )
+
+
+def _build_paper_trade_count(
+    session: Session, week: WeekWindow,
+) -> DiagnosticWeek:
+    """L5: paper_fill side='ENTRY' AND position_id IS NOT NULL.
+    L7: observations = trading days observed in week.
+    L22: zero observations → value=None. Otherwise the integer fill count,
+    including 0 when the week had trading days but no entry fills."""
+    obs = _trading_days_observed(session, week)
+    if obs == 0:
+        return _empty_diagnostic()
+    start, end = _eod_window(week)
+    count = int(session.scalar(
+        select(func.count(PaperFill.id))
+        .where(and_(
+            PaperFill.side == "ENTRY",
+            PaperFill.position_id.is_not(None),
+            PaperFill.filled_at >= start,
+            PaperFill.filled_at <= end,
+        )),
+    ) or 0)
+    return DiagnosticWeek(
+        value=count, observations=obs, top_reasons=(),
+    )
+
+
+def _build_engine_invariant_errors(
+    session: Session, week: WeekWindow,
+) -> DiagnosticWeek:
+    """L6: observations = TICK_COMPLETED + ENGINE_INVARIANT_ERROR.
+    L22: if total = 0 (no tick activity at all this week), value=None.
+    If total>0 and errors=0, value=0 (truthful: ticks ran, none broke)."""
+    start, end = _eod_window(week)
+    completed = _count_audit(session, event_type="TICK_COMPLETED",
+                              window_start=start, window_end=end)
+    errored = _count_audit(session, event_type="ENGINE_INVARIANT_ERROR",
+                            window_start=start, window_end=end)
+    total = completed + errored
+    if total == 0:
+        return _empty_diagnostic()
+    return DiagnosticWeek(
+        value=errored, observations=total,
+        top_reasons=_top_reasons(
+            session, event_types=("ENGINE_INVARIANT_ERROR",),
+            window_start=start, window_end=end,
+        ),
+    )
+
+
+def _build_diagnostics(session: Session, week: WeekWindow) -> DiagnosticsWeek:
+    return DiagnosticsWeek(
+        tick_success_rate=_build_tick_success_rate(session, week),
+        order_rejection_rate=_build_order_rejection_rate(session, week),
+        paper_trade_count=_build_paper_trade_count(session, week),
+        engine_invariant_errors=_build_engine_invariant_errors(session, week),
+    )
+
+
 def _operational_floor(manifest: dict | None) -> OperationalFloor:
     """L14: None or malformed manifest → missing + stale + Nones."""
     if not manifest:
@@ -187,8 +330,8 @@ def build_payload(
         ),
         north_star_this=_build_north_star_for_week(session, this_window),
         north_star_prior=_build_north_star_for_week(session, prior_window),
-        diagnostics_this=_empty_diagnostics(),       # populated in Task 6
-        diagnostics_prior=_empty_diagnostics(),       # populated in Task 6
+        diagnostics_this=_build_diagnostics(session, this_window),
+        diagnostics_prior=_build_diagnostics(session, prior_window),
         operational_floor=_operational_floor(backup_manifest),
         appendix_snapshot=_appendix_snapshot(session, this_window),
     )
