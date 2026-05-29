@@ -1,4 +1,4 @@
-# Layer: pure
+# Layer: ops
 """Charter metrics v1 contract — PR2 of Charter top-3 priority #1.
 
 See docs/superpowers/specs/2026-05-28-pr2-charter-metrics-design.md.
@@ -10,12 +10,22 @@ endpoint and PR3's weekly report can both consume the same shape.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy.orm import Session
+
+from marketpulse.portfolio.snapshot_repo import (
+    get_latest_snapshot,
+    get_recent_snapshot_dates,
+)
+
 SCHEMA_VERSION = 1
 STALE_AFTER_HOURS = 25
+NORTH_STAR_METRIC = "paper_portfolio_excess_return_vs_spy_90d"
+NORTH_STAR_REQUIRED = 90
+DIAGNOSTICS_REQUIRED = 30
 
 _REQUIRED_MANIFEST_KEYS: tuple[str, ...] = (
     "timestamp", "status", "integrity_check", "duration_ms",
@@ -23,11 +33,79 @@ _REQUIRED_MANIFEST_KEYS: tuple[str, ...] = (
 _ALLOWED_MANIFEST_STATUSES: frozenset[str] = frozenset({"ok", "failed"})
 
 
+def _empty_north_star(*, error: str) -> dict[str, Any]:
+    return {
+        "metric": NORTH_STAR_METRIC,
+        "as_of_trading_date": None,
+        "value": None,
+        "portfolio_index": None,
+        "spy_index": None,
+        "trading_days_observed": 0,
+        "trading_days_required": NORTH_STAR_REQUIRED,
+        "coverage_ratio": 0,
+        "is_sufficient": False,
+        "window_start": None,
+        "window_end": None,
+        "data_quality": {
+            "unpriced_positions_count": 0,
+            "unpriced_tickers": [],
+            "is_complete": True,
+        },
+        "error": error,
+    }
+
+
+def _to_float(value):  # Decimal | None → float | None  # noqa: ANN001
+    return None if value is None else float(value)
+
+
+def build_north_star_section(
+    session: Session | None, *, now,  # noqa: ARG001 (now reserved for future use)
+) -> dict[str, Any]:
+    """L17: ratios/returns/index → float; money fields are NOT exposed.
+    Empty snapshot table → no_snapshots_yet fallback. session=None →
+    db_session_unavailable fallback (L10).
+
+    This is a DB-backed builder (NOT pure) — see L9. Reads the latest
+    snapshot row and renders the contract dict; never recomputes
+    semantics."""
+    if session is None:
+        return _empty_north_star(error="db_session_unavailable")
+
+    latest = get_latest_snapshot(session)
+    if latest is None:
+        return _empty_north_star(error="no_snapshots_yet")
+
+    recent_dates = get_recent_snapshot_dates(session, limit=NORTH_STAR_REQUIRED)
+    window_start = recent_dates[0] if recent_dates else None
+
+    return {
+        "metric": NORTH_STAR_METRIC,
+        "as_of_trading_date": latest.trading_date.isoformat(),
+        "value": _to_float(latest.excess_return),
+        "portfolio_index": _to_float(latest.portfolio_index),
+        "spy_index": _to_float(latest.spy_index),
+        "trading_days_observed": latest.trading_days_observed,
+        "trading_days_required": NORTH_STAR_REQUIRED,
+        "coverage_ratio": _to_float(latest.coverage_ratio),
+        "is_sufficient": latest.is_sufficient,
+        "window_start": window_start.isoformat() if window_start else None,
+        "window_end": latest.trading_date.isoformat(),
+        "data_quality": {
+            "unpriced_positions_count": latest.unpriced_positions_count,
+            "unpriced_tickers": list(latest.unpriced_tickers),
+            "is_complete": latest.unpriced_positions_count == 0,
+        },
+        "error": None,
+    }
+
+
 def build_charter_metrics(
     *,
     manifest_path: Path,
     now: datetime,
     backup_unavailable_reason: str | None = None,
+    session: Session | None = None,
 ) -> dict[str, Any]:
     """Build the v1 charter-metrics contract dict. Never raises."""
     backup = _build_backup_section(
@@ -39,7 +117,7 @@ def build_charter_metrics(
         "schema_version": SCHEMA_VERSION,
         "timestamp": now.isoformat(),
         "operational_floor": {"backup": backup},
-        "north_star": {"status": "not_implemented"},
+        "north_star": build_north_star_section(session, now=now),
         "diagnostics": {"status": "not_implemented"},
     }
 
