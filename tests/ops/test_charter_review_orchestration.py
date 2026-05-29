@@ -179,3 +179,100 @@ def test_generate_success_emits_info_log(db_session, tmp_path, caplog):
     matches = [r for r in caplog.records
                if "charter_review_generated" in r.getMessage()]
     assert len(matches) == 1
+
+
+def test_generate_atomic_write_preserves_old_md_on_failure(
+    db_session, tmp_path, monkeypatch,
+):
+    recaps = tmp_path / "charter"
+    recaps.mkdir()
+    old_md = recaps / "2026-08-16.md"
+    old_md.write_text("OLD CONTENT", encoding="utf-8")
+
+    import marketpulse.ops.charter_review as cr_mod
+    real_replace = cr_mod._os_replace
+
+    def boom_for_md(src, dst):
+        if str(dst).endswith(".md"):
+            raise OSError("simulated .md replace failure")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(cr_mod, "_os_replace", boom_for_md)
+
+    with pytest.raises(CharterReviewError):
+        generate_charter_review(
+            session=db_session,
+            week_ending=_date(2026, 8, 16),
+            now=_dt(2026, 8, 17, 9, 30, tzinfo=UTC),
+            recaps_dir=recaps,
+            backup_manifest_path=tmp_path / "m.json",
+        )
+
+    assert old_md.read_text(encoding="utf-8") == "OLD CONTENT"
+    orphans = sorted(recaps.glob(".*.tmp"))
+    assert orphans == []
+
+
+def test_generate_atomic_write_preserves_old_latest_json_on_failure(
+    db_session, tmp_path, monkeypatch,
+):
+    recaps = tmp_path / "charter"
+    recaps.mkdir()
+    old_json = recaps / "latest.json"
+    old_json.write_text("OLD JSON", encoding="utf-8")
+
+    import marketpulse.ops.charter_review as cr_mod
+    real_replace = cr_mod._os_replace
+
+    def boom_for_json(src, dst):
+        if str(dst).endswith("latest.json"):
+            raise OSError("simulated latest.json replace failure")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(cr_mod, "_os_replace", boom_for_json)
+
+    with pytest.raises(CharterReviewError):
+        generate_charter_review(
+            session=db_session,
+            week_ending=_date(2026, 8, 16),
+            now=_dt(2026, 8, 17, 9, 30, tzinfo=UTC),
+            recaps_dir=recaps,
+            backup_manifest_path=tmp_path / "m.json",
+        )
+
+    assert old_json.read_text(encoding="utf-8") == "OLD JSON"
+    orphans = sorted(recaps.glob(".*.tmp"))
+    assert orphans == []
+
+
+def test_generate_atomic_write_no_orphan_tempfiles(db_session, tmp_path):
+    generate_charter_review(
+        session=db_session,
+        week_ending=_date(2026, 8, 16),
+        now=_dt(2026, 8, 17, 9, 30, tzinfo=UTC),
+        recaps_dir=tmp_path / "charter",
+        backup_manifest_path=tmp_path / "m.json",
+    )
+    orphans = sorted((tmp_path / "charter").glob(".*.tmp"))
+    assert orphans == []
+
+
+def test_generate_latest_json_atomic_replace(db_session, tmp_path):
+    common = dict(
+        session=db_session,
+        recaps_dir=tmp_path / "charter",
+        backup_manifest_path=tmp_path / "m.json",
+    )
+    generate_charter_review(
+        week_ending=_date(2026, 8, 9), now=_dt(2026, 8, 10, 9, 30, tzinfo=UTC),
+        **common,
+    )
+    generate_charter_review(
+        week_ending=_date(2026, 8, 16), now=_dt(2026, 8, 17, 9, 30, tzinfo=UTC),
+        **common,
+    )
+    latest = (tmp_path / "charter" / "latest.json")
+    parsed = _json.loads(latest.read_text(encoding="utf-8"))
+    assert parsed["week_ending"] == "2026-08-16"
+    orphans = sorted((tmp_path / "charter").glob(".*.tmp"))
+    assert orphans == []
