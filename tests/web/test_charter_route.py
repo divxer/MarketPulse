@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -110,10 +112,6 @@ def test_endpoint_content_type_json(client: TestClient, monkeypatch):
     assert body["schema_version"] == 1
 
 
-from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
-
-
 def _seed_snapshot(session, d: date, *, value: str = "0.025"):
     from marketpulse.portfolio.north_star import NavSnapshot
     from marketpulse.portfolio.snapshot_repo import insert_snapshot
@@ -173,6 +171,7 @@ def test_endpoint_diagnostics_populated(client, monkeypatch, db_url):
     get_settings.cache_clear()
     from sqlalchemy import create_engine
     from sqlalchemy.orm import Session
+
     from marketpulse.db.models import PaperAuditEvent
 
     engine = create_engine(db_url)

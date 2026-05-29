@@ -2,7 +2,7 @@
 """PR3a — snapshot_repo tests."""
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import date
 from decimal import Decimal
 
 import pytest
@@ -10,9 +10,14 @@ import pytest
 from marketpulse.portfolio.north_star import NavSnapshot
 from marketpulse.portfolio.snapshot_repo import (
     SnapshotAlreadyExists,
+    count_snapshots_in_window,
     force_replace_snapshot,
+    get_earliest_snapshot,
     get_latest_snapshot,
+    get_recent_snapshot_dates,
     get_snapshot,
+    get_snapshot_series,
+    get_spy_anchor,
     insert_snapshot,
 )
 
@@ -89,15 +94,6 @@ def test_get_latest_snapshot_empty(db_session):
     assert get_latest_snapshot(db_session) is None
 
 
-from marketpulse.portfolio.snapshot_repo import (
-    count_snapshots_in_window,
-    get_earliest_snapshot,
-    get_recent_snapshot_dates,
-    get_snapshot_series,
-    get_spy_anchor,
-)
-
-
 def test_get_snapshot_series_range_ascending(db_session):
     for i in range(5):
         insert_snapshot(db_session, _make_snapshot(date(2026, 5, 24 + i)))
@@ -113,8 +109,10 @@ def test_get_snapshot_series_range_ascending(db_session):
 
 
 def test_get_recent_snapshot_dates_ascending(db_session):
+    from datetime import timedelta as _td
+    base = date(2026, 4, 1)
     for i in range(40):
-        insert_snapshot(db_session, _make_snapshot(date(2026, 4, 1) + __import__("datetime").timedelta(days=i)))
+        insert_snapshot(db_session, _make_snapshot(base + _td(days=i)))
     db_session.commit()
     dates = get_recent_snapshot_dates(db_session, limit=30)
     assert len(dates) == 30

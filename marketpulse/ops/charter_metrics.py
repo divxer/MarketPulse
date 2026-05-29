@@ -133,7 +133,8 @@ def build_diagnostics_section(
     if not recent:
         return _empty_diagnostics()
 
-    from datetime import datetime as _dt, time as _time
+    from datetime import datetime as _dt
+    from datetime import time as _time
     window_start_eod = _dt.combine(recent[0], _time.min, tzinfo=UTC)
     window_end_eod = _dt.combine(recent[-1], _time.max, tzinfo=UTC)
     snapshot_count = len(recent)
@@ -142,6 +143,8 @@ def build_diagnostics_section(
 
     from marketpulse.db.models import (
         PaperAuditEvent as _Audit,
+    )
+    from marketpulse.db.models import (
         PaperFill as _Fill,
     )
 

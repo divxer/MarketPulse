@@ -13,7 +13,6 @@ import pytest
 
 from marketpulse.portfolio.north_star import (
     NORTH_STAR_WINDOW,
-    NavSnapshot,
     OpenPosition,
     compute_nav_snapshot,
 )

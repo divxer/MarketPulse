@@ -40,7 +40,10 @@ def _seed_price(session, ticker: str, d: date, close: float):
     ))
 
 
-def _seed_position(session, *, ticker: str, qty: int, opened: datetime, closed: datetime | None = None):
+def _seed_position(
+    session, *, ticker: str, qty: int, opened: datetime,
+    closed: datetime | None = None,
+):
     order = PaperOrder(
         idempotency_key=f"{ticker}-{opened.isoformat()}",
         allocation_run_id=f"test-run-{opened.date().isoformat()}",

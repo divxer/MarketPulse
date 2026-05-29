@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
-from marketpulse.db.models import PaperNavSnapshot
+from marketpulse.db.models import PaperAuditEvent, PaperFill, PaperOrder
 from marketpulse.ops.charter_metrics import build_charter_metrics
 from marketpulse.portfolio.north_star import NavSnapshot
 from marketpulse.portfolio.snapshot_repo import insert_snapshot
@@ -111,9 +111,6 @@ def test_north_star_data_quality_is_complete_false(db_session, tmp_path):
     assert dq["is_complete"] is False
     assert dq["unpriced_positions_count"] == 1
     assert dq["unpriced_tickers"] == ["XYZ"]
-
-
-from marketpulse.db.models import PaperAuditEvent, PaperFill, PaperOrder
 
 
 def _seed_audit(session, *, ts: datetime, event_type: str):

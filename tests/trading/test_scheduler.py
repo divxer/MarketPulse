@@ -28,8 +28,11 @@ def test_scheduler_entrypoint_is_thin():
     ])
     # Phase 6b raised the cap from <60 to <90: the composition-root role
     # (lock 6b-L15) requires constructing 4 risk gates + RiskConfigProvider,
-    # which legitimately grows the DI wiring. Still small — no business logic.
-    assert line_count < 90, (
+    # which legitimately grows the DI wiring. PR3a raised it from <90 to
+    # <92 to accommodate the post-tick NAV snapshot hook
+    # (_run_nav_snapshot_safely import + single call). Still small —
+    # no business logic.
+    assert line_count < 92, (
         f"scheduler entrypoint too thick: {line_count} non-comment lines"
     )
 
