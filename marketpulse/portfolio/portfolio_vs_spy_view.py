@@ -74,3 +74,37 @@ def _fmt_index_label(value: Decimal | None) -> str:
     if value is None:
         return VALUE_NA
     return f"{Decimal(value).quantize(Decimal('0.001'))}"
+
+
+def _is_complete(s: NavSnapshot) -> bool:
+    return (
+        s.portfolio_index is not None
+        and s.spy_index is not None
+        and s.excess_return is not None
+    )
+
+
+def _compute_chart_run(
+    series: list[NavSnapshot],
+) -> tuple[list[NavSnapshot], int, int]:
+    """Return (chart_run, dropped_prefix_count, excluded_nonprefix_count).
+
+    chart_run is the CONTIGUOUS chart run of all-three-non-null snapshots starting
+    at the first complete row (L2, L15) — NOT necessarily a suffix. It STOPS at the
+    first later incomplete row (a mid/tail gap) rather than connecting across it.
+      - dropped_prefix_count = index of first complete row (true leading prefix).
+        If no complete row exists, every row is prefix -> len(series).
+      - excluded_nonprefix_count = rows after `start` dropped because a gap appeared
+        (should be 0 under the PR3a lazy-anchor invariant).
+    """
+    start = next((i for i, s in enumerate(series) if _is_complete(s)), None)
+    if start is None:
+        return [], len(series), 0
+    tail = series[start:]
+    run: list[NavSnapshot] = []
+    for s in tail:
+        if _is_complete(s):
+            run.append(s)
+        else:
+            break
+    return run, start, len(tail) - len(run)
