@@ -39,7 +39,7 @@ The point is not visualization. The point is to make the charter's "is the syste
 | L10 | `build_charter_metrics(session=None)` is a unit-test / CLI affordance only. Production route always passes the session. |
 | L11 | Diagnostics window = the last 30 snapshot `trading_date` values (or all of them if fewer than 30 exist). Calendar dates are not used for windowing. |
 | L12 | `ORDER_PLACED` and `ORDER_REJECTED` are mutually exclusive terminal decisions in MarketPulse's audit model. Rejection denominator = `PLACED + REJECTED`. If the audit model ever evolves to non-exclusive events, this metric must be revisited. |
-| L13 | `paper_trade_count_30d` primary source = `paper_fill` rows with `position_id IS NOT NULL AND side='BUY' AND filled_at` in window. Audit-event count remains a diagnostic cross-check only. **`side='BUY'` assumes the current long-only paper engine.** If short positions are introduced, entry-fill detection must switch to position/opening-fill semantics rather than `side='BUY'` — this metric needs a spec revision at that point. |
+| L13 | `paper_trade_count_30d` primary source = `paper_fill` rows with `position_id IS NOT NULL AND side='ENTRY' AND filled_at` in window. The schema uses ENTRY/EXIT (not BUY/SELL) — this is direction-agnostic and survives a future long/short engine without revision. Audit-event count (`ORDER_ENTRY_FILLED`) remains a diagnostic cross-check only. |
 | L14 | `quantity` is `Decimal` in the typed boundary (dataclass), even though the current paper engine writes integers. The portfolio layer must not pre-commit to integer-only quantities. |
 | L15 | `unpriced_tickers` is dedup'd and sorted: `tuple(sorted({...}))`. `unpriced_positions_count` still counts lots. |
 | L16 | **SPY benchmark anchor is established lazily by the first snapshot with a non-null `spy_close`.** All snapshots before that point have `anchor_spy_close=null`, `spy_index=null`, `excess_return=null`; their portfolio side (`portfolio_index`) is still authoritative. Once established, every later snapshot reads the anchor from `get_spy_anchor()` (earliest snapshot with a non-null `anchor_spy_close`). The asymmetry (portfolio anchors at row 1; SPY anchors at first SPY-available row) is intentional and documented; it means the SPY benchmark series may start later than the NAV series. |
@@ -79,7 +79,7 @@ Layers:
 - **db**: `marketpulse/portfolio/snapshot_repo.py` — SQLAlchemy CRUD; rejects normal-flow updates.
 - **orchestration**: `marketpulse/portfolio/snapshot_runner.py` — reads forward state, computes, persists.
 - **web/contract**: `marketpulse/ops/charter_metrics.py` extended with two DB-backed builders.
-- **infra**: Alembic `0012_paper_nav_snapshot`.
+- **infra**: Alembic `0014_paper_nav_snapshot`.
 
 ## Data Contract (extended `/lab/charter-metrics` v1)
 
@@ -198,7 +198,9 @@ Same shape as empty-snapshot fallback for both `north_star` and each diagnostic,
 
 `coverage_ratio = min(observations / required_observations, 1)` — computed server-side, never deferred to consumers.
 
-## DB Schema — Alembic `0012_paper_nav_snapshot`
+## DB Schema — Alembic `0014_paper_nav_snapshot`
+
+(Down-revision: `0013`. Sequence head was checked at spec time.)
 
 ```sql
 CREATE TABLE paper_nav_snapshot (
@@ -474,7 +476,7 @@ def lab_charter_metrics(
 | `test_endpoint_data_quality_is_complete` | snapshot row with `unpriced_positions_count=0` → `data_quality.is_complete=True`; row with count=1 → `is_complete=False` |
 | `test_endpoint_coverage_ratio_roundtrip` | seed snapshot with `coverage_ratio=Decimal("0.4")` → JSON `north_star.coverage_ratio == 0.4` (float); assert `float(latest_snapshot_row.coverage_ratio) == response_body[...]` |
 
-### Migration — `tests/migrations/test_0012_paper_nav_snapshot.py`
+### Migration — `tests/migrations/test_0014_paper_nav_snapshot.py`
 
 | Test | Asserts |
 |---|---|
@@ -486,7 +488,7 @@ def lab_charter_metrics(
 
 1. `ruff check .` clean.
 2. Full pytest suite green; no regressions in PR1/PR2 tests.
-3. Alembic `0012_paper_nav_snapshot` applies cleanly forward and downgrades cleanly.
+3. Alembic `0014_paper_nav_snapshot` applies cleanly forward and downgrades cleanly.
 4. `run_paper_trading_tick` continues to succeed when `run_nav_snapshot` raises a non-PK persistence error (warning logged, tick not aborted).
 5. `run_nav_snapshot` does NOT swallow non-PK persistence errors (L4 visible).
 6. Manual smoke post-deploy: hit `/lab/charter-metrics` after the first post-deploy tick. `north_star.error` transitions from `"no_snapshots_yet"` to `null`; first snapshot has `coverage_ratio = Decimal('1') / Decimal('90')` (i.e. ≈ 0.011111...), `is_sufficient=false`. No fixed three-decimal string comparison.
