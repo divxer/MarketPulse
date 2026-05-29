@@ -78,8 +78,9 @@ def _empty_diags() -> DiagnosticsWeek:
 
 
 def _empty_window(week_end: date) -> WeekWindow:
+    from datetime import timedelta
     return WeekWindow(
-        week_start=date(week_end.year, week_end.month, week_end.day - 6),
+        week_start=week_end - timedelta(days=6),
         week_end=week_end,
         trading_days_observed=0,
     )
@@ -115,13 +116,15 @@ def _empty_appendix() -> SnapshotAppendix:
 
 
 def _empty_payload(week_end: date) -> CharterReviewPayload:
+    from datetime import timedelta
+    prior_end = week_end - timedelta(days=7)
     return CharterReviewPayload(
         generated_at=datetime(2026, 8, 17, 9, 30, tzinfo=UTC),
         week_ending=week_end,
         this_week=_empty_window(week_end),
-        prior_week=_empty_window(date(week_end.year, week_end.month, week_end.day - 7)),
+        prior_week=_empty_window(prior_end),
         north_star_this=_empty_north_star(week_end),
-        north_star_prior=_empty_north_star(date(week_end.year, week_end.month, week_end.day - 7)),
+        north_star_prior=_empty_north_star(prior_end),
         diagnostics_this=_empty_diags(),
         diagnostics_prior=_empty_diags(),
         operational_floor=_empty_op_floor(),
@@ -289,8 +292,10 @@ from decimal import Decimal
 from marketpulse.ops.charter_review_renderer import (
     DELTA_PRIOR_NA,
     VALUE_NA,
+    _fmt_delta_index,
     _fmt_delta_int,
     _fmt_delta_pp,
+    _fmt_index,
     _fmt_int,
     _fmt_pct,
 )
@@ -345,6 +350,30 @@ def test_fmt_delta_int_negative():
 
 def test_fmt_delta_int_prior_na():
     assert _fmt_delta_int(7, None) == DELTA_PRIOR_NA
+
+
+def test_fmt_index_basic():
+    # Index values are raw multipliers, NOT percents. 1.041 → "1.041".
+    assert _fmt_index(Decimal("1.041")) == "1.041"
+    assert _fmt_index(Decimal("1")) == "1.000"
+
+
+def test_fmt_index_none():
+    assert _fmt_index(None) == VALUE_NA
+
+
+def test_fmt_delta_index_positive():
+    s = _fmt_delta_index(Decimal("1.041"), Decimal("1.009"))
+    assert s == "+0.032 vs prior week"
+
+
+def test_fmt_delta_index_negative():
+    s = _fmt_delta_index(Decimal("1.009"), Decimal("1.041"))
+    assert s == "−0.032 vs prior week"
+
+
+def test_fmt_delta_index_prior_na():
+    assert _fmt_delta_index(Decimal("1.041"), None) == DELTA_PRIOR_NA
 ```
 
 - [ ] **Step 2: Verify failure**
@@ -407,6 +436,25 @@ def _fmt_delta_int(this: int | None, prior: int | None) -> str:
     if this is None or prior is None:
         return DELTA_PRIOR_NA
     delta = int(this) - int(prior)
+    if delta >= 0:
+        return f"+{delta} vs prior week"
+    return f"{_MINUS}{abs(delta)} vs prior week"
+
+
+def _fmt_index(value: Decimal | None) -> str:
+    """Raw index multiplier (NOT percent). 1.041 → '1.041'.
+    Use for `portfolio_index`, `spy_index`. NEVER use `_fmt_pct` for these —
+    that would render 1.041 as '104.1%' which is meaningless."""
+    if value is None:
+        return VALUE_NA
+    quant = Decimal(value).quantize(Decimal("0.001"))
+    return f"{quant}"
+
+
+def _fmt_delta_index(this: Decimal | None, prior: Decimal | None) -> str:
+    if this is None or prior is None:
+        return DELTA_PRIOR_NA
+    delta = (Decimal(this) - Decimal(prior)).quantize(Decimal("0.001"))
     if delta >= 0:
         return f"+{delta} vs prior week"
     return f"{_MINUS}{abs(delta)} vs prior week"
@@ -743,12 +791,12 @@ def _section_north_star(payload: CharterReviewPayload) -> str:
         f"| Excess return            | {_fmt_pct(this.excess_return_end):<12} "
         f"| {_fmt_pct(prior.excess_return_end):<11} "
         f"| {_fmt_delta_pp(this.excess_return_end, prior.excess_return_end):<12} |",
-        f"| Portfolio index          | {_fmt_pct(this.portfolio_index_end):<12} "
-        f"| {_fmt_pct(prior.portfolio_index_end):<11} "
-        f"| {_fmt_delta_pp(this.portfolio_index_end, prior.portfolio_index_end):<12} |",
-        f"| SPY index                | {_fmt_pct(this.spy_index_end):<12} "
-        f"| {_fmt_pct(prior.spy_index_end):<11} "
-        f"| {_fmt_delta_pp(this.spy_index_end, prior.spy_index_end):<12} |",
+        f"| Portfolio index          | {_fmt_index(this.portfolio_index_end):<12} "
+        f"| {_fmt_index(prior.portfolio_index_end):<11} "
+        f"| {_fmt_delta_index(this.portfolio_index_end, prior.portfolio_index_end):<12} |",
+        f"| SPY index                | {_fmt_index(this.spy_index_end):<12} "
+        f"| {_fmt_index(prior.spy_index_end):<11} "
+        f"| {_fmt_delta_index(this.spy_index_end, prior.spy_index_end):<12} |",
         f"| Coverage                 | {this.week.trading_days_observed}/90 days   "
         f"| {prior.week.trading_days_observed}/90 days  "
         f"| {_fmt_delta_int(this.week.trading_days_observed, prior.week.trading_days_observed):<12} |",
@@ -1309,6 +1357,8 @@ def test_build_payload_rejection_top_reasons_sorted(db_session):
 
 
 def test_build_payload_trade_count_uses_fills(db_session):
+    # Seed a snapshot so observations > 0 (otherwise value=None per spec).
+    _seed_snapshot(db_session, date(2026, 8, 10))
     base = datetime(2026, 8, 10, tzinfo=UTC)
     # Audit ORDER_ENTRY_FILLED present but NO paper_fill ENTRY rows.
     _seed_audit(db_session, ts=base, event_type="ORDER_ENTRY_FILLED")
@@ -1318,8 +1368,33 @@ def test_build_payload_trade_count_uses_fills(db_session):
         backup_manifest=None,
         generated_at=datetime(2026, 8, 17, 9, 30, tzinfo=UTC),
     )
-    # L5: source is paper_fill, not audit event.
+    # L5: source is paper_fill, not audit event. Snapshot exists → obs>0.
     assert payload.diagnostics_this.paper_trade_count.value == 0
+    assert payload.diagnostics_this.paper_trade_count.observations == 1
+
+
+def test_build_payload_trade_count_none_when_no_snapshots(db_session):
+    """Null rule: zero observations → value=None (NOT 0)."""
+    db_session.commit()
+    payload = build_payload(
+        session=db_session, week_ending=date(2026, 8, 16),
+        backup_manifest=None,
+        generated_at=datetime(2026, 8, 17, 9, 30, tzinfo=UTC),
+    )
+    assert payload.diagnostics_this.paper_trade_count.value is None
+    assert payload.diagnostics_this.paper_trade_count.observations == 0
+
+
+def test_build_payload_engine_errors_none_when_no_ticks(db_session):
+    """Null rule: zero tick events → value=None (NOT 0)."""
+    db_session.commit()
+    payload = build_payload(
+        session=db_session, week_ending=date(2026, 8, 16),
+        backup_manifest=None,
+        generated_at=datetime(2026, 8, 17, 9, 30, tzinfo=UTC),
+    )
+    assert payload.diagnostics_this.engine_invariant_errors.value is None
+    assert payload.diagnostics_this.engine_invariant_errors.observations == 0
 
 
 def test_build_payload_engine_errors_observations(db_session):
@@ -1357,22 +1432,19 @@ def test_build_payload_engine_errors_reasons_only_from_engine(db_session):
     assert tuple(r.reason for r in diag.top_reasons) == ("real_engine_reason",)
 
 
-def test_build_payload_top_reasons_null_normalized(db_session):
-    # L19: NULL or empty reason → "(no reason)" bucket.
+def test_build_payload_top_reasons_empty_normalized(db_session):
+    """L19: empty `reason` → '(no reason)' bucket.
+
+    The `paper_audit_event.reason` column is `Mapped[str]` with
+    `nullable=False, default=""`. NULL is impossible at the schema level,
+    so the spec's "NULL or empty" reduces in practice to "empty".
+    """
     base = datetime(2026, 8, 10, tzinfo=UTC)
-    # 2 NULL reasons.
-    db_session.add(PaperAuditEvent(
-        timestamp=base, event_type="ENGINE_INVARIANT_ERROR",
-        order_id=None, strategy=None, reason="", context={},
-    ))
-    db_session.add(PaperAuditEvent(
-        timestamp=base + timedelta(hours=1),
-        event_type="ENGINE_INVARIANT_ERROR",
-        order_id=None, strategy=None, reason="", context={},
-    ))
-    # 1 empty-string reason (already empty in line above; add one more explicit).
-    _seed_audit(db_session, ts=base + timedelta(hours=2),
-                event_type="ENGINE_INVARIANT_ERROR", reason="")
+    for i in range(3):
+        _seed_audit(
+            db_session, ts=base + timedelta(hours=i),
+            event_type="ENGINE_INVARIANT_ERROR", reason="",
+        )
     db_session.commit()
     payload = build_payload(
         session=db_session, week_ending=date(2026, 8, 16),
@@ -1520,7 +1592,13 @@ def _build_paper_trade_count(
     session: Session, week: WeekWindow,
 ) -> DiagnosticWeek:
     """L5: paper_fill side='ENTRY' AND position_id IS NOT NULL.
-    L7: observations = trading days observed in week."""
+    L7: observations = trading days observed in week.
+    Null rule (spec): zero observations → value=None. Otherwise the
+    integer fill count, including 0 when the week had trading days
+    but no entry fills."""
+    obs = _trading_days_observed(session, week)
+    if obs == 0:
+        return _empty_diagnostic()
     start, end = _eod_window(week)
     count = int(session.scalar(
         select(func.count(PaperFill.id))
@@ -1532,23 +1610,26 @@ def _build_paper_trade_count(
         )),
     ) or 0)
     return DiagnosticWeek(
-        value=count,
-        observations=_trading_days_observed(session, week),
-        top_reasons=(),
+        value=count, observations=obs, top_reasons=(),
     )
 
 
 def _build_engine_invariant_errors(
     session: Session, week: WeekWindow,
 ) -> DiagnosticWeek:
+    """L6: observations = TICK_COMPLETED + ENGINE_INVARIANT_ERROR.
+    Null rule: if total = 0 (no tick activity at all this week), value=None.
+    If total>0 and errors=0, value=0 (truthful: ticks ran, none broke)."""
     start, end = _eod_window(week)
     completed = _count_audit(session, event_type="TICK_COMPLETED",
                               window_start=start, window_end=end)
     errored = _count_audit(session, event_type="ENGINE_INVARIANT_ERROR",
                             window_start=start, window_end=end)
+    total = completed + errored
+    if total == 0:
+        return _empty_diagnostic()
     return DiagnosticWeek(
-        value=errored,
-        observations=completed + errored,    # L6
+        value=errored, observations=total,
         top_reasons=_top_reasons(
             session, event_types=("ENGINE_INVARIANT_ERROR",),
             window_start=start, window_end=end,
@@ -1651,15 +1732,11 @@ def test_atomic_write_text_preserves_old_on_replace_failure(tmp_path, monkeypatc
     target = tmp_path / "out.md"
     target.write_text("old", encoding="utf-8")
 
-    real_replace = __import__("os").replace
-
     def boom(src, dst):
         raise OSError("simulated replace failure")
 
     import marketpulse.ops.charter_review as cr_mod
-    monkeypatch.setattr(cr_mod, "os_replace", boom, raising=False)
-    # If the module uses `os.replace` directly, patch that instead:
-    monkeypatch.setattr("os.replace", boom)
+    monkeypatch.setattr(cr_mod, "_os_replace", boom)
 
     with pytest.raises(OSError):
         _atomic_write_text(target, "new")
@@ -1667,8 +1744,6 @@ def test_atomic_write_text_preserves_old_on_replace_failure(tmp_path, monkeypatc
     assert target.read_text(encoding="utf-8") == "old"
     leftovers = sorted(tmp_path.glob(".*.tmp"))
     assert leftovers == []
-    # restore (monkeypatch undoes; nothing to do)
-    _ = real_replace
 ```
 
 - [ ] **Step 2: Verify failure**
@@ -1708,6 +1783,10 @@ log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 
+# Module-level alias so tests can monkeypatch ONLY this module's reference,
+# without affecting global `os.replace` for other callers in the same test.
+_os_replace = os.replace
+
 
 class CharterReviewError(Exception):
     """Surface error from the charter review pipeline. Raised by
@@ -1746,7 +1825,7 @@ def _atomic_write_text(path: Path, payload: str) -> None:
             f.write(payload)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp_path, str(path))
+        _os_replace(tmp_path, str(path))
         tmp_path = None
     finally:
         if tmp_fd is not None:
@@ -1934,6 +2013,8 @@ def generate_charter_review(
             session=session, week_ending=week_ending,
             backup_manifest=manifest, generated_at=now,
         )
+    except CharterReviewError:
+        raise   # already typed; don't double-wrap
     except Exception as exc:  # noqa: BLE001
         raise CharterReviewError(
             f"aggregator failed: {type(exc).__name__}: {exc}",
@@ -1941,6 +2022,8 @@ def generate_charter_review(
 
     try:
         markdown = render_charter_review(payload=payload)
+    except CharterReviewError:
+        raise   # already typed; don't double-wrap
     except Exception as exc:  # noqa: BLE001
         raise CharterReviewError(
             f"renderer failed: {type(exc).__name__}: {exc}",
@@ -2009,14 +2092,15 @@ def test_generate_atomic_write_preserves_old_md_on_failure(
     old_md = recaps / "2026-08-16.md"
     old_md.write_text("OLD CONTENT", encoding="utf-8")
 
-    real_replace = os.replace
+    import marketpulse.ops.charter_review as cr_mod
+    real_replace = cr_mod._os_replace
 
     def boom_for_md(src, dst):
         if str(dst).endswith(".md"):
             raise OSError("simulated .md replace failure")
         return real_replace(src, dst)
 
-    monkeypatch.setattr("os.replace", boom_for_md)
+    monkeypatch.setattr(cr_mod, "_os_replace", boom_for_md)
 
     with pytest.raises(CharterReviewError):
         generate_charter_review(
@@ -2041,14 +2125,15 @@ def test_generate_atomic_write_preserves_old_latest_json_on_failure(
     old_json = recaps / "latest.json"
     old_json.write_text("OLD JSON", encoding="utf-8")
 
-    real_replace = os.replace
+    import marketpulse.ops.charter_review as cr_mod
+    real_replace = cr_mod._os_replace
 
     def boom_for_json(src, dst):
         if str(dst).endswith("latest.json"):
             raise OSError("simulated latest.json replace failure")
         return real_replace(src, dst)
 
-    monkeypatch.setattr("os.replace", boom_for_json)
+    monkeypatch.setattr(cr_mod, "_os_replace", boom_for_json)
 
     with pytest.raises(CharterReviewError):
         generate_charter_review(
@@ -2185,6 +2270,38 @@ def test_run_charter_review_weekly_skipped_for_non_sqlite(monkeypatch, caplog):
         "charter_review_skipped_not_sqlite" in rec.getMessage()
         for rec in caplog.records
     )
+
+
+def test_run_charter_review_weekly_accepts_sqlite_pysqlite(
+    db_session, monkeypatch, tmp_path,
+):
+    """L13 / PR2 lesson: `sqlite+pysqlite:///...` MUST be treated as sqlite,
+    not skipped. We don't run the full generator — just verify the driver
+    check doesn't short-circuit by asserting generate_charter_review IS called."""
+    from marketpulse.scheduler import jobs as jobs_mod
+    from marketpulse.config import get_settings
+
+    real_settings = get_settings()
+    db_file = tmp_path / "smoke.db"
+
+    class _StubSettings:
+        database_url = f"sqlite+pysqlite:///{db_file}"
+        def __getattr__(self, name):
+            return getattr(real_settings, name)
+
+    called = {"count": 0}
+
+    def fake_generate(**kwargs):
+        called["count"] += 1
+        return tmp_path / "ok.md"
+
+    monkeypatch.setattr(jobs_mod, "get_settings", lambda: _StubSettings())
+    monkeypatch.setattr(jobs_mod, "generate_charter_review", fake_generate)
+    # Need a usable session — the real session_scope will open the DB at
+    # the stubbed URL, which is a fresh empty sqlite file. That's fine
+    # because our fake generator never touches it.
+    jobs_mod.run_charter_review_weekly()
+    assert called["count"] == 1
 ```
 
 - [ ] **Step 2: Verify failure**
@@ -2424,7 +2541,7 @@ Charter top-3 priority #1, PR3b. Spec: `docs/superpowers/specs/2026-05-29-pr3b-c
 - [x] `pytest tests/ops/test_charter_review_renderer.py` — 22 tests
 - [x] `pytest tests/ops/test_charter_review_aggregator.py` — 14 tests
 - [x] `pytest tests/ops/test_charter_review_orchestration.py` — 17 tests
-- [x] `pytest tests/scheduler/test_charter_review_scheduler.py` — 5 tests
+- [x] `pytest tests/scheduler/test_charter_review_scheduler.py` — 6 tests
 - [x] `pytest tests/scheduler/test_build_scheduler.py` — extended daily-critical lock + new registration test
 - [x] `pytest -x` — full suite green, no regressions
 - [x] `ruff check .` — clean
