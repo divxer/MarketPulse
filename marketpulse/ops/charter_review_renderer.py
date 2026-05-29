@@ -72,6 +72,22 @@ def _fmt_delta_index(this: Decimal | None, prior: Decimal | None) -> str:
     return f"{_MINUS}{abs(delta)} vs prior week"
 
 
+def _fmt_reason(reason: str) -> str:
+    """L16 normalization order (locked):
+      1. replace any '\\n' or '\\r' with a single space
+      2. escape '|' as '\\|' (preserves markdown table grammar)
+      3. truncate to REASON_MAX_DISPLAY_LEN chars + '…' if longer
+
+    The aggregator is responsible for converting empty reasons to
+    the literal '(no reason)' (L19) BEFORE this function is called.
+    """
+    normalized = reason.replace("\n", " ").replace("\r", " ")
+    escaped = normalized.replace("|", "\\|")
+    if len(escaped) > REASON_MAX_DISPLAY_LEN:
+        return escaped[:REASON_MAX_DISPLAY_LEN] + "…"
+    return escaped
+
+
 def render_charter_review(*, payload: CharterReviewPayload) -> str:
     """Pure renderer (L9). To be completed in Task 4."""
     raise NotImplementedError("Task 4 wires up section helpers")

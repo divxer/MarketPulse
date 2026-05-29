@@ -87,3 +87,33 @@ def test_fmt_delta_index_negative():
 
 def test_fmt_delta_index_prior_na():
     assert _fmt_delta_index(Decimal("1.041"), None) == DELTA_PRIOR_NA
+
+
+from marketpulse.ops.charter_review_renderer import (
+    REASON_MAX_DISPLAY_LEN,
+    _fmt_reason,
+)
+
+
+def test_fmt_reason_strips_newlines_and_carriage_returns():
+    assert _fmt_reason("a\nb\rc") == "a b c"
+
+
+def test_fmt_reason_escapes_pipe():
+    # input is the literal 3-char string "a|b"; output is the 4-char "a\|b"
+    # which Python literal expresses as "a\\|b".
+    assert _fmt_reason("a|b") == "a\\|b"
+
+
+def test_fmt_reason_truncates_long_input():
+    src = "x" * (REASON_MAX_DISPLAY_LEN + 50)
+    out = _fmt_reason(src)
+    assert out == "x" * REASON_MAX_DISPLAY_LEN + "…"
+
+
+def test_fmt_reason_normalization_order_locked():
+    # Replace newline first (becomes space), THEN escape pipe, THEN truncate.
+    src = "a|b\nc" + ("z" * REASON_MAX_DISPLAY_LEN)
+    out = _fmt_reason(src)
+    assert out.endswith("…")
+    assert "a\\|b c" in out
