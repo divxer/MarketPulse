@@ -49,3 +49,17 @@ class EvalAnalysisSummary:
         if error is not None:
             d["error"] = error
         return d
+
+
+def build_eval_universe(session) -> list[str]:
+    """Watchlist ∪ current open paper holdings, normalized + deduped + sorted ASC.
+
+    Reads only: WatchlistItem (model) and the canonical open-positions helper
+    (`Repository.open_positions_snapshot`, status == "OPEN"). No mutation.
+    Sorted ASC so the cap-skip set is deterministic.
+    """
+    watch_rows = session.query(WatchlistItem.ticker).all()
+    holdings = PaperPositionRepository(session=session).open_positions_snapshot()
+    raw = [r[0] for r in watch_rows] + [p.ticker for p in holdings]
+    normalized = {t.strip().upper() for t in raw if t and t.strip()}
+    return sorted(normalized)
