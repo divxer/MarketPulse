@@ -10,15 +10,14 @@ endpoint and PR3's weekly report can both consume the same shape.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import and_
-from sqlalchemy import func as _func
-from sqlalchemy import select as _select
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
+from marketpulse.db.models import PaperAuditEvent, PaperFill
 from marketpulse.portfolio.snapshot_repo import (
     get_latest_snapshot,
     get_recent_snapshot_dates,
@@ -133,37 +132,28 @@ def build_diagnostics_section(
     if not recent:
         return _empty_diagnostics()
 
-    from datetime import datetime as _dt
-    from datetime import time as _time
-    window_start_eod = _dt.combine(recent[0], _time.min, tzinfo=UTC)
-    window_end_eod = _dt.combine(recent[-1], _time.max, tzinfo=UTC)
+    window_start_eod = datetime.combine(recent[0], time.min, tzinfo=UTC)
+    window_end_eod = datetime.combine(recent[-1], time.max, tzinfo=UTC)
     snapshot_count = len(recent)
     coverage_ratio = min(snapshot_count / DIAGNOSTICS_REQUIRED, 1.0)
     is_sufficient = snapshot_count >= DIAGNOSTICS_REQUIRED
 
-    from marketpulse.db.models import (
-        PaperAuditEvent as _Audit,
-    )
-    from marketpulse.db.models import (
-        PaperFill as _Fill,
-    )
-
     # 1. tick_success_rate_30d
     tick_completed = session.scalar(
-        _select(_func.count(_Audit.id)).where(
+        select(func.count(PaperAuditEvent.id)).where(
             and_(
-                _Audit.event_type == "TICK_COMPLETED",
-                _Audit.timestamp >= window_start_eod,
-                _Audit.timestamp <= window_end_eod,
+                PaperAuditEvent.event_type == "TICK_COMPLETED",
+                PaperAuditEvent.timestamp >= window_start_eod,
+                PaperAuditEvent.timestamp <= window_end_eod,
             ),
         ),
     ) or 0
     engine_error = session.scalar(
-        _select(_func.count(_Audit.id)).where(
+        select(func.count(PaperAuditEvent.id)).where(
             and_(
-                _Audit.event_type == "ENGINE_INVARIANT_ERROR",
-                _Audit.timestamp >= window_start_eod,
-                _Audit.timestamp <= window_end_eod,
+                PaperAuditEvent.event_type == "ENGINE_INVARIANT_ERROR",
+                PaperAuditEvent.timestamp >= window_start_eod,
+                PaperAuditEvent.timestamp <= window_end_eod,
             ),
         ),
     ) or 0
@@ -177,20 +167,20 @@ def build_diagnostics_section(
 
     # 2. order_rejection_rate_30d (L12: PLACED + REJECTED mutually exclusive)
     placed = session.scalar(
-        _select(_func.count(_Audit.id)).where(
+        select(func.count(PaperAuditEvent.id)).where(
             and_(
-                _Audit.event_type == "ORDER_PLACED",
-                _Audit.timestamp >= window_start_eod,
-                _Audit.timestamp <= window_end_eod,
+                PaperAuditEvent.event_type == "ORDER_PLACED",
+                PaperAuditEvent.timestamp >= window_start_eod,
+                PaperAuditEvent.timestamp <= window_end_eod,
             ),
         ),
     ) or 0
     rejected = session.scalar(
-        _select(_func.count(_Audit.id)).where(
+        select(func.count(PaperAuditEvent.id)).where(
             and_(
-                _Audit.event_type == "ORDER_REJECTED",
-                _Audit.timestamp >= window_start_eod,
-                _Audit.timestamp <= window_end_eod,
+                PaperAuditEvent.event_type == "ORDER_REJECTED",
+                PaperAuditEvent.timestamp >= window_start_eod,
+                PaperAuditEvent.timestamp <= window_end_eod,
             ),
         ),
     ) or 0
@@ -204,12 +194,12 @@ def build_diagnostics_section(
 
     # 3. paper_trade_count_30d (L13: paper_fill ENTRY rows)
     trade_count = session.scalar(
-        _select(_func.count(_Fill.id)).where(
+        select(func.count(PaperFill.id)).where(
             and_(
-                _Fill.side == "ENTRY",
-                _Fill.position_id.is_not(None),
-                _Fill.filled_at >= window_start_eod,
-                _Fill.filled_at <= window_end_eod,
+                PaperFill.side == "ENTRY",
+                PaperFill.position_id.is_not(None),
+                PaperFill.filled_at >= window_start_eod,
+                PaperFill.filled_at <= window_end_eod,
             ),
         ),
     ) or 0

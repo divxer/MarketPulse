@@ -27,6 +27,14 @@ def _encode_tickers(tickers: tuple[str, ...]) -> str | None:
     """L20: empty tuple → None; otherwise comma-join sorted unique tickers."""
     if not tickers:
         return None
+    # L20 invariant: tickers MUST NOT contain commas (the on-disk encoding
+    # uses comma as the separator). Existing ingestion enforces ticker
+    # grammar; this assertion makes the invariant self-enforcing at the
+    # storage boundary.
+    if any("," in t for t in tickers):
+        raise ValueError(
+            f"L20 violation: ticker contains comma — {tickers!r}"
+        )
     return ",".join(sorted(set(tickers)))
 
 
