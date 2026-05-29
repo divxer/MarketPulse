@@ -87,37 +87,58 @@ class ChartData:
 class PortfolioVsSpyView:
     has_data: bool                       # False when 0 snapshots
     chartable: bool                      # len(chart_run) >= 2
-    # hero
+    # hero (raw value + presenter-formatted label — template never formats Decimal)
     hero_excess_return: Decimal | None   # latest snapshot's excess_return (None → N/A)
+    hero_excess_return_label: str        # e.g. "+3.2%" or "N/A"
     badge: Literal["PRELIMINARY", "SUFFICIENT"]
     show_insufficiency_banner: bool      # has_data and not is_sufficient
-    # KPI strip (from latest snapshot)
+    # KPI strip (from latest snapshot) — both raw + label
     portfolio_index_latest: Decimal | None
+    portfolio_index_label: str           # e.g. "1.041" or "N/A"
     spy_index_latest: Decimal | None
+    spy_index_label: str                 # e.g. "1.009" or "N/A"
     coverage_observed: int               # trading_days_observed
     coverage_required: int               # NORTH_STAR_WINDOW (90)
+    coverage_label: str                  # e.g. "42 / 90"
     is_sufficient: bool
     # chart provenance
     first_date: date | None              # earliest snapshot (full series)
     last_date: date | None               # latest snapshot
     chart_start_date: date | None        # first snapshot in chart_run
-    dropped_prefix_count: int            # snapshots before chart_run begins
+    dropped_prefix_count: int            # leading portfolio-only rows before chart_run
+    excluded_nonprefix_count: int        # rows dropped AFTER a mid/tail gap (should be 0)
     chart: ChartData | None              # None when not chartable
 ```
 
-### `chart_run` — the single plottable filter
+All Decimal→string formatting lives in the presenter (the `*_label` fields). The
+template only prints labels and loops — it NEVER calls a formatting filter on a
+Decimal. (L13.)
+
+### `chart_run` — contiguous suffix from first all-three-non-null row
 
 ```
-chart_run = [s for s in series
-             if s.portfolio_index is not None
-             and s.spy_index is not None
-             and s.excess_return is not None]
+# 1. find the first row where portfolio_index, spy_index, excess_return all non-null
+start = index of first row in series with all three non-null   # the SPY-anchor point
+prefix = series[:start]                                        # portfolio-only rows
+tail   = series[start:]
+# 2. chart_run is the CONTIGUOUS run from `start`; it STOPS at the first later
+#    row that has any of the three null (a mid/tail gap).
+chart_run = longest contiguous all-three-non-null run starting at `start`
 ```
 
-All three lines plot from `chart_run` → identical x-domain, no gapped polylines.
-`chartable = len(chart_run) >= 2`. `chart_start_date = chart_run[0].trading_date`
-(or None). `dropped_prefix_count = len(series) − len(chart_run)` for the leading
-portfolio-only rows before SPY was anchored.
+- `dropped_prefix_count = start` (the count of leading portfolio-only rows — a true
+  *prefix*, not "everything filtered out").
+- `excluded_nonprefix_count = len(tail) − len(chart_run)` — rows dropped because a gap
+  appeared *after* charting began.
+- `chartable = len(chart_run) >= 2`. `chart_start_date = chart_run[0].trading_date` (or None).
+
+**PR3a invariant (relied on, asserted defensively):** once the lazy SPY anchor is set,
+every later snapshot has non-null `spy_index`/`excess_return`. So in normal operation
+`excluded_nonprefix_count == 0` and `chart_run == tail`. PR4 does NOT silently connect
+across a mid-series gap — if the invariant is ever violated, it stops `chart_run` at the
+gap, surfaces `excluded_nonprefix_count > 0`, and shows a `data_quality` note
+("Chart truncated at a gap in benchmark data."). This avoids drawing a false-continuous
+line.
 
 ### Latest-missing-SPY rule (explicit, never computed downstream)
 
@@ -236,7 +257,15 @@ on the `/lab/portfolio-vs-spy` prefix.
 - E4 flat index (`hi==lo`) → mid-line, no div-by-zero
 - E5 all excess == 0 → zero-range guard, `zero_y` at mid
 - E6 latest snapshot missing SPY → `hero_excess_return=None`, badge from `is_sufficient`
-- E7 `dropped_prefix_count > 0` → chart starts at first SPY date, note flagged
+- E7 `dropped_prefix_count > 0` (leading portfolio-only rows) → chart starts at first
+  SPY date, prefix note flagged
+- E8 mid/tail gap after charting began → `chart_run` stops at the gap,
+  `excluded_nonprefix_count > 0`, truncation `data_quality` note flagged (no
+  false-continuous line across the gap)
+- E9 `*_label` fields: `hero_excess_return_label`/`portfolio_index_label`/
+  `spy_index_label` = `"N/A"` when the underlying value is None; `coverage_label` = `"42 / 90"`
+- E10 invariant: when `chart is None` the chart partials render NO `<polyline>`; when
+  `chart` is present, `portfolio_points`/`spy_points`/`excess_points` are all non-empty
 - math: shared `lo/hi` across both index lines; `0 ∈ [excess_lo, excess_hi]`; `zero_y`
   placement; x recomputed against post-downsample N; downsample preserves first+last and
   is deterministic
@@ -252,6 +281,12 @@ on the `/lab/portfolio-vs-spy` prefix.
   presenter unit tests instead)
 
 All new files carry a `# Layer:` tag (enforced by the existing pytest hook).
+
+**Nav regression check:** adding the entry to `base.html` reorders the lab group. The
+implementation plan MUST include a manual/screenshot verification that the existing
+lab nav links (`/lab/ai-track`, `/lab/backtest`, `/lab/paper-trading`, `/lab/broker`,
+`/lab/reconcile`) still render and route correctly, and that `mp-nav-active` highlights
+the right entry on each page.
 
 ---
 
@@ -271,6 +306,9 @@ All new files carry a `# Layer:` tag (enforced by the existing pytest hook).
 | L10 | Nav entry leads the lab group |
 | L11 | Two distinct empty states (no-data vs not-chartable) never conflated |
 | L12 | `get_all_snapshots` is a read-only UI helper, not used by computation paths |
+| L13 | All Decimal→string formatting is in the presenter (`*_label` fields); template never formats a Decimal |
+| L14 | `chart is None` ⇒ no `<polyline>` rendered; `chart` present ⇒ all three point strings non-empty (tested invariant) |
+| L15 | `chart_run` is a CONTIGUOUS suffix; a mid/tail gap truncates (never connects across) and surfaces `excluded_nonprefix_count` + a `data_quality` note. `dropped_prefix_count` = index of the first chart_run row (true prefix only) |
 
 ## Out of scope (v1)
 
