@@ -22,6 +22,7 @@ from marketpulse.holdings.quantity_history import quantity_as_of
 from marketpulse.holdings.splits import SplitError, record_split
 from marketpulse.holdings.trades import recompute_ticker
 from marketpulse.logging import get_logger
+from marketpulse.ops.charter_review import generate_charter_review
 from marketpulse.portfolio.snapshot_runner import run_nav_snapshot
 from marketpulse.recap.push import push_recap_summary
 from marketpulse.recap.service import RecapService
@@ -191,6 +192,57 @@ def run_db_backup() -> None:
         log.warning(
             "db_backup_failed",
             error=result.error, duration_ms=result.duration_ms,
+        )
+
+
+def _last_sunday_on_or_before(d: date) -> date:
+    """Mon=0..Sun=6. Returns d if Sunday, else d minus (weekday+1) days."""
+    return d - timedelta(days=(d.weekday() + 1) % 7)
+
+
+def run_charter_review_weekly() -> None:
+    """Mon 09:30 UTC — generate the weekly charter review markdown.
+
+    L4: errors from generate_charter_review are caught here and logged;
+    the scheduler must not crash because of this job.
+    L13: skipped with info log if database_url isn't a sqlite driver.
+    """
+    from contextlib import suppress
+
+    from sqlalchemy.engine.url import make_url
+
+    settings = get_settings()
+    parsed = make_url(settings.database_url)
+    if not parsed.drivername.startswith("sqlite") or not parsed.database:
+        log.info(
+            "charter_review_skipped_not_sqlite",
+            database_url=settings.database_url,
+        )
+        return
+    source_db = Path(parsed.database).resolve()
+    data_dir = source_db.parent
+    recaps_dir = data_dir / "recaps" / "charter"
+    backup_manifest_path = data_dir / "backups" / "latest.json"
+    now = datetime.now(UTC)
+    week_ending = _last_sunday_on_or_before(now.date())
+    try:
+        gen = session_scope()
+        session = next(gen)
+        try:
+            generate_charter_review(
+                session=session,
+                week_ending=week_ending,
+                now=now,
+                recaps_dir=recaps_dir,
+                backup_manifest_path=backup_manifest_path,
+            )
+        finally:
+            with suppress(Exception):
+                session.close()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "charter_review_failed",
+            extra={"week_ending": str(week_ending), "exception": str(exc)},
         )
 
 
@@ -586,6 +638,18 @@ def build_scheduler() -> BackgroundScheduler:
         run_db_backup,
         trigger=CronTrigger(hour=9, minute=0, timezone="UTC"),
         id="db_backup",
+        replace_existing=True,
+        misfire_grace_time=None,
+        coalesce=True,
+    )
+    # PR3b: weekly charter review. Runs every Monday 09:30 UTC, AFTER the
+    # 09:00 UTC db_backup so the report reads a fresh backup manifest.
+    sched.add_job(
+        run_charter_review_weekly,
+        trigger=CronTrigger(
+            day_of_week="mon", hour=9, minute=30, timezone="UTC",
+        ),
+        id="charter_review_weekly",
         replace_existing=True,
         misfire_grace_time=None,
         coalesce=True,

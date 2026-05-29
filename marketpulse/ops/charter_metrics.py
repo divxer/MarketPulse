@@ -226,7 +226,7 @@ def build_charter_metrics(
     session: Session | None = None,
 ) -> dict[str, Any]:
     """Build the v1 charter-metrics contract dict. Never raises."""
-    backup = _build_backup_section(
+    backup = build_backup_section(
         manifest_path=manifest_path,
         now=now,
         backup_unavailable_reason=backup_unavailable_reason,
@@ -240,12 +240,19 @@ def build_charter_metrics(
     }
 
 
-def _build_backup_section(
+def build_backup_section(
     *,
     manifest_path: Path,
     now: datetime,
-    backup_unavailable_reason: str | None,
+    backup_unavailable_reason: str | None = None,
 ) -> dict[str, Any]:
+    """Normalize the raw PR1 backup manifest into the v1 contract shape.
+
+    SINGLE source of truth for backup staleness (STALE_AFTER_HOURS). Both
+    the /lab/charter-metrics endpoint and PR3b's weekly report consume this
+    normalized dict so they never disagree about whether a backup is stale.
+    Never raises — missing/malformed manifests become status='missing'.
+    """
     if backup_unavailable_reason is not None:
         return _missing_backup(error=backup_unavailable_reason)
 

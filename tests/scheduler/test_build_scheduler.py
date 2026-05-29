@@ -14,7 +14,7 @@ def test_daily_critical_jobs_have_no_misfire_grace():
     sched = build_scheduler()
     for job_id in (
         "paper_trading_tick", "outcome_computation", "flex_sync",
-        "sector_backfill", "db_backup",
+        "sector_backfill", "db_backup", "charter_review_weekly",
     ):
         job = sched.get_job(job_id)
         assert job is not None, f"missing job {job_id}"
@@ -43,3 +43,14 @@ def test_db_backup_job_registered():
     trigger_repr = str(job.trigger)
     assert "hour='9'" in trigger_repr or "hour=9" in trigger_repr, trigger_repr
     assert "minute='0'" in trigger_repr or "minute=0" in trigger_repr, trigger_repr
+
+
+def test_charter_review_weekly_job_registered():
+    """PR3b: weekly markdown at 09:30 UTC every Monday."""
+    sched = build_scheduler()
+    job = sched.get_job("charter_review_weekly")
+    assert job is not None, "charter_review_weekly cron must be registered"
+    trigger_repr = str(job.trigger)
+    assert "day_of_week='mon'" in trigger_repr, trigger_repr
+    assert "hour='9'" in trigger_repr or "hour=9" in trigger_repr, trigger_repr
+    assert "minute='30'" in trigger_repr or "minute=30" in trigger_repr, trigger_repr
