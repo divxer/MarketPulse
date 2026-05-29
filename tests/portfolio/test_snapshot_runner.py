@@ -56,7 +56,7 @@ def _seed_position(session, *, ticker: str, qty: int, opened: datetime, closed: 
         cancel_reason=None,
         event_price=Decimal("100"),
         horizon_price=None,
-        status="ENTRY_FILLED" if closed is None else "EXIT_FILLED",
+        status="ENTRY_FILLED",
         strategy_version="v1",
         allocator_version="v1",
         execution_engine_version="v1",
@@ -64,18 +64,43 @@ def _seed_position(session, *, ticker: str, qty: int, opened: datetime, closed: 
     )
     session.add(order)
     session.flush()
+    # Create position first (entry_fill_id/exit_fill_id populated after fills).
     pos = PaperPosition(
         order_id=order.id,
         entry_fill_id=None, exit_fill_id=None,
         strategy="general", ticker=ticker, quantity=qty,
         entry_price=Decimal("100"), entry_date=opened.date(),
         horizon_date=opened.date() + timedelta(days=7),
-        status="OPEN" if closed is None else "CLOSED",
-        opened_at=opened, closed_at=closed,
-        exit_price=None if closed is None else Decimal("105"),
-        realized_pnl=None if closed is None else Decimal("5"),
+        status="OPEN",
+        opened_at=opened, closed_at=None,
+        exit_price=None,
+        realized_pnl=None,
     )
     session.add(pos)
+    session.flush()
+    # Entry fill — always required.
+    entry_fill = PaperFill(
+        order_id=order.id, position_id=pos.id, side="ENTRY",
+        price=Decimal("100"), quantity=qty, filled_at=opened,
+        cash_delta=-Decimal("100") * qty, realized_pnl=None,
+    )
+    session.add(entry_fill)
+    session.flush()
+    pos.entry_fill_id = entry_fill.id
+    if closed is not None:
+        exit_fill = PaperFill(
+            order_id=order.id, position_id=pos.id, side="EXIT",
+            price=Decimal("105"), quantity=qty, filled_at=closed,
+            cash_delta=Decimal("105") * qty,
+            realized_pnl=Decimal("5") * qty,
+        )
+        session.add(exit_fill)
+        session.flush()
+        pos.exit_fill_id = exit_fill.id
+        pos.status = "CLOSED"
+        pos.closed_at = closed
+        pos.exit_price = Decimal("105")
+        pos.realized_pnl = Decimal("5") * qty
     session.flush()
     return pos
 
@@ -109,3 +134,72 @@ def test_run_nav_snapshot_first_run_self_anchors(db_session):
     persisted = get_snapshot(db_session, date(2026, 5, 28))
     assert persisted is not None
     assert persisted.portfolio_nav == Decimal("102000")
+
+
+def test_run_nav_snapshot_historical_open_positions(db_session):
+    """L7: time-predicate reconstruction. Position opened day-2 closed day-4;
+    rebuild for day-3 includes it, rebuild for day-5 excludes it."""
+    _seed_cash(db_session, "100000", datetime(2026, 5, 26, 13, 0, tzinfo=UTC))
+    _seed_position(
+        db_session, ticker="AAPL", qty=10,
+        opened=datetime(2026, 5, 27, 14, 0, tzinfo=UTC),
+        closed=datetime(2026, 5, 29, 14, 0, tzinfo=UTC),
+    )
+    _seed_price(db_session, "AAPL", date(2026, 5, 28), 200.0)
+    _seed_price(db_session, "AAPL", date(2026, 5, 30), 200.0)
+    db_session.commit()
+
+    snap_d3 = run_nav_snapshot(db_session, trading_date=date(2026, 5, 28))
+    db_session.commit()
+    assert snap_d3.holdings_mtm == Decimal("2000")  # position still open
+
+    snap_d5 = run_nav_snapshot(db_session, trading_date=date(2026, 5, 30))
+    db_session.commit()
+    assert snap_d5.holdings_mtm == Decimal("0")  # position already closed
+
+
+def test_run_nav_snapshot_idempotent_pk_conflict(db_session):
+    _seed_cash(db_session, "100000", datetime(2026, 5, 28, 13, 0, tzinfo=UTC))
+    db_session.commit()
+
+    snap1 = run_nav_snapshot(db_session, trading_date=date(2026, 5, 28))
+    db_session.commit()
+    snap2 = run_nav_snapshot(db_session, trading_date=date(2026, 5, 28))
+    assert snap2.trading_date == snap1.trading_date
+    assert snap2.portfolio_nav == snap1.portfolio_nav
+
+
+def test_run_nav_snapshot_spy_anchor_late_establishment(db_session):
+    """L16: SPY anchor establishes on first SPY-available snapshot."""
+    _seed_cash(db_session, "100000", datetime(2026, 5, 26, 13, 0, tzinfo=UTC))
+    db_session.commit()
+
+    # Day 1: no SPY in cache → no SPY anchor
+    snap_d1 = run_nav_snapshot(db_session, trading_date=date(2026, 5, 26))
+    db_session.commit()
+    assert snap_d1.anchor_spy_close is None
+    assert snap_d1.spy_index is None
+    assert snap_d1.excess_return is None
+
+    # Day 2: SPY shows up
+    _seed_price(db_session, "SPY", date(2026, 5, 27), 500.0)
+    db_session.commit()
+    snap_d2 = run_nav_snapshot(db_session, trading_date=date(2026, 5, 27))
+    db_session.commit()
+    assert snap_d2.anchor_spy_close == Decimal("500")
+    assert snap_d2.spy_close == Decimal("500")
+    # spy_index = 500/500 = 1
+    assert snap_d2.spy_index == Decimal("1")
+
+    # Day 3: SPY moves; anchor stays at 500
+    _seed_price(db_session, "SPY", date(2026, 5, 28), 510.0)
+    db_session.commit()
+    snap_d3 = run_nav_snapshot(db_session, trading_date=date(2026, 5, 28))
+    db_session.commit()
+    assert snap_d3.anchor_spy_close == Decimal("500")
+    assert snap_d3.spy_index == Decimal("510") / Decimal("500")
+
+    # Day 1 row remains frozen with null benchmark side.
+    persisted_d1 = get_snapshot(db_session, date(2026, 5, 26))
+    assert persisted_d1.anchor_spy_close is None
+    assert persisted_d1.spy_index is None
