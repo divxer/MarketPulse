@@ -39,7 +39,15 @@
 
 ---
 
-## Task 1: Alembic 0014 migration + ORM model + migration tests
+## Task 1: Alembic migration + ORM model + migration tests
+
+**Pre-flight (run once before Step 1 to confirm revision number):**
+
+```bash
+ls alembic/versions/ | sort | grep -v __pycache__ | tail -3
+```
+
+Expected at plan-write time: latest revision is `0013_phase7b_broker_order_pilot.py`. **If the head has advanced past `0013`, use the next free integer instead of `0014` throughout this task** (filename, `revision = "..."`, `down_revision = "..."`, the test's `command.upgrade(cfg, "...")` calls, and any reference to `0014` in later tasks). The plan assumes `0014`; only adjust if the pre-flight shows otherwise.
 
 **Files:**
 - Create: `alembic/versions/0014_paper_nav_snapshot.py`
@@ -825,7 +833,14 @@ def _dc_to_kwargs(snap: NavSnapshot, *, now: datetime) -> dict:
 
 
 def insert_snapshot(session: Session, snapshot: NavSnapshot) -> None:
-    """Insert exactly once. Raises SnapshotAlreadyExists on PK conflict."""
+    """Insert exactly once. Raises SnapshotAlreadyExists on PK conflict.
+
+    IMPORTANT: this function does NOT call session.rollback(). Repository
+    functions must not control transaction state — that's the caller's
+    responsibility. The runner pre-checks existence before computing, so
+    in normal flow the race-to-flush path is unreachable; if it does fire
+    (concurrent writer), the caller decides whether to rollback or retry.
+    """
     existing = session.get(PaperNavSnapshot, snapshot.trading_date)
     if existing is not None:
         raise SnapshotAlreadyExists(
@@ -836,8 +851,7 @@ def insert_snapshot(session: Session, snapshot: NavSnapshot) -> None:
     try:
         session.flush()
     except IntegrityError as exc:
-        # Race between get + add. Convert to the typed exception.
-        session.rollback()
+        # Caller decides rollback policy.
         raise SnapshotAlreadyExists(
             f"snapshot already exists for {snapshot.trading_date}"
         ) from exc
@@ -1060,6 +1074,17 @@ def get_spy_anchor(session: Session) -> Decimal | None:
         .order_by(PaperNavSnapshot.trading_date.asc())
         .limit(1),
     )
+
+
+def get_earliest_snapshot(session: Session) -> NavSnapshot | None:
+    """Used by snapshot_runner to recover anchor_portfolio_nav on every
+    subsequent snapshot after the first."""
+    row = session.scalars(
+        select(PaperNavSnapshot)
+        .order_by(PaperNavSnapshot.trading_date.asc())
+        .limit(1),
+    ).first()
+    return _row_to_dc(row) if row is not None else None
 ```
 
 Note on `count_snapshots_in_window`: replace the inline `__import__` with a proper top-of-file `from sqlalchemy import func` import — add `func` to the existing `from sqlalchemy import select` line so the line reads `from sqlalchemy import func, select`. Then change the function body to:
@@ -1255,7 +1280,7 @@ from marketpulse.portfolio.north_star import (
 from marketpulse.portfolio.snapshot_repo import (
     SnapshotAlreadyExists,
     count_snapshots_in_window,
-    get_latest_snapshot,
+    get_earliest_snapshot,
     get_snapshot,
     get_spy_anchor,
     insert_snapshot,
@@ -1326,25 +1351,44 @@ def run_nav_snapshot(
 ) -> NavSnapshot:
     """Read forward state, compute, persist. Returns the snapshot.
 
-    On PK conflict (idempotent re-run) → returns existing row + log warning.
-    All other persistence errors propagate (L4).
+    Idempotent re-run: if a snapshot for `trading_date` already exists,
+    log + return it WITHOUT recomputing (avoids wasted work AND prevents
+    trading_days_observed drift from re-counting a finalized day).
+
+    All non-PK persistence errors propagate (L4). The PK race path
+    (concurrent writer) rolls back the half-formed add() and returns
+    the row that actually won.
     """
+    # Idempotency check FIRST — before any read/compute work.
+    existing = get_snapshot(session, trading_date)
+    if existing is not None:
+        log.warning(
+            "nav_snapshot_idempotent_rerun",
+            extra={"tick_date": str(trading_date)},
+        )
+        return existing
+
     cash_balance = _read_cash_balance(session, trading_date)
     open_positions = _read_open_positions(session, trading_date)
     price_lookup, spy_close = _read_price_lookup(session, trading_date)
 
-    # Anchors
-    earliest = get_latest_snapshot(session)  # placeholder: see Task 7 refinement
+    # Portfolio anchor — earliest snapshot's, or self-anchor on first run.
+    # L6: self-anchor preview uses the SAME omit-unpriced rule as the pure
+    # compute function — never `(price or 0)`. Otherwise the anchor would
+    # silently include phantom zero-price MTM and corrupt portfolio_index.
+    earliest = get_earliest_snapshot(session)
     if earliest is None:
-        portfolio_nav_preview = cash_balance + sum(
-            (pos.quantity * (price_lookup(pos.ticker) or Decimal("0"))
-             for pos in open_positions),
-            Decimal("0"),
-        )
+        portfolio_nav_preview = cash_balance
+        for pos in open_positions:
+            price = price_lookup(pos.ticker)
+            if price is not None:
+                portfolio_nav_preview += pos.quantity * price
         anchor_portfolio_nav = portfolio_nav_preview
     else:
         anchor_portfolio_nav = earliest.anchor_portfolio_nav
 
+    # L16: SPY lazy anchor — earliest non-null anchor_spy_close in DB; if
+    # none and current SPY is available, current becomes the anchor.
     anchor_spy_close = get_spy_anchor(session)
     if anchor_spy_close is None and spy_close is not None:
         anchor_spy_close = spy_close
@@ -1367,13 +1411,18 @@ def run_nav_snapshot(
     try:
         insert_snapshot(session, snapshot)
     except SnapshotAlreadyExists:
+        # True race: a concurrent writer landed the row between our
+        # get_snapshot() at the top and our flush. Rollback the half-formed
+        # add() so the caller's transaction stays clean, then return the
+        # row that actually won.
+        session.rollback()
         log.warning(
-            "nav_snapshot_pk_conflict_idempotent",
-            extra={"trading_date": str(trading_date)},
+            "nav_snapshot_pk_conflict_race",
+            extra={"tick_date": str(trading_date)},
         )
-        existing = get_snapshot(session, trading_date)
-        assert existing is not None  # invariant: PK conflict means row exists
-        return existing
+        winning = get_snapshot(session, trading_date)
+        assert winning is not None  # PK conflict implies row exists
+        return winning
 
     return snapshot
 ```
@@ -1382,8 +1431,6 @@ def run_nav_snapshot(
 
 Run: `uv run pytest tests/portfolio/test_snapshot_runner.py -v`
 Expected: PASS — 2 tests (the empty-ledger test and the first-run self-anchor).
-
-(Note: `get_latest_snapshot` is used as a stand-in for "earliest snapshot" right now; Task 7 swaps it for a proper earliest-snapshot lookup. This still produces correct behavior on the first-run case because both reduce to "no prior anchor".)
 
 - [ ] **Step 5: Commit**
 
@@ -1394,11 +1441,15 @@ git commit -m "feat(pr3a): snapshot_runner cash + positions + first-run self-anc
 
 ---
 
-## Task 7: `snapshot_runner.py` — anchors via earliest snapshot + historical-safe positions test + SPY lazy anchor
+## Task 7: Historical-safe positions + idempotency + SPY lazy anchor tests
+
+This task adds tests that exercise the Task 6 runner's existing behavior
+(historical position reconstruction, idempotent re-run, SPY lazy anchor).
+No production-code changes are needed if Task 6 was implemented correctly —
+the runner already uses `get_earliest_snapshot` (added in Task 5) and the
+idempotency check at the top.
 
 **Files:**
-- Modify: `marketpulse/portfolio/snapshot_repo.py` — add `get_earliest_snapshot`
-- Modify: `marketpulse/portfolio/snapshot_runner.py` — use `get_earliest_snapshot`
 - Modify: `tests/portfolio/test_snapshot_runner.py` — add 3 tests
 
 - [ ] **Step 1: Append failing tests**
@@ -1475,91 +1526,20 @@ def test_run_nav_snapshot_spy_anchor_late_establishment(db_session):
     assert persisted_d1.spy_index is None
 ```
 
-- [ ] **Step 2: Add `get_earliest_snapshot` to repo**
-
-Append to `marketpulse/portfolio/snapshot_repo.py`:
-
-```python
-def get_earliest_snapshot(session: Session) -> NavSnapshot | None:
-    row = session.scalars(
-        select(PaperNavSnapshot)
-        .order_by(PaperNavSnapshot.trading_date.asc())
-        .limit(1),
-    ).first()
-    return _row_to_dc(row) if row is not None else None
-```
-
-- [ ] **Step 3: Update runner to use `get_earliest_snapshot` for portfolio anchor**
-
-Edit `marketpulse/portfolio/snapshot_runner.py`. Replace this import section:
-
-```python
-from marketpulse.portfolio.snapshot_repo import (
-    SnapshotAlreadyExists,
-    count_snapshots_in_window,
-    get_latest_snapshot,
-    get_snapshot,
-    get_spy_anchor,
-    insert_snapshot,
-)
-```
-
-with:
-
-```python
-from marketpulse.portfolio.snapshot_repo import (
-    SnapshotAlreadyExists,
-    count_snapshots_in_window,
-    get_earliest_snapshot,
-    get_snapshot,
-    get_spy_anchor,
-    insert_snapshot,
-)
-```
-
-Then in `run_nav_snapshot`, replace the anchor block:
-
-```python
-    earliest = get_latest_snapshot(session)  # placeholder: see Task 7 refinement
-    if earliest is None:
-        portfolio_nav_preview = cash_balance + sum(
-            (pos.quantity * (price_lookup(pos.ticker) or Decimal("0"))
-             for pos in open_positions),
-            Decimal("0"),
-        )
-        anchor_portfolio_nav = portfolio_nav_preview
-    else:
-        anchor_portfolio_nav = earliest.anchor_portfolio_nav
-```
-
-with:
-
-```python
-    earliest = get_earliest_snapshot(session)
-    if earliest is None:
-        # First-ever snapshot: self-anchor on the portfolio side. We compute
-        # the preview using the same omit-unpriced rule the pure function will
-        # apply (so the anchor matches portfolio_nav).
-        portfolio_nav_preview = cash_balance
-        for pos in open_positions:
-            price = price_lookup(pos.ticker)
-            if price is not None:
-                portfolio_nav_preview += pos.quantity * price
-        anchor_portfolio_nav = portfolio_nav_preview
-    else:
-        anchor_portfolio_nav = earliest.anchor_portfolio_nav
-```
-
-- [ ] **Step 4: Run tests**
+- [ ] **Step 2: Run tests**
 
 Run: `uv run pytest tests/portfolio/test_snapshot_runner.py -v`
-Expected: PASS — 5 tests total (2 + 3 new).
+Expected: PASS — 5 tests total (2 from Task 6 + 3 new).
 
-- [ ] **Step 5: Commit**
+If any of the 3 new tests fail, the Task 6 runner has an issue with one
+of: time-predicate position read (L7), idempotent existence-check, or SPY
+lazy anchor (L16). Trace back to those sites in `snapshot_runner.py`.
+
+- [ ] **Step 3: Commit**
 
 ```bash
-git add marketpulse/portfolio/snapshot_repo.py marketpulse/portfolio/snapshot_runner.py tests/portfolio/test_snapshot_runner.py
-git commit -m "feat(pr3a): portfolio anchor via earliest snapshot + SPY lazy anchor (L16)"
+git add tests/portfolio/test_snapshot_runner.py
+git commit -m "test(pr3a): historical positions + idempotency + SPY lazy anchor"
 ```
 
 ---
@@ -1667,12 +1647,15 @@ from decimal import Decimal
 from marketpulse.db.models import PaperCashLedger
 
 
-def test_scheduler_nav_snapshot_failure_does_not_abort_tick(
+def test_run_nav_snapshot_safely_logs_and_swallows(
     db_session, monkeypatch, caplog,
 ):
-    """If run_nav_snapshot raises, run_paper_trading_tick still completes,
-    and the failure is logged. We exercise only the snapshot-hook wrapper
-    (not the full tick) to keep the test focused."""
+    """Unit test on the wrapper: when run_nav_snapshot raises, the wrapper
+    swallows + logs a warning. This proves L4 at the boundary; we DO NOT
+    here exercise the full run_paper_trading_tick (that would require
+    much more fixture state). Integration of the wrapper into the tick
+    is verified separately by the existing scheduler suite still passing
+    in Task 13."""
     from marketpulse.scheduler import jobs as jobs_mod
 
     # Seed enough state that the runner would have succeeded.
@@ -1728,9 +1711,11 @@ def _run_nav_snapshot_safely(session, *, tick_date) -> None:
     try:
         run_nav_snapshot(session, trading_date=tick_date)
     except Exception as exc:  # noqa: BLE001
+        # `exception` (not `error`) to avoid collision with stdlib LogRecord
+        # fields and most structlog/JSON formatters.
         log.warning(
             "nav_snapshot_failed",
-            extra={"tick_date": str(tick_date), "error": str(exc)},
+            extra={"tick_date": str(tick_date), "exception": str(exc)},
         )
 ```
 
