@@ -84,8 +84,11 @@ Marked archived; no new work, existing code may stay until next cleanup.
 
 ## What is conditional (re-evaluate under charter)
 
-- **Phase 8a ML feature snapshots** — spec drafted 2026-05-28 but NOT yet approved. Under this charter the question is: will 15 structured features in the analyze prompt measurably improve `ai_verdict_hit_rate_h5`? Decision: SHIP 8a only with a paired diagnostic comparison (verdicts under v4 vs v5 prompt on the same ticker-day, retrospectively or via shadow mode). The pass/fail thresholds and review window are EXPERIMENT PARAMETERS belonging in the 8a plan, NOT this charter.
-- **Phase 8b ML predictions** — gated on 8a's diagnostic comparison showing statistically meaningful improvement. If Phase 8a shows no statistically meaningful improvement in `ai_verdict_hit_rate_h5` after sufficient sample accumulation, Phase 8b is abandoned and 8a is frozen. "Statistically meaningful" and "sufficient sample" are 8a-plan-level decisions.
+- **Phase 8a ML feature snapshots — STATUS: PARKED (decided 2026-05-29).** The spec is technically sound (correct cache key, sane feature catalog, no training, no ta-lib dependency, no allocator change, simple rollback) — reviewed standalone it would approve. It is parked on **timing**, not design: the charter's ship-condition (a paired v4-vs-v5 diagnostic proving measurable improvement in `ai_verdict_hit_rate_h5`) is unsatisfiable today, and shipping without it would repeat operational gap #3.
+  - Blocking facts at decision time: **13 resolved h5 outcomes** total (h1: 53), 35 analyses, 9 tickers — far below any statistical power; the 8a spec itself defers the A/B diagnostic to 8b (§9); and 8a enriches `analyze()` (D-pillar advisor), not the allocator that actually produces the north-star.
+  - **Unpark when ALL hold:** (1) ≥ 30 resolved h5 outcomes available **per A/B arm**; (2) ≥ 30 valid north-star trading days accumulated (`paper_nav_snapshot`); (3) a shadow-mode A/B design (v4 vs v5 run simultaneously on the same ticker-day, both recorded) is approved. At unpark, ship **8a + 8b together** as one shadow experiment so a single run answers "do ML features add value?" with real data — not 8a-then-8b sequentially.
+  - Until then the bottleneck is **data generation, not features** (see task #57 / priority re-order below).
+- **Phase 8b ML predictions** — gated on the 8a+8b shadow experiment (above) showing statistically meaningful improvement in `ai_verdict_hit_rate_h5`. If no meaningful improvement after sufficient sample accumulation, 8b is abandoned and 8a stays parked/frozen. "Statistically meaningful" and "sufficient sample" are experiment-plan decisions made at unpark.
 - **6e ShadowPoolOptimizer** — gated on the north-star metric stagnating near zero. If `paper_portfolio_excess_return_vs_spy_90d` stays in [-2%, +2%] over a sustained period, the optimizer becomes the next priority (the heuristic-to-optimal residual is then a candidate for non-trivial alpha). The exact "sustained period" is a re-evaluation parameter, not charter-locked.
 
 ---
@@ -107,23 +110,21 @@ Until these hold, `MP_IBKR_ALLOW_LIVE` stays `false` regardless of broker-accoun
 
 ---
 
-## Top 3 priorities for next 30 days
+## Priorities
 
-1. **DB backup + Charter-mandated SLI dashboard**(operational floor — cannot run a quant system without it)
-   - Cron `sqlite3 .backup` to NAS sibling path, 7-day rotation
-   - One new endpoint `/health/charter` exposing the 7 secondary diagnostic metrics
-   - One scheduled weekly `charter_review` job that writes a markdown report into `/recaps`
+### Original 30-day Top 3 — all resolved (2026-05-29)
 
-2. **`/lab/portfolio-vs-spy` route + the north-star metric itself**(observability before optimization)
-   - Compute rolling 90-trading-day cumulative total return on paper portfolio
-   - Compare against SPY same-window cumulative total return
-   - Surface as line chart + delta number
-   - Updates daily after recap
+1. **DB backup + Charter-mandated SLI dashboard** — ✅ DONE. PR1 (`sqlite3 .backup` + 7-day rotation), PR2 (`/lab/charter-metrics` JSON), PR3b (weekly `charter_review` markdown into `/data/recaps/charter/`).
+2. **`/lab/portfolio-vs-spy` route + north-star metric** — ✅ DONE. PR3a (NAV snapshot semantic layer) + PR4 (visualization). Hardened post-ship: #133 (snapshots now persist), #135 (degenerate rows can't poison the inception anchor).
+3. **Decide Phase 8a under this charter** — ✅ DECIDED: **PARKED** (see "What is conditional" above). Not shippable under the charter's A/B requirement with 13 h5 outcomes.
 
-3. **Decide Phase 8a (ML feature snapshots) under this charter**
-   - Re-read the 2026-05-28 spec with the new question: "will this measurably improve `ai_verdict_hit_rate_h5`?"
-   - If yes (or arguably yes), ship with a paired A/B diagnostic. The actual measurement threshold and review window are 8a-plan parameters, not charter-locked.
-   - If no, archive the spec and pick a different lever
+### Re-ordered priorities (post-2026-05-29 — development philosophy: measure → find bottleneck → prove a change addresses it → only then add features)
+
+The bottleneck is **data**, not features. Ranked:
+
+- **P0 — Let the north-star run.** The snapshot pipeline was only fixed today (#133/#135); `paper_nav_snapshot` has ~0 valid days. Accumulate ≥ 30 trading days of valid snapshots. This is the prerequisite for *everything* — the charter's core question ("does it beat SPY?") is currently **Unknown** because coverage ≈ 0%.
+- **P1 — Task #57: drive `/stock` analyses to populate evaluation data.** At ~1 analysis/day, 30/60/120 outcomes take 1/2/4+ months. Auto-analyzing a wider watchlist nightly raises throughput an order of magnitude (13 → hundreds of outcomes), which is the only thing that makes a future 8a/8b A/B statistically possible.
+- **P2 — 8a + 8b shadow experiment** — only after P0 + P1 satisfy the unpark trigger. Run v4 and v5 prompts simultaneously and answer the ML-features question with real data instead of guessing about RSI/MACD.
 
 Anything else in the backlog (chart fixes, old branches, optimizer brainstorm, etc.) waits.
 
@@ -165,7 +166,7 @@ Phase 7a–c specs / plans exist but are scattered across PR descriptions; conso
 
 ### Conditional / pending — not part of as-built baseline
 
-- `docs/superpowers/specs/2026-05-28-phase-8a-ml-feature-snapshots-design.md` — drafted 2026-05-28, AWAITING decision under this charter. The architecture baseline above does NOT yet include this work.
+- `docs/superpowers/specs/2026-05-28-phase-8a-ml-feature-snapshots-design.md` — drafted 2026-05-28; **PARKED 2026-05-29** (see "What is conditional"). Not implemented; not part of the as-built baseline. Unpark trigger is charter-locked above.
 
 ---
 
