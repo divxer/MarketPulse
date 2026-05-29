@@ -8,6 +8,9 @@ from decimal import Decimal
 from marketpulse.portfolio.north_star import NavSnapshot
 from marketpulse.portfolio.portfolio_vs_spy_view import (
     MAX_CHART_POINTS,
+    VIEWBOX_H,
+    VIEWBOX_W,
+    _build_chart_data,
     _compute_chart_run,
     _downsample,
     _fmt_excess_label,
@@ -114,3 +117,65 @@ def test_downsample_caps_and_preserves_first_last():
 def test_downsample_deterministic():
     rows = [_snap(date(2026, 1, 1), port=str(1.0 + i / 1000)) for i in range(500)]
     assert _downsample(rows) == _downsample(rows)
+
+
+def _pts(points_str):
+    """Parse 'x,y x,y' -> [(x, y), ...] floats."""
+    return [tuple(float(c) for c in pair.split(",")) for pair in points_str.split()]
+
+
+def test_chart_data_shared_index_scale():
+    run = [
+        _snap(date(2026, 8, 10), port="1.00", spy="1.00", excess="0.00"),
+        _snap(date(2026, 8, 11), port="1.06", spy="1.02", excess="0.04"),
+    ]
+    cd = _build_chart_data(run)
+    assert cd.index_lo == Decimal("1.00")
+    assert cd.index_hi == Decimal("1.06")
+    port = _pts(cd.portfolio_points)
+    spy = _pts(cd.spy_points)
+    assert port[1][1] == 0.0          # portfolio 1.06 == hi -> top
+    assert port[0][1] == VIEWBOX_H    # portfolio 1.00 == lo -> bottom
+    assert 0.0 < spy[1][1] < VIEWBOX_H  # SPY 1.02 between -> proves SHARED scale
+
+
+def test_chart_data_x_spans_full_width():
+    run = [
+        _snap(date(2026, 8, 10), port="1.00", spy="1.00", excess="0.00"),
+        _snap(date(2026, 8, 11), port="1.01", spy="1.00", excess="0.01"),
+        _snap(date(2026, 8, 12), port="1.02", spy="1.00", excess="0.02"),
+    ]
+    cd = _build_chart_data(run)
+    xs = [x for x, _ in _pts(cd.portfolio_points)]
+    assert xs[0] == 0.0
+    assert xs[-1] == float(VIEWBOX_W)
+
+
+def test_chart_data_excess_range_contains_zero_positive_only():
+    run = [
+        _snap(date(2026, 8, 10), port="1.02", spy="1.00", excess="0.02"),
+        _snap(date(2026, 8, 11), port="1.05", spy="1.00", excess="0.05"),
+    ]
+    cd = _build_chart_data(run)
+    assert cd.excess_lo == Decimal("0")
+    assert cd.excess_hi == Decimal("0.05")
+    assert cd.zero_y == VIEWBOX_H   # 0 is the floor -> 0-line at bottom
+
+
+def test_chart_data_flat_index_guard_no_div_zero():
+    run = [
+        _snap(date(2026, 8, 10), port="1.00", spy="1.00", excess="0.00"),
+        _snap(date(2026, 8, 11), port="1.00", spy="1.00", excess="0.00"),
+    ]
+    cd = _build_chart_data(run)
+    port = _pts(cd.portfolio_points)
+    assert all(y == VIEWBOX_H / 2 for _, y in port)
+
+
+def test_chart_data_all_excess_zero_guard():
+    run = [
+        _snap(date(2026, 8, 10), port="1.00", spy="1.00", excess="0.00"),
+        _snap(date(2026, 8, 11), port="1.02", spy="1.02", excess="0.00"),
+    ]
+    cd = _build_chart_data(run)
+    assert cd.zero_y == VIEWBOX_H / 2

@@ -128,3 +128,62 @@ def _downsample(
         round(i * (n - 1) / (max_points - 1)) for i in range(max_points)
     })
     return [rows[i] for i in idxs]
+
+
+def _scale_y(value: Decimal, lo: Decimal, hi: Decimal, height: int) -> float:
+    """Map value in [lo, hi] to SVG y (grows downward -> invert). Guards lo==hi."""
+    if hi == lo:
+        return height / 2
+    frac = (Decimal(value) - lo) / (hi - lo)
+    return height - float(frac) * height
+
+
+def _build_chart_data(chart_run: list[NavSnapshot]) -> ChartData:
+    """Compose SVG polyline strings. Caller guarantees len(chart_run) >= 2 (L2).
+
+    L3: portfolio and SPY share one [lo, hi] index scale.
+    L4: the excess scale always contains 0 so the 0-reference line is on-canvas.
+    L5: x is computed AFTER downsampling, against the plotted count.
+    """
+    plotted = _downsample(chart_run)
+    n = len(plotted)
+    # chart_run only contains all-three-non-null rows (L2); narrow for the type
+    # checker so the Decimal arithmetic below sees no `| None`.
+    for s in plotted:
+        assert s.portfolio_index is not None
+        assert s.spy_index is not None
+        assert s.excess_return is not None
+    port_vals = [s.portfolio_index for s in plotted]
+    spy_vals = [s.spy_index for s in plotted]
+    exc_vals = [s.excess_return for s in plotted]
+
+    # Shared index scale (L3).
+    lo = min(min(port_vals), min(spy_vals))
+    hi = max(max(port_vals), max(spy_vals))
+
+    # Excess scale that always contains 0 (L4).
+    elo = min(Decimal("0"), min(exc_vals))
+    ehi = max(Decimal("0"), max(exc_vals))
+    if ehi == elo:  # all excess == 0 -> degenerate; widen symmetrically.
+        elo, ehi = Decimal("-0.0001"), Decimal("0.0001")
+
+    def x_at(i: int) -> float:
+        return i / (n - 1) * VIEWBOX_W
+
+    def points(vals: list[Decimal], lo_: Decimal, hi_: Decimal) -> str:
+        return " ".join(
+            f"{x_at(i):.1f},{_scale_y(v, lo_, hi_, VIEWBOX_H):.1f}"
+            for i, v in enumerate(vals)
+        )
+
+    zero_y = _scale_y(Decimal("0"), elo, ehi, VIEWBOX_H)
+
+    return ChartData(
+        portfolio_points=points(port_vals, lo, hi),
+        spy_points=points(spy_vals, lo, hi),
+        excess_points=points(exc_vals, elo, ehi),
+        zero_y=zero_y,
+        index_lo=lo, index_hi=hi,
+        excess_lo=elo, excess_hi=ehi,
+        viewbox_w=VIEWBOX_W, viewbox_h=VIEWBOX_H,
+    )
