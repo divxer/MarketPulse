@@ -144,6 +144,7 @@ def create_app() -> FastAPI:
         holdings,
         home,
         lab,
+        portfolio,
         recap,
         reconcile,
         splits,
@@ -166,6 +167,7 @@ def create_app() -> FastAPI:
     app.include_router(broker.router)
     app.include_router(reconcile.router)
     app.include_router(charter.router)
+    app.include_router(portfolio.router)
 
     from fastapi import HTTPException
 
