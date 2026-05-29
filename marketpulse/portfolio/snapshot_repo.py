@@ -220,6 +220,25 @@ def get_earliest_snapshot(session: Session) -> NavSnapshot | None:
     return _row_to_dc(row) if row is not None else None
 
 
+def get_earliest_eligible_snapshot(session: Session) -> NavSnapshot | None:
+    """Earliest snapshot fit to be the north-star inception anchor: fully
+    priced (unpriced_positions_count == 0) AND benchmarked (spy_close present).
+
+    Degenerate rows — produced by pre-market manual triggers, price_cache gaps,
+    or transient SPY/position-price absence — are skipped so they never become
+    the inception baseline (which would inflate portfolio_index for the whole
+    series). Anchoring BOTH indices to one eligible day also keeps
+    excess_return = portfolio_index - spy_index coherent (shared t=0)."""
+    row = session.scalars(
+        select(PaperNavSnapshot)
+        .where(PaperNavSnapshot.spy_close.is_not(None))
+        .where(PaperNavSnapshot.unpriced_positions_count == 0)
+        .order_by(PaperNavSnapshot.trading_date.asc())
+        .limit(1),
+    ).first()
+    return _row_to_dc(row) if row is not None else None
+
+
 def get_all_snapshots(session: Session) -> list[NavSnapshot]:
     """All snapshots, ascending by trading_date.
 
