@@ -76,3 +76,76 @@ def _atomic_write_text(path: Path, payload: str) -> None:
         if tmp_path is not None and os.path.exists(tmp_path):
             with suppress(OSError):
                 os.unlink(tmp_path)
+
+
+def generate_charter_review(
+    *,
+    session: Session,
+    week_ending: date,
+    now: datetime,
+    recaps_dir: Path,
+    backup_manifest_path: Path,
+) -> Path:
+    """Build payload → render markdown → atomic-write .md + latest.json.
+
+    L12: validates week_ending is Sunday (weekday == 6) at entry.
+    L4: may raise CharterReviewError on DB / render / FS failures.
+    L20: on success emits info log charter_review_generated with extra=
+         {week_ending, path, generated_at}.
+    """
+    if week_ending.weekday() != 6:
+        raise CharterReviewError(
+            f"week_ending must be Sunday (weekday=6); got weekday={week_ending.weekday()}",
+        )
+
+    manifest = _read_backup_manifest(backup_manifest_path)
+    try:
+        payload = build_payload(
+            session=session, week_ending=week_ending,
+            backup_manifest=manifest, generated_at=now,
+        )
+    except CharterReviewError:
+        raise   # already typed; don't double-wrap
+    except Exception as exc:  # noqa: BLE001
+        raise CharterReviewError(
+            f"aggregator failed: {type(exc).__name__}: {exc}",
+        ) from exc
+
+    try:
+        markdown = render_charter_review(payload=payload)
+    except CharterReviewError:
+        raise   # already typed; don't double-wrap
+    except Exception as exc:  # noqa: BLE001
+        raise CharterReviewError(
+            f"renderer failed: {type(exc).__name__}: {exc}",
+        ) from exc
+
+    md_path = recaps_dir / f"{week_ending.isoformat()}.md"
+    latest_path = recaps_dir / "latest.json"
+    manifest_payload = {
+        "schema_version": SCHEMA_VERSION,
+        "week_ending": week_ending.isoformat(),
+        "path": str(md_path),
+        "generated_at": now.isoformat(),
+    }
+
+    try:
+        _atomic_write_text(md_path, markdown)
+        _atomic_write_text(
+            latest_path,
+            json.dumps(manifest_payload, indent=2, sort_keys=True),
+        )
+    except OSError as exc:
+        raise CharterReviewError(
+            f"atomic write failed: {type(exc).__name__}: {exc}",
+        ) from exc
+
+    log.info(
+        "charter_review_generated",
+        extra={
+            "week_ending": week_ending.isoformat(),
+            "path": str(md_path),
+            "generated_at": now.isoformat(),
+        },
+    )
+    return md_path
