@@ -23,6 +23,15 @@ class Settings(BaseSettings):
     # in production).
     ai_model_router: str = Field("claude-haiku-4-5", alias="AI_MODEL_ROUTER")
     ai_cache_ttl_hours: int = Field(24, alias="AI_CACHE_TTL_HOURS", ge=0)
+    # Task #57 — nightly eval-analysis job. Disabled by default: it makes new
+    # LLM calls, so enable explicitly on deploy (env flip + restart). The cap
+    # counts FRESH LLM analyses per run (cache hits / errors do not consume it).
+    ai_eval_enabled: bool = Field(False, alias="AI_EVAL_ENABLED")
+    ai_eval_max_calls_per_day: int = Field(
+        60, alias="AI_EVAL_MAX_CALLS_PER_DAY", ge=0,
+    )
+    ai_eval_hour: int = Field(21, alias="AI_EVAL_HOUR", ge=0, le=23)    # UTC
+    ai_eval_minute: int = Field(0, alias="AI_EVAL_MINUTE", ge=0, le=59)
     news_cache_ttl_days: int = Field(7, alias="NEWS_CACHE_TTL_DAYS", ge=0)
     quote_cache_ttl_seconds: int = Field(300, alias="QUOTE_CACHE_TTL_SECONDS", ge=0)
     # Live quote source: 'auto' (Tencent first, yfinance fallback), 'tencent', 'yfinance'
