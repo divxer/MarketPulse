@@ -43,6 +43,7 @@ class WatchlistCard:
     verdict_label: str        # Bullish|Bearish|Neutral|Pending
     status_label: str         # Holding|Paper Position|Universe Only
     status_class: str         # mp-chip--success|--warn|--muted
+    spark_stroke: str         # "var(--mp-up)" | "var(--mp-down)" (presenter-computed, L9)
     item_id: int | None = None  # watchlist_items.id (delete affordance); None on /stock
     active: bool = False
 ```
@@ -136,6 +137,8 @@ class WatchlistCard:
     verdict_label: str
     status_label: str
     status_class: str
+    spark_stroke: str = "var(--mp-up)"   # presenter-computed (L9: no branching in partial)
+    item_id: int | None = None           # watchlist_items.id (delete affordance); None on /stock
     active: bool = False
 
 
@@ -155,10 +158,14 @@ class Coverage:
     universe_only: int
 
 
+def _empty_coverage() -> "Coverage":
+    return Coverage(0, 0, 0, 0, 0)
+
+
 @dataclass(frozen=True)
 class WatchlistView:
     groups: list[SectorGroup] = field(default_factory=list)
-    coverage: Coverage = Coverage(0, 0, 0, 0, 0)
+    coverage: Coverage = field(default_factory=_empty_coverage)
 
 
 UNCATEGORIZED = "Uncategorized"
@@ -264,6 +271,18 @@ def test_status_sets(db_session):
     db_session.commit()
     holdings, paper = _status_sets(db_session)
     assert "AAPL" in holdings and "QBTS" in paper
+
+
+def test_sector_map_priority(monkeypatch):
+    import marketpulse.web.watchlist_view as wv
+    monkeypatch.setattr(wv, "load_sector_cache",
+                        lambda: {"A": "CacheSec", "B": "CacheSec", "C": "CacheSec"})
+    monkeypatch.setattr(wv, "load_sector_overrides", lambda: {"B": "OverrideSec"})
+    out = wv._sector_map(["A", "B", "C", "D"], {"A": "HoldSec"})
+    assert out["A"] == "HoldSec"        # holdings.sector wins over cache
+    assert out["B"] == "OverrideSec"    # override beats cache
+    assert out["C"] == "CacheSec"       # pure cache hit
+    assert out["D"] == wv.UNCATEGORIZED # uncached → Uncategorized
 ```
 
 NOTE: adjust the `PaperPosition(...)` kwargs to the real model's NOT-NULL columns (see `marketpulse/db/models.py::class PaperPosition`; reuse the helper from `tests/ai/test_eval_analysis.py` if present). Only `ticker` + `status="OPEN"` are semantically required by `_status_sets`.
@@ -274,7 +293,7 @@ Run: `uv run pytest tests/web/test_watchlist_view.py -k "price_blocks or latest_
 - [ ] **Step 3: Implement** (append to `watchlist_view.py`):
 
 ```python
-from sqlalchemy import and_, func, select
+from sqlalchemy import func, select
 
 from marketpulse.backtest.sector import load_sector_cache, load_sector_overrides
 from marketpulse.db.models import (
@@ -307,22 +326,22 @@ def _price_blocks(session, tickers: list[str]) -> dict[str, dict]:
 
 
 def _latest_verdicts(session, tickers: list[str]) -> dict[str, str]:
-    """Latest EvaluationEvent(ai_analysis) subtype per ticker (newest wins)."""
+    """Latest EvaluationEvent(ai_analysis) subtype per ticker. Deterministic
+    tie-break on equal event_time via id DESC (row_number window — SQLite 3.25+)."""
     if not tickers:
         return {}
-    latest = (
-        select(EvaluationEvent.ticker,
-               func.max(EvaluationEvent.event_time).label("mx"))
+    rn = func.row_number().over(
+        partition_by=EvaluationEvent.ticker,
+        order_by=(EvaluationEvent.event_time.desc(), EvaluationEvent.id.desc()),
+    ).label("rn")
+    sub = (
+        select(EvaluationEvent.ticker, EvaluationEvent.subtype, rn)
         .where(EvaluationEvent.event_type == "ai_analysis")
         .where(EvaluationEvent.ticker.in_(tickers))
-        .group_by(EvaluationEvent.ticker)
         .subquery()
     )
     rows = session.execute(
-        select(EvaluationEvent.ticker, EvaluationEvent.subtype)
-        .join(latest, and_(EvaluationEvent.ticker == latest.c.ticker,
-                           EvaluationEvent.event_time == latest.c.mx))
-        .where(EvaluationEvent.event_type == "ai_analysis")
+        select(sub.c.ticker, sub.c.subtype).where(sub.c.rn == 1)
     ).all()
     return {t: st for t, st in rows}
 
@@ -426,6 +445,8 @@ def _card(ticker, block, subtype, sector, holdings, paper, item_id=None, active=
     change_display, change_class = _fmt_change(latest, prior)
     v_class, v_label = _verdict_fields(subtype)
     s_label, s_class = _status_fields(ticker, holdings, paper)
+    spark_stroke = ("var(--mp-down)" if change_class == "mp-watchlist__chg--down"
+                    else "var(--mp-up)")
     return WatchlistCard(
         ticker=ticker,
         price_display=_fmt_price(latest),
@@ -437,6 +458,7 @@ def _card(ticker, block, subtype, sector, holdings, paper, item_id=None, active=
         verdict_label=v_label,
         status_label=s_label,
         status_class=s_class,
+        spark_stroke=spark_stroke,
         item_id=item_id,
         active=active,
     )
@@ -585,8 +607,7 @@ This task is pure markup/CSS (Variant A). Verify visually via the connected brow
     {% if card.sparkline %}
     <svg class="mp-wl-card__spark" width="120" height="22" viewBox="0 0 120 22" preserveAspectRatio="none">
       <polyline points="{{ card.sparkline | sparkpoints(120, 22) }}" fill="none"
-                stroke="{% if card.change_class == 'mp-watchlist__chg--down' %}var(--mp-down){% else %}var(--mp-up){% endif %}"
-                stroke-width="1.5" />
+                stroke="{{ card.spark_stroke }}" stroke-width="1.5" />
     </svg>
     {% endif %}
   </a>
@@ -651,6 +672,13 @@ This task is pure markup/CSS (Variant A). Verify visually via the connected brow
 
 NOTE: the exact token variable names (`--mp-navy`, `--mp-surface`, `--mp-border`, `--mp-shadow-sm`, `--mp-ink-soft`, `--mp-up`, `--mp-down`) must be confirmed against the top of `app.css` / `ns-tokens.css`; substitute the real ones. Reuse, don't invent palette values.
 
+EXPLICIT CHECK (do this in Step 1, before writing the partial): grep for the chip
+variants the presenter emits — `grep -nE "mp-chip--success|mp-chip--warn|mp-chip--muted" marketpulse/web/static/css/app.css`.
+If any is missing, add a minimal Variant A variant (reuse existing chip color
+tokens; do NOT invent palette). Likewise confirm `mp-ai-badge--good/--bad/--neutral/--pending`
+exist (they do — used by /lab/ai-track). If `mp-chip--muted` is absent, the
+simplest is to map "Universe Only" to a plain `mp-chip` (no modifier).
+
 - [ ] **Step 4: Commit** (visual verification happens in Task 6):
 ```bash
 git add marketpulse/web/templates/partials/watchlist_card.html marketpulse/web/templates/partials/watchlist_grid.html marketpulse/web/static/css/app.css
@@ -714,6 +742,11 @@ def test_watchlist_get_renders_grid(client, db_url, monkeypatch):
 
 - [ ] **Step 2: Run → FAIL** (old page has no `mp-wl-grid`).
 Run: `uv run pytest tests/web/test_watchlist_routes.py::test_watchlist_get_renders_grid -v`
+
+NOTE (TemplateResponse convention): this project uses the **request-first**
+Starlette 1.0 signature `templates.TemplateResponse(request, "name.html", {...})`
+— confirmed by the existing `watchlist_add` route. Use it consistently in all
+three handlers (GET/POST/DELETE); do NOT use the legacy `("name.html", {"request": request, ...})` form.
 
 - [ ] **Step 3: Rewrite the GET route** in `marketpulse/web/routes/watchlist.py`:
 
@@ -803,6 +836,19 @@ def test_watchlist_batch_add_partial_success(client, db_url, monkeypatch):
     assert "added 2" in body.lower() or "added&nbsp;2" in body.lower()
     assert "already" in body.lower()     # MSFT existed
     assert "invalid" in body.lower()     # @@bad
+
+
+def test_watchlist_batch_add_empty_is_noop(client, db_url, monkeypatch):
+    _login(client, monkeypatch)
+    _seed(db_url)  # MSFT only
+    res = client.post("/watchlist", data={"tickers": "  \n , \n "})
+    assert res.status_code == 200        # no 500
+    assert "added 0" in res.text.lower()
+    # nothing inserted
+    from marketpulse.db import base as db_base
+    gen = db_base.session_scope(); s = next(gen)
+    assert s.query(WatchlistItem).count() == 1
+    gen.close()
 ```
 
 - [ ] **Step 2: Run → FAIL** (POST still returns old single-row partial).
@@ -890,8 +936,10 @@ def watchlist_delete(
     db: Session = Depends(get_db),
     _: None = Depends(require_auth),
 ):
-    db.query(WatchlistItem).filter(WatchlistItem.id == item_id).delete()
-    db.commit()
+    item = db.get(WatchlistItem, item_id)
+    if item is not None:
+        db.delete(item)
+        db.commit()
     view = build_watchlist_view(db)
     return templates.TemplateResponse(
         request, "partials/watchlist_grid.html",
@@ -926,20 +974,18 @@ def test_watchlistitem_has_no_notes():
 
 - [ ] **Step 2: Run → FAIL** (model still has `notes`).
 - [ ] **Step 3: Remove the column** — delete the `notes:` line from `class WatchlistItem` in `marketpulse/db/models.py`.
-- [ ] **Step 4: Create the migration.** Find current head: `uv run alembic heads`. Create `alembic/versions/00XX_drop_watchlist_notes.py` (replace `<HEAD>` with the real down_revision):
+- [ ] **Step 4: Generate a real migration** (do NOT hand-name the file or guess
+the revision id). Run:
+```bash
+uv run alembic revision -m "drop watchlist_items notes"
+```
+This creates `alembic/versions/<hash>_drop_watchlist_items_notes.py` with the
+correct `revision` and `down_revision` (current head) already filled in. Edit its
+`upgrade()`/`downgrade()` to:
 
 ```python
-"""drop watchlist_items.notes (zombie field)
-
-Revision ID: dropwlnotes01
-Revises: <HEAD>
-"""
 from alembic import op
-
-revision = "dropwlnotes01"
-down_revision = "<HEAD>"
-branch_labels = None
-depends_on = None
+import sqlalchemy as sa
 
 
 def upgrade() -> None:
@@ -948,7 +994,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    import sqlalchemy as sa
     with op.batch_alter_table("watchlist_items") as batch:
         batch.add_column(sa.Column("notes", sa.Text(), nullable=True))
 ```
@@ -960,7 +1005,7 @@ Run: `grep -rn "WatchlistItem.notes\|item.notes\|\.notes" marketpulse/web/templa
 Run: `uv run alembic upgrade head` (against a throwaway sqlite via `DATABASE_URL=sqlite:////tmp/mp_mig.db uv run alembic upgrade head`) → no error.
 - [ ] **Step 7: Commit**
 ```bash
-git add marketpulse/db/models.py alembic/versions/00XX_drop_watchlist_notes.py tests/web/test_watchlist_routes.py
+git add marketpulse/db/models.py alembic/versions/*drop_watchlist_items_notes*.py tests/web/test_watchlist_routes.py
 git rm marketpulse/web/templates/partials/watchlist_row.html 2>/dev/null || true
 git commit -m "feat(watchlist): drop zombie notes column (model + alembic batch migration)"
 ```
