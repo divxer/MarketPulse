@@ -5,7 +5,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore",
+        populate_by_name=True,
+    )
 
     app_password_hash: str = Field(..., alias="APP_PASSWORD_HASH")
     session_secret: str = Field(..., alias="SESSION_SECRET", min_length=16)

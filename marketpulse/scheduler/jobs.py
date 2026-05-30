@@ -1,3 +1,4 @@
+import contextlib
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -6,6 +7,11 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from marketpulse.ai.client import AnthropicClient
+from marketpulse.ai.eval_analysis import (
+    EvalAnalysisSummary,
+    build_eval_universe,
+    run_eval_analysis,
+)
 from marketpulse.ai.service import AiService
 from marketpulse.alerts.engine import evaluate_rules
 from marketpulse.alerts.notifier import NoopNotifier, build_notifier
@@ -26,6 +32,7 @@ from marketpulse.ops.charter_review import generate_charter_review
 from marketpulse.portfolio.snapshot_runner import run_nav_snapshot
 from marketpulse.recap.push import push_recap_summary
 from marketpulse.recap.service import RecapService
+from marketpulse.scheduler.eval_state import record_eval_run_summary
 from marketpulse.scheduler.state import record_run_summary
 
 log = get_logger(__name__)
@@ -436,6 +443,67 @@ def run_outcome_computation() -> None:
         })
     finally:
         db.close()
+
+
+def run_eval_analysis_job() -> None:
+    """Task #57 — nightly eval-only analysis of watchlist ∪ open holdings.
+
+    Gated by AI_EVAL_ENABLED (disabled → records a 'disabled' summary). Never
+    raises: job-boundary failures record a 'failed' summary (if the session is
+    usable) and log; the scheduler must never crash.
+    """
+    settings = get_settings()
+    run_date = datetime.now(UTC).date()             # UTC — the cron is UTC
+    gen = None
+    db = None
+    summary = None
+    status = "ok"
+    try:
+        gen = session_scope()                       # generator helper (NOT a CM)
+        db = next(gen)
+        if not settings.ai_eval_enabled:
+            status = "disabled"
+            summary = EvalAnalysisSummary(run_date, 0, 0, 0, 0, 0, False)
+            log.info("ai_eval_disabled")
+            return                                  # finally persists disabled summary
+        data = DataService(
+            db, _build_quote_client(),
+            news_ttl_days=settings.news_cache_ttl_days,
+        )
+        ai = AiService(
+            db, ai_client=AnthropicClient(), data=data,
+            model=settings.ai_model, ttl_hours=settings.ai_cache_ttl_hours,
+            model_analyze=settings.ai_model_analyze or None,
+            model_router=settings.ai_model_router or None,
+        )
+        universe = build_eval_universe(db)
+        summary = run_eval_analysis(
+            db, ai=ai, universe=universe,
+            max_calls=settings.ai_eval_max_calls_per_day, run_date=run_date,
+        )
+        log.info("ai_eval_done", **summary.as_dict(status="ok"))
+    except Exception as exc:                         # job-boundary failure — never re-raised
+        status = "failed"
+        summary = None                               # don't let finally persist a stale ok
+        log.warning("ai_eval_job_failed", error=str(exc))
+        if db is not None:                           # can only persist if the session opened
+            with contextlib.suppress(Exception):
+                record_eval_run_summary(
+                    db,
+                    EvalAnalysisSummary(run_date, 0, 0, 0, 0, 0, False)
+                    .as_dict(status="failed", error=str(exc)),
+                )
+        # db is None (session never opened) → log-only, no persisted summary.
+    finally:
+        if summary is not None and status in ("ok", "disabled"):
+            try:
+                record_eval_run_summary(db, summary.as_dict(status=status))
+            except Exception as exc:
+                log.warning("ai_eval_summary_persist_failed", error=str(exc))
+        if gen is not None:
+            # runs the generator's finally → db.close(); never mask the outcome
+            with contextlib.suppress(Exception):
+                gen.close()
 
 
 def run_flex_sync() -> None:
