@@ -1,0 +1,19 @@
+{# Full watchlist grid fragment (returned by GET and after add/delete). #}
+<div id="mp-wl-grid">
+  <div class="mp-wl-coverage">
+    <span><b>{{ view.coverage.total }}</b> tickers</span>
+    <span><b>{{ view.coverage.sectors }}</b> sectors</span>
+    <span><b>{{ view.coverage.holdings }}</b> holdings</span>
+    <span><b>{{ view.coverage.paper }}</b> paper</span>
+    <span><b>{{ view.coverage.universe_only }}</b> universe-only</span>
+  </div>
+  {% if add_result %}<div class="mp-wl-result">{{ add_result }}</div>{% endif %}
+  {% for group in view.groups %}
+  <section class="mp-wl-group" data-group="{{ group.name }}">
+    <h3 class="mp-wl-group__head">{{ group.name }} <span class="mp-wl-group__count">· {{ group.count }}</span></h3>
+    <div class="mp-wl-grid">
+      {% for card in group.cards %}{% include "partials/watchlist_card.html" %}{% endfor %}
+    </div>
+  </section>
+  {% endfor %}
+</div>
