@@ -758,6 +758,21 @@ def build_scheduler() -> BackgroundScheduler:
         misfire_grace_time=None,
         coalesce=True,
     )
+    # Task #57 — nightly eval-analysis at 21:00 UTC Mon-Fri (post-close, ~17:00
+    # ET EDT). Daily-critical: a missed run loses that day's eval verdicts (they
+    # can't be backfilled — analyze() uses live quotes), so no misfire grace +
+    # coalesce, matching outcome_computation / paper_trading_tick.
+    sched.add_job(
+        run_eval_analysis_job,
+        trigger=CronTrigger(
+            hour=settings.ai_eval_hour, minute=settings.ai_eval_minute,
+            day_of_week="mon-fri", timezone="UTC",
+        ),
+        id="ai_eval_analysis",
+        replace_existing=True,
+        misfire_grace_time=None,
+        coalesce=True,
+    )
     # Phase 7a-Flex daily broker truth capture. Runs after US close + Flex
     # generation buffer. Skips silently if FLEX_TOKEN/QUERY_ID unset.
     sched.add_job(
