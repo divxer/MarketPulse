@@ -2,12 +2,25 @@
 """Watchlist AI-Universe presenter."""
 from __future__ import annotations
 
+from datetime import UTC, date, datetime
+from decimal import Decimal
+
+from marketpulse.db.models import (
+    EvaluationEvent,
+    Holding,
+    PaperPosition,
+    PriceCacheEntry,
+    WatchlistItem,
+)
 from marketpulse.web.watchlist_view import (
     WatchlistCard,
-    _fmt_price,
     _fmt_change,
-    _verdict_fields,
+    _fmt_price,
+    _latest_verdicts,
+    _price_blocks,
     _status_fields,
+    _status_sets,
+    _verdict_fields,
 )
 
 
@@ -44,17 +57,6 @@ def test_watchlistcard_spark_stroke_default():
                       "Pending", "Universe Only", "mp-chip--muted")
     assert c.spark_stroke == "var(--mp-up)"  # default; presenter overrides on down
     assert c.item_id is None and c.active is False
-
-
-from datetime import UTC, date, datetime  # noqa: E402
-from decimal import Decimal  # noqa: E402
-
-from marketpulse.db.models import (  # noqa: E402
-    EvaluationEvent, Holding, PaperPosition, PriceCacheEntry, WatchlistItem,
-)
-from marketpulse.web.watchlist_view import (  # noqa: E402
-    _price_blocks, _latest_verdicts, _status_sets,
-)
 
 
 def _add_price(s, ticker, d, close):

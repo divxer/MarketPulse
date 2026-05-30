@@ -11,6 +11,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from sqlalchemy import func, select
+
+from marketpulse.backtest.sector import load_sector_cache, load_sector_overrides
+from marketpulse.db.models import (
+    EvaluationEvent,
+    Holding,
+    PaperPosition,
+    PriceCacheEntry,
+    WatchlistItem,
+)
+
 
 @dataclass(frozen=True)
 class WatchlistCard:
@@ -89,13 +100,6 @@ def _status_fields(
         return "Paper Position", "mp-chip--warn"
     return "Universe Only", "mp-chip--muted"
 
-
-from sqlalchemy import func, select
-
-from marketpulse.backtest.sector import load_sector_cache, load_sector_overrides
-from marketpulse.db.models import (
-    EvaluationEvent, Holding, PaperPosition, PriceCacheEntry, WatchlistItem,
-)
 
 _SPARK_N = 30
 
