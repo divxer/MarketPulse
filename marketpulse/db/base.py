@@ -1,6 +1,6 @@
 from collections.abc import Iterator
 
-from sqlalchemy import Engine, MetaData, create_engine
+from sqlalchemy import Engine, MetaData, create_engine, event
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from marketpulse.config import get_settings
@@ -29,6 +29,18 @@ def init_engine(database_url: str | None = None) -> None:
     url = database_url or get_settings().database_url
     connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
     _engine = create_engine(url, connect_args=connect_args, future=True)
+    if url.startswith("sqlite"):
+
+        @event.listens_for(_engine, "connect")
+        def _set_sqlite_pragmas(dbapi_conn, _rec):  # noqa: ANN001
+            # WAL: concurrent readers with a single writer.
+            # busy_timeout: writers wait/retry instead of failing instantly
+            # with "database is locked". Reduces lock contention app-wide.
+            cur = dbapi_conn.cursor()
+            cur.execute("PRAGMA journal_mode=WAL")
+            cur.execute("PRAGMA busy_timeout=5000")
+            cur.close()
+
     _SessionLocal = sessionmaker(bind=_engine, autoflush=False, expire_on_commit=False)
 
 
