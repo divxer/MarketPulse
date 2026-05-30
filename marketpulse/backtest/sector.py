@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Protocol
 
@@ -65,7 +66,15 @@ def load_sector_overrides(path: Path | str | None = None) -> dict[str, str]:
     return result
 
 
-_DEFAULT_CACHE_PATH = Path(__file__).parent.parent.parent / "data" / "sector_cache.json"
+_LEGACY_CACHE_PATH = Path(__file__).parent.parent.parent / "data" / "sector_cache.json"
+
+
+def _default_cache_path() -> Path:
+    """Cache lives wherever SECTOR_CACHE_PATH points (set to the mounted /data
+    volume in prod so it survives container recreation). Falls back to the
+    in-repo data/ dir for local dev / tests."""
+    env = os.environ.get("SECTOR_CACHE_PATH")
+    return Path(env) if env else _LEGACY_CACHE_PATH
 
 _SECTOR_CACHE: dict[str, str] = {}
 _OVERRIDES_CACHE: dict[str, str] | None = None
@@ -89,14 +98,14 @@ def _reset_caches_for_testing() -> None:
 
 def save_sector_cache(cache: dict[str, str], path: Path | str | None = None) -> None:
     """Persist sector lookup dict to JSON. Creates parent dirs if missing."""
-    target = Path(path) if path is not None else _DEFAULT_CACHE_PATH
+    target = Path(path) if path is not None else _default_cache_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(cache, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def load_sector_cache(path: Path | str | None = None) -> dict[str, str]:
     """Load sector cache from JSON. Returns {} on missing/corrupt file."""
-    target = Path(path) if path is not None else _DEFAULT_CACHE_PATH
+    target = Path(path) if path is not None else _default_cache_path()
     if not target.exists():
         return {}
     try:

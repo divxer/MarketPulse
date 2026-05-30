@@ -14,6 +14,11 @@ overrides:
   TNA: leveraged_small_cap
   QBTS: quantum_compute
   QUBT: quantum_compute
+  # Broad-market index ETFs — no natural GICS sector; one correlation bucket
+  # (they move together, so SectorExposureGate should treat them as one group).
+  SPY: ETF
+  QQQ: ETF
+  IWM: ETF
   # Common equities held / traded — pinned here so the SectorExposureGate
   # in paper_trading_tick doesn't reject on first-call yfinance latency or
   # rate-limit failures. yfinance-backed fallback in
