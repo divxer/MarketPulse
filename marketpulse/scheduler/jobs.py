@@ -33,6 +33,7 @@ from marketpulse.portfolio.snapshot_runner import run_nav_snapshot
 from marketpulse.recap.push import push_recap_summary
 from marketpulse.recap.service import RecapService
 from marketpulse.scheduler.eval_state import record_eval_run_summary
+from marketpulse.scheduler.sector_refresh import refresh_sector_cache
 from marketpulse.scheduler.state import record_run_summary
 
 log = get_logger(__name__)
@@ -670,6 +671,26 @@ def run_flex_sync_retry() -> None:
     run_flex_sync()
 
 
+def run_sector_cache_refresh() -> None:
+    """Daily: warm the persistent sector cache from yfinance for the
+    watchlist∪holdings universe so /watchlist sectors stay populated.
+
+    Best-effort; never raises. Mirrors run_eval_analysis_job's session
+    teardown (generator helper — NOT a context manager).
+    """
+    gen = db = None
+    try:
+        gen = session_scope()                       # generator helper (NOT a CM)
+        db = next(gen)
+        refresh_sector_cache(db)
+    except Exception as exc:  # noqa: BLE001 - best-effort background job
+        log.warning("sector_cache_refresh_failed", error=str(exc))
+    finally:
+        if gen is not None:
+            with contextlib.suppress(StopIteration):
+                next(gen)
+
+
 def build_scheduler() -> BackgroundScheduler:
     settings = get_settings()
     sched = BackgroundScheduler(timezone="America/New_York")
@@ -754,6 +775,18 @@ def build_scheduler() -> BackgroundScheduler:
         run_outcome_computation,
         trigger=CronTrigger(hour=2, minute=0, timezone="UTC"),
         id="outcome_computation",
+        replace_existing=True,
+        misfire_grace_time=None,
+        coalesce=True,
+    )
+    # Sector-cache warmup: daily 20:45 UTC (all week), BEFORE the 21:00 UTC
+    # eval job so /watchlist sectors are populated from a fresh yfinance pull.
+    # Best-effort (never raises); daily-critical staleness window is fine, so
+    # no misfire grace + coalesce (mirrors the other daily UTC jobs).
+    sched.add_job(
+        run_sector_cache_refresh,
+        trigger=CronTrigger(hour=20, minute=45, timezone="UTC"),
+        id="sector_cache_refresh",
         replace_existing=True,
         misfire_grace_time=None,
         coalesce=True,
