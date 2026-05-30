@@ -59,6 +59,8 @@ def build_eval_universe(session) -> list[str]:
     Sorted ASC so the cap-skip set is deterministic.
     """
     watch_rows = session.query(WatchlistItem.ticker).all()
+    # READ-ONLY: only open_positions_snapshot() — never call a mutating method
+    # on this repository (eval-only invariant; the import guard can't catch it).
     holdings = PaperPositionRepository(session=session).open_positions_snapshot()
     raw = [r[0] for r in watch_rows] + [p.ticker for p in holdings]
     normalized = {t.strip().upper() for t in raw if t and t.strip()}

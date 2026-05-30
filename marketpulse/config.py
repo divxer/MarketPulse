@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     # Task #57 — nightly eval-analysis job. Disabled by default: it makes new
     # LLM calls, so enable explicitly on deploy (env flip + restart). The cap
     # counts FRESH LLM analyses per run (cache hits / errors do not consume it).
+    # NOTE: the cap governs Stage-2 `analyze` (fresh) calls only; each fresh
+    # ticker also makes a cheap, uncapped Stage-1 router (haiku) call.
     ai_eval_enabled: bool = Field(False, alias="AI_EVAL_ENABLED")
     ai_eval_max_calls_per_day: int = Field(
         60, alias="AI_EVAL_MAX_CALLS_PER_DAY", ge=0,

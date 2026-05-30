@@ -85,3 +85,29 @@ def test_session_open_failure_logs_only_no_summary(monkeypatch):
 
     # Must not raise; physically cannot persist a summary (no session).
     run_eval_analysis_job()
+
+
+def test_job_records_ok_with_errors_when_a_ticker_raises(wired, monkeypatch):
+    _settings(monkeypatch, ai_eval_enabled=True)
+
+    class _Ai:
+        def analyze(self, ticker):
+            if ticker == "BAD":
+                raise RuntimeError("boom")
+            from datetime import UTC, datetime
+
+            from marketpulse.ai.types import AnalysisResult
+            return AnalysisResult(ticker=ticker, model="m", prompt_version="v",
+                                  response_markdown="x",
+                                  requested_at=datetime(2026, 5, 29, tzinfo=UTC),
+                                  cached=False)
+    monkeypatch.setattr(jobs_mod, "AiService", lambda *a, **kw: _Ai())
+    monkeypatch.setattr(jobs_mod, "build_eval_universe", lambda s: ["GOOD", "BAD"])
+
+    run_eval_analysis_job()
+
+    from marketpulse.scheduler.eval_state import get_eval_last_run_summary
+    got = get_eval_last_run_summary(wired)
+    assert got["status"] == "ok"
+    assert got["errors"] >= 1
+    assert got["analyzed_fresh"] >= 1

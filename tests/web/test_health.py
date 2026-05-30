@@ -20,7 +20,9 @@ def test_health_scheduler_never_ran(client: TestClient, monkeypatch) -> None:
     _login(client, monkeypatch)
     res = client.get("/health/scheduler")
     assert res.status_code == 200
-    assert res.json() == {"status": "never_ran", "last_run": None}
+    body = res.json()
+    assert body["status"] == "never_ran"
+    assert body["last_run"] is None
 
 
 def test_health_scheduler_returns_summary(client: TestClient, monkeypatch) -> None:
@@ -55,3 +57,33 @@ def test_health_scheduler_returns_summary(client: TestClient, monkeypatch) -> No
 def test_health_scheduler_requires_auth(client: TestClient) -> None:
     res = client.get("/health/scheduler", follow_redirects=False)
     assert res.status_code in (303, 401)
+
+
+def test_health_scheduler_includes_ai_eval_summary(client, monkeypatch) -> None:
+    _login(client, monkeypatch)
+
+    from marketpulse.db import base as db_base
+    from marketpulse.scheduler.eval_state import record_eval_run_summary
+
+    gen = db_base.session_scope()
+    s = next(gen)
+    record_eval_run_summary(s, {
+        "status": "ok", "run_date": "2026-05-29", "universe_size": 3,
+        "analyzed_fresh": 3, "cache_hits": 0, "skipped_cap": 0, "errors": 0,
+        "cap_hit": False, "processed": 3,
+    })
+
+    res = client.get("/health/scheduler")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ai_eval"]["status"] == "ok"
+    assert body["ai_eval"]["analyzed_fresh"] == 3
+
+
+def test_health_scheduler_ai_eval_null_when_never_ran(client, monkeypatch) -> None:
+    _login(client, monkeypatch)
+    res = client.get("/health/scheduler")
+    assert res.status_code == 200
+    # corp-actions never ran → existing never_ran shape preserved, plus ai_eval: None
+    body = res.json()
+    assert body["ai_eval"] is None
