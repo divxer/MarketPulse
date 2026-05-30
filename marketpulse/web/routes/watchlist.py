@@ -1,6 +1,6 @@
 import re
 
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, Form, Request, Response
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
@@ -39,13 +39,15 @@ def _parse_tickers(raw: str) -> list[str]:
 @router.post("/watchlist", response_class=HTMLResponse)
 def watchlist_add(
     request: Request,
-    tickers: str = Form(...),
+    tickers: str | None = Form(None),
+    ticker: str | None = Form(None),  # legacy single-add (/stock 加自选 button)
     db: Session = Depends(get_db),
     _: None = Depends(require_auth),
 ):
+    raw = tickers if tickers is not None else (ticker or "")
     existing = {t for (t,) in db.query(WatchlistItem.ticker).all()}
     added, already, invalid = [], [], []
-    for t in _parse_tickers(tickers):
+    for t in _parse_tickers(raw):
         if not _TICKER_RE.match(t):
             invalid.append(t)
         elif t in existing:
@@ -55,6 +57,11 @@ def watchlist_add(
             existing.add(t)
             added.append(t)
     db.commit()
+    # Legacy single-ticker form (/stock 加自选): add silently, 204 = htmx no-swap,
+    # so the grid is never injected into the /stock page. The batch form always
+    # sends `tickers` (even if empty), so it falls through to the grid response.
+    if tickers is None:
+        return Response(status_code=204)
     parts = [f"added {len(added)}"]
     if already:
         parts.append(f"{len(already)} already present")

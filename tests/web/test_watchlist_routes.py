@@ -86,3 +86,16 @@ def test_watchlist_delete_returns_grid(client, db_url, monkeypatch):
 def test_watchlistitem_has_no_notes():
     from marketpulse.db.models import WatchlistItem
     assert not hasattr(WatchlistItem, "notes")
+
+
+def test_watchlist_legacy_single_ticker_returns_204(client, db_url, monkeypatch):
+    # /stock 加自选 button posts the legacy `ticker` field. It must still add the
+    # ticker, but return 204 (htmx no-swap) so the grid is NOT injected into /stock.
+    _login(client, monkeypatch)
+    res = client.post("/watchlist", data={"ticker": "AAPL"})
+    assert res.status_code == 204
+    from marketpulse.db import base as db_base
+    gen = db_base.session_scope()
+    s = next(gen)
+    assert s.query(WatchlistItem).filter_by(ticker="AAPL").count() == 1
+    gen.close()
