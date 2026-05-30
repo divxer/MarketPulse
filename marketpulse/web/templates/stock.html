@@ -1,6 +1,4 @@
 {% extends "base.html" %}
-{% block main_width %}max-w-[2400px]{% endblock %}
-{% block nav_width %}max-w-[2400px]{% endblock %}
 {% block content %}
 {% set change_amount = quote.price - (quote.price / (1 + quote.change_pct / 100)) if quote.change_pct != -100 else 0 %}
 {% set change_color = "text-green-600" if quote.change_pct >= 0 else "text-red-600" %}
