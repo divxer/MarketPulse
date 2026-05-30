@@ -1,0 +1,36 @@
+{# Dumb shared watchlist card. Renders one card from display-ready fields.
+   /watchlist passes a WatchlistCard (with item_id); /stock passes a dict with
+   name + active (no item_id -> no delete button). #}
+<div class="mp-wl-card{% if card.active %} is-active{% endif %}"
+     data-ticker="{{ card.ticker }}" data-sector="{{ card.sector | default('') }}">
+  <a href="/stock/{{ card.ticker }}" class="mp-wl-card__link">
+    <div class="mp-wl-card__top">
+      <span class="grotesk mp-wl-card__ticker">{{ card.ticker }}</span>
+      <span class="mp-wl-card__px">
+        <span class="mono tnum">{{ card.price_display }}</span>
+        <span class="mono tnum {{ card.change_class }}">{{ card.change_display }}</span>
+      </span>
+    </div>
+    {% if card.name %}<div class="mp-wl-card__name">{{ card.name }}</div>{% endif %}
+    {% if card.sector %}<div class="mp-wl-card__sector">{{ card.sector }}</div>{% endif %}
+    {% if card.verdict_label or card.status_label %}
+    <div class="mp-wl-card__chips">
+      {% if card.verdict_label %}<span class="mp-ai-badge {{ card.verdict_class }}">{{ card.verdict_label }}</span>{% endif %}
+      {% if card.status_label %}<span class="mp-chip {{ card.status_class }}">{{ card.status_label }}</span>{% endif %}
+    </div>
+    {% endif %}
+    {% if card.sparkline %}
+    <svg class="mp-wl-card__spark" width="120" height="22" viewBox="0 0 120 22" preserveAspectRatio="none">
+      <polyline points="{{ card.sparkline | sparkpoints(120, 22) }}" fill="none"
+                stroke="{{ card.spark_stroke }}" stroke-width="1.5" />
+    </svg>
+    {% endif %}
+  </a>
+  {% if card.item_id %}
+  <button class="mp-wl-card__del" title="移除"
+          hx-delete="/watchlist/{{ card.item_id }}"
+          hx-target="#mp-wl-grid" hx-swap="outerHTML">
+    <span class="material-symbols-outlined">close</span>
+  </button>
+  {% endif %}
+</div>

@@ -62,7 +62,6 @@ class WatchlistItem(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     ticker: Mapped[str] = mapped_column(String(16), unique=True, nullable=False)
     added_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow, nullable=False)
-    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 

@@ -272,6 +272,7 @@ html {
 .mp-chip--down  { color: var(--mp-down); background: var(--mp-down-soft); border-color: transparent; }
 .mp-chip--periwinkle { color: var(--ns-primary); background: rgba(0,102,204,0.08); border-color: rgba(0,102,204,0.18); }
 .mp-chip--warn  { color: #92400e; background: #fef3c7; border-color: transparent; }
+.mp-chip--muted { color: var(--ns-on-surface-variant); background: var(--ns-surface-container-low); border-color: var(--ns-outline-variant); }
 
 .mp-pulse {
   width: 6px; height: 6px; border-radius: 50%;
@@ -1407,3 +1408,25 @@ hr.mp-hr {
 .mp-chip--env-live    { background:#fee2e2; color:#991b1b; }
 .mp-chip--env-unknown { background:var(--ns-surface-container); color:var(--ns-on-surface-variant); }
 /* Phase 7c - Reconciliation page reuses the broker viewer lab styles. */
+
+/* ════════ Watchlist AI-Universe page (mp-wl-*) — Variant A ════════ */
+.mp-wl-coverage{display:flex;flex-wrap:wrap;gap:14px;font-size:13px;color:var(--ns-on-surface-variant);margin-bottom:14px}
+.mp-wl-result{font-size:13px;color:var(--ns-on-surface);background:var(--ns-surface-container);border-radius:8px;padding:8px 12px;margin-bottom:12px}
+.mp-wl-group{margin-bottom:18px}
+.mp-wl-group__head{font-family:var(--ns-font-headline);color:var(--ns-navy);font-size:15px;font-weight:600;margin:0 0 8px}
+.mp-wl-group__count{color:var(--ns-on-surface-variant);font-weight:400}
+.mp-wl-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
+.mp-wl-card{position:relative;background:white;border:1px solid var(--ns-outline-variant);border-radius:10px;transition:border-color .12s,box-shadow .12s}
+.mp-wl-card:hover{border-color:var(--ns-navy);box-shadow:var(--ns-shadow-sm)}
+.mp-wl-card.is-active{border-color:var(--ns-navy);background:var(--ns-surface-container)}
+.mp-wl-card__link{display:block;padding:10px 12px;text-decoration:none;color:inherit}
+.mp-wl-card__del{position:absolute;top:6px;right:6px;border:0;background:transparent;color:var(--ns-on-surface-variant);cursor:pointer;opacity:0;transition:opacity .12s;line-height:1}
+.mp-wl-card:hover .mp-wl-card__del{opacity:1}
+.mp-wl-card__del .material-symbols-outlined{font-size:16px}
+.mp-wl-card__top{display:flex;justify-content:space-between;align-items:baseline}
+.mp-wl-card__ticker{font-size:15px;font-weight:600;color:var(--ns-navy)}
+.mp-wl-card__px{display:flex;gap:6px;font-size:12px}
+.mp-wl-card__name{font-size:12px;color:var(--ns-on-surface);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mp-wl-card__sector{font-size:11px;color:var(--ns-on-surface-variant);margin-top:2px}
+.mp-wl-card__chips{display:flex;gap:6px;align-items:center;margin-top:6px}
+.mp-wl-card__spark{display:block;width:100%;height:22px;margin-top:6px}

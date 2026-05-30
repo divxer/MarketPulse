@@ -14,7 +14,6 @@
         <th class="text-right">价格</th>
         <th class="text-right">涨跌幅</th>
         <th class="text-right">成交量</th>
-        <th>备注</th>
       </tr>
     </thead>
     <tbody>
@@ -33,11 +32,10 @@
         <td class="text-right tnum mono text-slate-600">
           {% if item.volume %}{{ "{:,}".format(item.volume) }}{% else %}—{% endif %}
         </td>
-        <td class="text-slate-500 truncate max-w-[200px]">{{ item.notes or "" }}</td>
       </tr>
       {% endfor %}
       {% if not watchlist %}
-      <tr><td colspan="5" class="px-4 py-8 text-center text-slate-500">
+      <tr><td colspan="4" class="px-4 py-8 text-center text-slate-500">
         暂无自选股。<a href="/watchlist" class="text-blue-600">去添加</a>。
       </td></tr>
       {% endif %}

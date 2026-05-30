@@ -1,9 +1,0 @@
-<tr id="watchlist-row-{{ item.id }}" class="border-t">
-  <td class="px-2 py-1"><a href="/stock/{{ item.ticker }}" class="font-medium">{{ item.ticker }}</a></td>
-  <td>{{ item.notes or "" }}</td>
-  <td class="text-right">
-    <button hx-delete="/watchlist/{{ item.id }}"
-            hx-target="#watchlist-row-{{ item.id }}" hx-swap="outerHTML"
-            class="text-red-600 text-xs">删除</button>
-  </td>
-</tr>

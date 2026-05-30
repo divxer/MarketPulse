@@ -1,12 +1,13 @@
 import re
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi import APIRouter, Depends, Form, Request, Response
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
 from marketpulse.db.models import WatchlistItem
 from marketpulse.web.deps import get_db, require_auth
 from marketpulse.web.main import templates
+from marketpulse.web.watchlist_view import build_watchlist_view
 
 router = APIRouter()
 
@@ -19,37 +20,71 @@ def watchlist_page(
     db: Session = Depends(get_db),
     _: None = Depends(require_auth),
 ):
-    items = db.query(WatchlistItem).order_by(WatchlistItem.sort_order, WatchlistItem.id).all()
-    return templates.TemplateResponse(request, "watchlist.html", {"items": items})
+    view = build_watchlist_view(db)
+    return templates.TemplateResponse(
+        request, "watchlist.html", {"view": view, "add_result": None})
+
+
+def _parse_tickers(raw: str) -> list[str]:
+    parts = raw.replace(",", "\n").split("\n")
+    seen, out = set(), []
+    for p in parts:
+        t = p.strip().upper()
+        if t and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
 
 
 @router.post("/watchlist", response_class=HTMLResponse)
 def watchlist_add(
     request: Request,
-    ticker: str = Form(...),
+    tickers: str | None = Form(None),
+    ticker: str | None = Form(None),  # legacy single-add (/stock 加自选 button)
     db: Session = Depends(get_db),
     _: None = Depends(require_auth),
 ):
-    normalized = ticker.strip().upper()
-    if not _TICKER_RE.match(normalized):
-        raise HTTPException(status_code=422, detail="invalid ticker")
-    existing = db.query(WatchlistItem).filter(WatchlistItem.ticker == normalized).one_or_none()
-    if existing:
-        item = existing
-    else:
-        item = WatchlistItem(ticker=normalized)
-        db.add(item)
-        db.commit()
-        db.refresh(item)
-    return templates.TemplateResponse(request, "partials/watchlist_row.html", {"item": item})
+    raw = tickers if tickers is not None else (ticker or "")
+    existing = {t for (t,) in db.query(WatchlistItem.ticker).all()}
+    added, already, invalid = [], [], []
+    for t in _parse_tickers(raw):
+        if not _TICKER_RE.match(t):
+            invalid.append(t)
+        elif t in existing:
+            already.append(t)
+        else:
+            db.add(WatchlistItem(ticker=t))
+            existing.add(t)
+            added.append(t)
+    db.commit()
+    # Legacy single-ticker form (/stock 加自选): add silently, 204 = htmx no-swap,
+    # so the grid is never injected into the /stock page. The batch form always
+    # sends `tickers` (even if empty), so it falls through to the grid response.
+    if tickers is None:
+        return Response(status_code=204)
+    parts = [f"added {len(added)}"]
+    if already:
+        parts.append(f"{len(already)} already present")
+    if invalid:
+        parts.append(f"{len(invalid)} invalid: {', '.join(invalid)}")
+    view = build_watchlist_view(db)
+    return templates.TemplateResponse(
+        request, "partials/watchlist_grid.html",
+        {"view": view, "add_result": " · ".join(parts)})
 
 
 @router.delete("/watchlist/{item_id}", response_class=HTMLResponse)
 def watchlist_delete(
+    request: Request,
     item_id: int,
     db: Session = Depends(get_db),
     _: None = Depends(require_auth),
 ):
-    db.query(WatchlistItem).filter(WatchlistItem.id == item_id).delete()
-    db.commit()
-    return HTMLResponse("")
+    item = db.get(WatchlistItem, item_id)
+    if item is not None:
+        db.delete(item)
+        db.commit()
+    view = build_watchlist_view(db)
+    return templates.TemplateResponse(
+        request, "partials/watchlist_grid.html",
+        {"view": view, "add_result": None})
