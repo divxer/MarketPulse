@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from marketpulse.db.models import WatchlistItem
 from marketpulse.web.deps import get_db, require_auth
 from marketpulse.web.main import templates
+from marketpulse.web.watchlist_view import build_watchlist_view
 
 router = APIRouter()
 
@@ -19,8 +20,9 @@ def watchlist_page(
     db: Session = Depends(get_db),
     _: None = Depends(require_auth),
 ):
-    items = db.query(WatchlistItem).order_by(WatchlistItem.sort_order, WatchlistItem.id).all()
-    return templates.TemplateResponse(request, "watchlist.html", {"items": items})
+    view = build_watchlist_view(db)
+    return templates.TemplateResponse(
+        request, "watchlist.html", {"view": view, "add_result": None})
 
 
 @router.post("/watchlist", response_class=HTMLResponse)
