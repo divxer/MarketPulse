@@ -88,3 +88,77 @@ def _status_fields(
     if ticker in paper:
         return "Paper Position", "mp-chip--warn"
     return "Universe Only", "mp-chip--muted"
+
+
+from sqlalchemy import func, select
+
+from marketpulse.backtest.sector import load_sector_cache, load_sector_overrides
+from marketpulse.db.models import (
+    EvaluationEvent, Holding, PaperPosition, PriceCacheEntry,
+)
+
+_SPARK_N = 30
+
+
+def _price_blocks(session, tickers: list[str]) -> dict[str, dict]:
+    """Per ticker: latest close, prior close, last-N closes (ascending)."""
+    if not tickers:
+        return {}
+    rows = session.execute(
+        select(PriceCacheEntry.ticker, PriceCacheEntry.date, PriceCacheEntry.close)
+        .where(PriceCacheEntry.ticker.in_(tickers))
+        .order_by(PriceCacheEntry.ticker, PriceCacheEntry.date.asc())
+    ).all()
+    closes: dict[str, list[float]] = {}
+    for tkr, _d, close in rows:
+        closes.setdefault(tkr, []).append(float(close))
+    out: dict[str, dict] = {}
+    for tkr, series in closes.items():
+        out[tkr] = {
+            "latest": series[-1],
+            "prior": series[-2] if len(series) >= 2 else None,
+            # Contract: [] when <2 points (sparkpoints needs >=2 to draw a line).
+            "spark": series[-_SPARK_N:] if len(series) >= 2 else [],
+        }
+    return out
+
+
+def _latest_verdicts(session, tickers: list[str]) -> dict[str, str]:
+    """Latest EvaluationEvent(ai_analysis) subtype per ticker. Deterministic
+    tie-break on equal event_time via id DESC (row_number window — SQLite 3.25+)."""
+    if not tickers:
+        return {}
+    rn = func.row_number().over(
+        partition_by=EvaluationEvent.ticker,
+        order_by=(EvaluationEvent.event_time.desc(), EvaluationEvent.id.desc()),
+    ).label("rn")
+    sub = (
+        select(EvaluationEvent.ticker, EvaluationEvent.subtype, rn)
+        .where(EvaluationEvent.event_type == "ai_analysis")
+        .where(EvaluationEvent.ticker.in_(tickers))
+        .subquery()
+    )
+    rows = session.execute(
+        select(sub.c.ticker, sub.c.subtype).where(sub.c.rn == 1)
+    ).all()
+    return {t: st for t, st in rows}
+
+
+def _status_sets(session) -> tuple[set[str], set[str]]:
+    holdings = {t for (t,) in session.execute(select(Holding.ticker)).all()}
+    paper = {t for (t,) in session.execute(
+        select(PaperPosition.ticker).where(PaperPosition.status == "OPEN")
+    ).all()}
+    return holdings, paper
+
+
+def _sector_map(tickers: list[str], holdings_sector: dict[str, str]) -> dict[str, str]:
+    """Cache-only sector (L5): holdings.sector first, then on-disk cache + YAML
+    overrides. NO network. Uncached -> UNCATEGORIZED."""
+    cache = load_sector_cache()
+    overrides = load_sector_overrides()
+    out: dict[str, str] = {}
+    for t in tickers:
+        out[t] = (holdings_sector.get(t) or overrides.get(t)
+                  or cache.get(t) or UNCATEGORIZED)
+    return out
