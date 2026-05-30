@@ -52,6 +52,8 @@ services:
       # Set AI_EVAL_ENABLED=false in host env to pause without editing this file.
       AI_EVAL_ENABLED: ${AI_EVAL_ENABLED:-true}
       AI_EVAL_MAX_CALLS_PER_DAY: ${AI_EVAL_MAX_CALLS_PER_DAY:-40}
+      AI_EVAL_HOUR: ${AI_EVAL_HOUR:-21}          # UTC (post-close ~17:00 ET EDT)
+      AI_EVAL_MINUTE: ${AI_EVAL_MINUTE:-0}
       NEWS_CACHE_TTL_DAYS: ${NEWS_CACHE_TTL_DAYS:-7}
       QUOTE_CACHE_TTL_SECONDS: ${QUOTE_CACHE_TTL_SECONDS:-300}
       QUOTE_SOURCE: ${QUOTE_SOURCE:-auto}
@@ -98,6 +100,15 @@ services:
       FLEX_SYNC_MINUTE: ${FLEX_SYNC_MINUTE:-30}
       IBKR_ACCOUNT_ID: ${IBKR_ACCOUNT_ID:-}
       MP_IBKR_ALLOW_LIVE: ${MP_IBKR_ALLOW_LIVE:-false}
+      # Paper-trading engine (Phase 6). Surfaced for ops visibility — defaults
+      # match code. Flip MP_PAPER_KILL_SWITCH=true in host env to halt paper
+      # trading immediately (env change + restart, no code edit). Tick runs at
+      # 17:30 in the scheduler's base tz (America/New_York) = post US close.
+      MP_PAPER_KILL_SWITCH: ${MP_PAPER_KILL_SWITCH:-false}
+      MP_PAPER_TICK_HOUR: ${MP_PAPER_TICK_HOUR:-17}
+      MP_PAPER_TICK_MINUTE: ${MP_PAPER_TICK_MINUTE:-30}
+      MP_PAPER_NOTIFICATIONS_ENABLED: ${MP_PAPER_NOTIFICATIONS_ENABLED:-true}
+      MP_PAPER_INITIAL_DEPOSIT: ${MP_PAPER_INITIAL_DEPOSIT:-10000}
       # Phase 7b — IBKR Gateway sidecar order execution
       IBKR_ORDER_HOST: ${IBKR_ORDER_HOST:-ib-gateway}
       IBKR_ORDER_PORT: ${IBKR_ORDER_PORT:-4002}
