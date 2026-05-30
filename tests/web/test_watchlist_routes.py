@@ -41,6 +41,7 @@ def test_watchlist_get_renders_grid(client, db_url, monkeypatch):
     assert "Universe Only" in body
     assert "tickers" in body  # coverage summary
     assert "备注" not in body  # notes column gone
+    assert "max-w-[2400px]" in body  # wide layout, consistent with other pages
 
 
 def test_watchlist_batch_add_partial_success(client, db_url, monkeypatch):
