@@ -56,7 +56,7 @@ class Coverage:
     universe_only: int
 
 
-def _empty_coverage() -> "Coverage":
+def _empty_coverage() -> Coverage:
     return Coverage(0, 0, 0, 0, 0)
 
 
