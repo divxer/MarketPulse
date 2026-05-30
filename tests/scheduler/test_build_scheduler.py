@@ -15,6 +15,7 @@ def test_daily_critical_jobs_have_no_misfire_grace():
     for job_id in (
         "paper_trading_tick", "outcome_computation", "flex_sync",
         "sector_backfill", "db_backup", "charter_review_weekly",
+        "ai_eval_analysis",
     ):
         job = sched.get_job(job_id)
         assert job is not None, f"missing job {job_id}"
