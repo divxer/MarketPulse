@@ -94,7 +94,7 @@ from sqlalchemy import func, select
 
 from marketpulse.backtest.sector import load_sector_cache, load_sector_overrides
 from marketpulse.db.models import (
-    EvaluationEvent, Holding, PaperPosition, PriceCacheEntry,
+    EvaluationEvent, Holding, PaperPosition, PriceCacheEntry, WatchlistItem,
 )
 
 _SPARK_N = 30
@@ -162,3 +162,74 @@ def _sector_map(tickers: list[str], holdings_sector: dict[str, str]) -> dict[str
         out[t] = (holdings_sector.get(t) or overrides.get(t)
                   or cache.get(t) or UNCATEGORIZED)
     return out
+
+
+def _card(ticker, block, subtype, sector, holdings, paper, item_id=None, active=False):
+    latest = block["latest"] if block else None
+    prior = block["prior"] if block else None
+    change_display, change_class = _fmt_change(latest, prior)
+    v_class, v_label = _verdict_fields(subtype)
+    s_label, s_class = _status_fields(ticker, holdings, paper)
+    spark_stroke = ("var(--mp-down)" if change_class == "mp-watchlist__chg--down"
+                    else "var(--mp-up)")
+    return WatchlistCard(
+        ticker=ticker,
+        price_display=_fmt_price(latest),
+        change_display=change_display,
+        change_class=change_class,
+        sparkline=block["spark"] if block else [],
+        sector=sector,
+        verdict_class=v_class,
+        verdict_label=v_label,
+        status_label=s_label,
+        status_class=s_class,
+        spark_stroke=spark_stroke,
+        item_id=item_id,
+        active=active,
+    )
+
+
+def build_watchlist_view(session) -> WatchlistView:
+    id_map = {
+        t: i for (i, t) in session.execute(
+            select(WatchlistItem.id, WatchlistItem.ticker)
+        ).all()
+    }
+    tickers = sorted(id_map)
+    blocks = _price_blocks(session, tickers)
+    verdicts = _latest_verdicts(session, tickers)
+    holdings, paper = _status_sets(session)
+    holdings_sector = {
+        t: s for (t, s) in session.execute(
+            select(Holding.ticker, Holding.sector)
+        ).all() if s
+    }
+    sectors = _sector_map(tickers, holdings_sector)
+
+    cards = [
+        _card(t, blocks.get(t), verdicts.get(t), sectors[t], holdings, paper,
+              item_id=id_map[t])
+        for t in tickers
+    ]
+    by_sector: dict[str, list[WatchlistCard]] = {}
+    for c in cards:
+        by_sector.setdefault(c.sector, []).append(c)
+
+    # Order: count DESC, then name ASC; Uncategorized always last (L12).
+    def _key(name: str) -> tuple:
+        is_uncat = name == UNCATEGORIZED
+        return (is_uncat, -len(by_sector[name]), name)
+
+    groups = [
+        SectorGroup(name=n, count=len(by_sector[n]),
+                    cards=sorted(by_sector[n], key=lambda c: c.ticker))
+        for n in sorted(by_sector, key=_key)
+    ]
+    coverage = Coverage(
+        total=len(tickers),
+        sectors=len(by_sector),       # includes the Uncategorized group when present
+        holdings=sum(1 for c in cards if c.status_label == "Holding"),
+        paper=sum(1 for c in cards if c.status_label == "Paper Position"),
+        universe_only=sum(1 for c in cards if c.status_label == "Universe Only"),
+    )
+    return WatchlistView(groups=groups, coverage=coverage)

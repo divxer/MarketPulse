@@ -50,7 +50,7 @@ from datetime import UTC, date, datetime  # noqa: E402
 from decimal import Decimal  # noqa: E402
 
 from marketpulse.db.models import (  # noqa: E402
-    EvaluationEvent, Holding, PaperPosition, PriceCacheEntry,
+    EvaluationEvent, Holding, PaperPosition, PriceCacheEntry, WatchlistItem,
 )
 from marketpulse.web.watchlist_view import (  # noqa: E402
     _price_blocks, _latest_verdicts, _status_sets,
@@ -108,3 +108,51 @@ def test_sector_map_priority(monkeypatch):
     assert out["B"] == "OverrideSec"    # override beats cache
     assert out["C"] == "CacheSec"       # pure cache hit
     assert out["D"] == wv.UNCATEGORIZED  # uncached → Uncategorized
+
+
+def _seed_universe(db_session):
+    # 3 tickers: AAPL (holding, tech), MSFT (universe, tech), SPY (universe, ETF)
+    for t in ["AAPL", "MSFT", "SPY"]:
+        db_session.add(WatchlistItem(ticker=t))
+    db_session.add(Holding(ticker="AAPL", quantity=1, avg_cost=1, sector="Technology"))
+    _add_price(db_session, "AAPL", date(2026, 5, 28), 100.0)
+    _add_price(db_session, "AAPL", date(2026, 5, 29), 101.0)
+    db_session.add(EvaluationEvent(event_type="ai_analysis", subtype="bullish",
+                   ticker="MSFT", event_time=datetime(2026, 5, 29, tzinfo=UTC),
+                   event_price=1.0, payload={}))
+    db_session.commit()
+
+
+def test_build_view_groups_order_and_coverage(db_session, monkeypatch):
+    import marketpulse.web.watchlist_view as wv
+    # Force deterministic sectors (cache-only): MSFT->Technology, SPY->ETF
+    monkeypatch.setattr(wv, "load_sector_cache", lambda: {"MSFT": "Technology", "SPY": "ETF"})
+    monkeypatch.setattr(wv, "load_sector_overrides", lambda: {})
+    _seed_universe(db_session)
+
+    view = wv.build_watchlist_view(db_session)
+    names = [g.name for g in view.groups]
+    # Technology(2) before ETF(1); Uncategorized would be last if present
+    assert names == ["Technology", "ETF"]
+    tech = view.groups[0]
+    assert tech.count == 2
+    assert [c.ticker for c in tech.cards] == ["AAPL", "MSFT"]  # ticker ASC
+    assert tech.cards[0].status_label == "Holding"
+    assert tech.cards[0].price_display == "$101.00"
+    assert tech.cards[1].verdict_label == "Bullish"            # MSFT
+    assert tech.cards[1].status_label == "Universe Only"
+    assert view.coverage.total == 3
+    assert view.coverage.sectors == 2
+    assert view.coverage.holdings == 1
+    assert view.coverage.universe_only == 2
+
+
+def test_build_view_uncategorized_last(db_session, monkeypatch):
+    import marketpulse.web.watchlist_view as wv
+    monkeypatch.setattr(wv, "load_sector_cache", lambda: {"MSFT": "Technology"})
+    monkeypatch.setattr(wv, "load_sector_overrides", lambda: {})
+    db_session.add(WatchlistItem(ticker="MSFT"))
+    db_session.add(WatchlistItem(ticker="ZZZZ"))  # uncached → Uncategorized
+    db_session.commit()
+    view = wv.build_watchlist_view(db_session)
+    assert [g.name for g in view.groups][-1] == "Uncategorized"
