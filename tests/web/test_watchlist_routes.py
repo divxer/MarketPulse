@@ -41,3 +41,29 @@ def test_watchlist_get_renders_grid(client, db_url, monkeypatch):
     assert "Universe Only" in body
     assert "tickers" in body  # coverage summary
     assert "备注" not in body  # notes column gone
+
+
+def test_watchlist_batch_add_partial_success(client, db_url, monkeypatch):
+    _login(client, monkeypatch)
+    _seed(db_url)  # MSFT already present
+    res = client.post("/watchlist", data={"tickers": "msft, GOOGL\nNVDA\n@@bad"})
+    assert res.status_code == 200
+    body = res.text
+    assert "mp-wl-grid" in body          # full grid fragment
+    assert "GOOGL" in body and "NVDA" in body
+    assert "added 2" in body.lower() or "added&nbsp;2" in body.lower()
+    assert "already" in body.lower()     # MSFT existed
+    assert "invalid" in body.lower()     # @@bad
+
+
+def test_watchlist_batch_add_empty_is_noop(client, db_url, monkeypatch):
+    _login(client, monkeypatch)
+    _seed(db_url)  # MSFT only
+    res = client.post("/watchlist", data={"tickers": "  \n , \n "})
+    assert res.status_code == 200        # no 500
+    assert "added 0" in res.text.lower()
+    from marketpulse.db import base as db_base
+    gen = db_base.session_scope()
+    s = next(gen)
+    assert s.query(WatchlistItem).count() == 1
+    gen.close()

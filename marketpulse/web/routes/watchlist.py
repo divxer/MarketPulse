@@ -1,6 +1,6 @@
 import re
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
@@ -25,25 +25,45 @@ def watchlist_page(
         request, "watchlist.html", {"view": view, "add_result": None})
 
 
+def _parse_tickers(raw: str) -> list[str]:
+    parts = raw.replace(",", "\n").split("\n")
+    seen, out = set(), []
+    for p in parts:
+        t = p.strip().upper()
+        if t and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
 @router.post("/watchlist", response_class=HTMLResponse)
 def watchlist_add(
     request: Request,
-    ticker: str = Form(...),
+    tickers: str = Form(...),
     db: Session = Depends(get_db),
     _: None = Depends(require_auth),
 ):
-    normalized = ticker.strip().upper()
-    if not _TICKER_RE.match(normalized):
-        raise HTTPException(status_code=422, detail="invalid ticker")
-    existing = db.query(WatchlistItem).filter(WatchlistItem.ticker == normalized).one_or_none()
-    if existing:
-        item = existing
-    else:
-        item = WatchlistItem(ticker=normalized)
-        db.add(item)
-        db.commit()
-        db.refresh(item)
-    return templates.TemplateResponse(request, "partials/watchlist_row.html", {"item": item})
+    existing = {t for (t,) in db.query(WatchlistItem.ticker).all()}
+    added, already, invalid = [], [], []
+    for t in _parse_tickers(tickers):
+        if not _TICKER_RE.match(t):
+            invalid.append(t)
+        elif t in existing:
+            already.append(t)
+        else:
+            db.add(WatchlistItem(ticker=t))
+            existing.add(t)
+            added.append(t)
+    db.commit()
+    parts = [f"added {len(added)}"]
+    if already:
+        parts.append(f"{len(already)} already present")
+    if invalid:
+        parts.append(f"{len(invalid)} invalid: {', '.join(invalid)}")
+    view = build_watchlist_view(db)
+    return templates.TemplateResponse(
+        request, "partials/watchlist_grid.html",
+        {"view": view, "add_result": " · ".join(parts)})
 
 
 @router.delete("/watchlist/{item_id}", response_class=HTMLResponse)
