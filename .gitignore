@@ -23,3 +23,6 @@ package-lock.json
 .codex/
 AGENTS.md
 data/sector_cache.json
+
+# Runtime DB backup artifacts (created by the nightly backup job)
+backups/
