@@ -81,3 +81,8 @@ def test_watchlist_delete_returns_grid(client, db_url, monkeypatch):
     assert res.status_code == 200
     assert "mp-wl-grid" in res.text       # full grid fragment
     assert "MSFT" not in res.text
+
+
+def test_watchlistitem_has_no_notes():
+    from marketpulse.db.models import WatchlistItem
+    assert not hasattr(WatchlistItem, "notes")

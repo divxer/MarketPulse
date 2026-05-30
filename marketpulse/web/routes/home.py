@@ -34,7 +34,6 @@ def home(
             q = data.get_quote(item.ticker)
             watchlist.append({
                 "ticker": item.ticker,
-                "notes": item.notes,
                 "price": q.price,
                 "change_pct": q.change_pct,
                 "volume": q.volume,
@@ -47,7 +46,6 @@ def home(
             )
             watchlist.append({
                 "ticker": item.ticker,
-                "notes": item.notes,
                 "price": None,
                 "change_pct": None,
                 "volume": None,
