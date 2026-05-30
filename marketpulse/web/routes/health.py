@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from marketpulse.db.base import get_engine
+from marketpulse.scheduler.eval_state import get_eval_last_run_summary
 from marketpulse.scheduler.state import get_last_run_summary
 from marketpulse.web.deps import get_db, require_auth
 
@@ -22,13 +23,15 @@ def scheduler_health(
     db: Session = Depends(get_db),
     _: None = Depends(require_auth),
 ) -> JSONResponse:
-    """Return the most recent detect_corporate_actions run summary.
+    """Return the most recent detect_corporate_actions run summary, plus the
+    eval-analysis last-run summary under the ``ai_eval`` key.
 
     Useful for diagnosing why a ticker didn't get its expected splits/dividends:
     per-ticker `source` shows which fetcher succeeded (tencent / yfinance / none),
     `splits_added` / `dividends_added` show what was newly persisted this run.
     """
     summary = get_last_run_summary(db)
-    if summary is None:
-        return JSONResponse({"status": "never_ran", "last_run": None})
-    return JSONResponse(summary)
+    ai_eval = get_eval_last_run_summary(db)
+    body = {"status": "never_ran", "last_run": None} if summary is None else dict(summary)
+    body["ai_eval"] = ai_eval
+    return JSONResponse(body)

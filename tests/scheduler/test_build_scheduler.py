@@ -15,6 +15,7 @@ def test_daily_critical_jobs_have_no_misfire_grace():
     for job_id in (
         "paper_trading_tick", "outcome_computation", "flex_sync",
         "sector_backfill", "db_backup", "charter_review_weekly",
+        "ai_eval_analysis",
     ):
         job = sched.get_job(job_id)
         assert job is not None, f"missing job {job_id}"
@@ -54,3 +55,23 @@ def test_charter_review_weekly_job_registered():
     assert "day_of_week='mon'" in trigger_repr, trigger_repr
     assert "hour='9'" in trigger_repr or "hour=9" in trigger_repr, trigger_repr
     assert "minute='30'" in trigger_repr or "minute=30" in trigger_repr, trigger_repr
+
+
+def test_eval_analysis_job_registered():
+    """Task #57: eval-analysis cron at 21:00 UTC Mon-Fri."""
+    sched = build_scheduler()
+    job = sched.get_job("ai_eval_analysis")
+    assert job is not None, "ai_eval_analysis cron must be registered"
+    trigger_repr = str(job.trigger)
+    assert "hour='21'" in trigger_repr or "hour=21" in trigger_repr, trigger_repr
+    assert "minute='0'" in trigger_repr or "minute=0" in trigger_repr, trigger_repr
+    assert "day_of_week='mon-fri'" in trigger_repr, trigger_repr
+
+
+def test_eval_analysis_is_daily_critical():
+    """Missed runs lose unrecoverable eval data (analyze uses live quotes), so
+    it must catch up on next boot like the other daily-critical jobs."""
+    sched = build_scheduler()
+    job = sched.get_job("ai_eval_analysis")
+    assert job.misfire_grace_time is None, job.misfire_grace_time
+    assert job.coalesce is True
