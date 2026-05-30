@@ -38,6 +38,12 @@ services:
       # production (fallback is AI_MODEL ~100x more expensive per router call).
       AI_MODEL_ROUTER: ${AI_MODEL_ROUTER:-claude-haiku-4-5}
       AI_CACHE_TTL_HOURS: ${AI_CACHE_TTL_HOURS:-24}
+      # Task #57 — nightly eval-analysis job (Watchlist ∪ open holdings, 21:00
+      # UTC Mon-Fri, eval-only). Enabled here by deliberate choice; the cap
+      # counts FRESH sonnet analyses/day (cache hits & errors don't consume it).
+      # Set AI_EVAL_ENABLED=false in host env to pause without editing this file.
+      AI_EVAL_ENABLED: ${AI_EVAL_ENABLED:-true}
+      AI_EVAL_MAX_CALLS_PER_DAY: ${AI_EVAL_MAX_CALLS_PER_DAY:-40}
       NEWS_CACHE_TTL_DAYS: ${NEWS_CACHE_TTL_DAYS:-7}
       QUOTE_CACHE_TTL_SECONDS: ${QUOTE_CACHE_TTL_SECONDS:-300}
       QUOTE_SOURCE: ${QUOTE_SOURCE:-auto}
