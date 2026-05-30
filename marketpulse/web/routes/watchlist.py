@@ -68,10 +68,16 @@ def watchlist_add(
 
 @router.delete("/watchlist/{item_id}", response_class=HTMLResponse)
 def watchlist_delete(
+    request: Request,
     item_id: int,
     db: Session = Depends(get_db),
     _: None = Depends(require_auth),
 ):
-    db.query(WatchlistItem).filter(WatchlistItem.id == item_id).delete()
-    db.commit()
-    return HTMLResponse("")
+    item = db.get(WatchlistItem, item_id)
+    if item is not None:
+        db.delete(item)
+        db.commit()
+    view = build_watchlist_view(db)
+    return templates.TemplateResponse(
+        request, "partials/watchlist_grid.html",
+        {"view": view, "add_result": None})

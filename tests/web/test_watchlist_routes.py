@@ -67,3 +67,17 @@ def test_watchlist_batch_add_empty_is_noop(client, db_url, monkeypatch):
     s = next(gen)
     assert s.query(WatchlistItem).count() == 1
     gen.close()
+
+
+def test_watchlist_delete_returns_grid(client, db_url, monkeypatch):
+    _login(client, monkeypatch)
+    _seed(db_url)
+    from marketpulse.db import base as db_base
+    gen = db_base.session_scope()
+    s = next(gen)
+    item_id = s.query(WatchlistItem).filter_by(ticker="MSFT").one().id
+    gen.close()
+    res = client.delete(f"/watchlist/{item_id}")
+    assert res.status_code == 200
+    assert "mp-wl-grid" in res.text       # full grid fragment
+    assert "MSFT" not in res.text
