@@ -1025,7 +1025,21 @@ git commit -m "feat(watchlist): drop zombie notes column (model + alembic batch 
 
 ---
 
-## Task 10: Refactor `/stock` sidebar onto the shared partial (LAST — L8)
+## Task 10: ~~Refactor `/stock` sidebar onto the shared partial~~ — DROPPED (L3R)
+
+**DROPPED during execution.** Implementation revealed the `/stock` sidebar
+(vertical `mp-watchlist` list) and the `/watchlist` card (`mp-wl-card` grid) are
+different presentation components; routing `/stock` through the new card partial
+would change its appearance, contradicting L8 (visual-equivalence). Per the
+revised lock **L3R** (share helpers, not templates), `/stock` is left untouched.
+A one-line compatibility shim landed instead: `POST /watchlist` accepts the legacy
+single `ticker` field from the `/stock` 加自选 button and returns `204` (htmx
+no-swap), so the button works with zero `/stock` changes. The obsolete
+`tests/web/test_watchlist.py` (old-page contract) was deleted; coverage moved to
+`tests/web/test_watchlist_routes.py`.
+
+### (original Task 10 text, retained for history)
+**Refactor `/stock` sidebar onto the shared partial (LAST — L8)**
 
 **Files:**
 - Modify: `marketpulse/web/templates/stock.html`

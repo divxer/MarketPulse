@@ -36,7 +36,8 @@ It shows: Universe · Sector · Coverage · latest Verdict · holding status.
 |------|----------|
 | **L1** | Remove `notes` entirely (UI + API + model + Alembic drop column). Zombie field, no consumer, sector grouping replaces its classification use. |
 | **L2** | Watchlist uses **cached market data only**. No synchronous quote fetch, no per-card lazy fetch, no realtime requirement. Price/sparkline from `price_cache`. Fast first paint > quote freshness. |
-| **L3** | **Shared card presentation partial, separate data presenters.** `/stock` keeps its realtime quote builder; `/watchlist` uses a `price_cache`-only presenter; both render through one shared card partial. |
+| **L3** | ~~Shared card presentation partial, separate data presenters.~~ **REVISED during implementation → L3R.** |
+| **L3R** | **Share display HELPERS, not templates.** Implementation showed the `/stock` sidebar (vertical nav list, `mp-watchlist`) and the `/watchlist` card (sector grid, `mp-wl-card`) are genuinely *different presentation components* — only the data shape overlaps. So `/watchlist` gets its own `watchlist_card.html`; `/stock` keeps its existing inline sidebar untouched. Shared: the display helpers (`_fmt_price`/`_fmt_change`, `sparkpoints`, the `WatchlistCard` view-model). The `/stock` refactor (old Task 10) is **dropped** — see Out of scope. This auto-satisfies L8 (`/stock` is not modified). |
 | **L4** | **Verdict source = latest `EvaluationEvent` where `event_type='ai_analysis'`, using `subtype`.** NOT `AiAnalysis` (it has no subtype column). |
 | **L5** | **Sector source is cache-only.** No yfinance / network `get_sector` during render. Uncached ticker → `Uncategorized`. |
 | **L6** | `WatchlistCard` does **not** include company name. Card identity = ticker only. No live lookup, no new name cache this phase. |
@@ -224,6 +225,13 @@ screenshot comparison** (not an automated pixel test).
   personal order.
 - Realtime quotes, "refresh quotes" button, company-name display/cache.
 - P3 items: coverage analytics dashboards.
+- **`/stock` sidebar unification (was Task 10, now dropped, per L3R).** The
+  `/stock` rail and the `/watchlist` grid are different presentation components;
+  forcing them onto one template would change `/stock`'s appearance (violating L8).
+  Future follow-up may evaluate migrating the `/stock` sidebar to a separate
+  Variant A list component, but not in this redesign. (One required compatibility
+  shim landed: `POST /watchlist` accepts the legacy single `ticker` field from the
+  `/stock` 加自选 button and returns `204` no-swap, so `/stock` is untouched.)
 
 ## Rollout
 
