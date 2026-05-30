@@ -103,6 +103,13 @@ def test_status_fields():
     assert _status_fields("SPY", set(), set()) == ("Universe Only", "mp-chip--muted")
     # holdings wins over paper if somehow both
     assert _status_fields("X", {"X"}, {"X"}) == ("Holding", "mp-chip--success")
+
+
+def test_watchlistcard_spark_stroke_default():
+    c = WatchlistCard("AAPL", "—", "—", "", [], "X", "mp-ai-badge--pending",
+                      "Pending", "Universe Only", "mp-chip--muted")
+    assert c.spark_stroke == "var(--mp-up)"  # default; presenter overrides on down
+    assert c.item_id is None and c.active is False
 ```
 
 - [ ] **Step 2: Run → FAIL** (`ModuleNotFoundError`).
@@ -245,10 +252,14 @@ def test_price_blocks_latest_and_prior(db_session):
     _add_price(db_session, "AAPL", date(2026, 5, 28), 446.0)
     _add_price(db_session, "AAPL", date(2026, 5, 29), 450.0)
     db_session.commit()
-    blocks = _price_blocks(db_session, ["AAPL", "ZZZZ"])
+    _add_price(db_session, "SOLO", date(2026, 5, 29), 12.0)  # single row
+    db_session.commit()
+    blocks = _price_blocks(db_session, ["AAPL", "SOLO", "ZZZZ"])
     assert blocks["AAPL"]["latest"] == 450.0
     assert blocks["AAPL"]["prior"] == 446.0
     assert blocks["AAPL"]["spark"][-2:] == [446.0, 450.0]
+    assert blocks["SOLO"]["prior"] is None
+    assert blocks["SOLO"]["spark"] == []  # <2 points → empty (contract)
     assert "ZZZZ" not in blocks  # no rows → absent
 
 
@@ -320,7 +331,8 @@ def _price_blocks(session, tickers: list[str]) -> dict[str, dict]:
         out[tkr] = {
             "latest": series[-1],
             "prior": series[-2] if len(series) >= 2 else None,
-            "spark": series[-_SPARK_N:],
+            # Contract: [] when <2 points (sparkpoints needs ≥2 to draw a line).
+            "spark": series[-_SPARK_N:] if len(series) >= 2 else [],
         }
     return out
 
@@ -502,7 +514,8 @@ def build_watchlist_view(session) -> WatchlistView:
     ]
     coverage = Coverage(
         total=len(tickers),
-        sectors=len(by_sector),
+        sectors=len(by_sector),       # includes the Uncategorized group when present
+
         holdings=sum(1 for c in cards if c.status_label == "Holding"),
         paper=sum(1 for c in cards if c.status_label == "Paper Position"),
         universe_only=sum(1 for c in cards if c.status_label == "Universe Only"),

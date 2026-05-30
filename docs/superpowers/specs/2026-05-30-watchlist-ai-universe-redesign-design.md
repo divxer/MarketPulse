@@ -140,7 +140,8 @@ view-model`, the partial is dumb rendering, the route composes.
 - Group header: `Technology · 6` (name + count).
 - **Coverage summary** at top: `28 tickers · 7 sectors · 6 holdings · 6 paper ·
   16 universe-only` — the "is the universe balanced / which sector lacks samples"
-  view that is this page's core value.
+  view that is this page's core value. `sectors` counts the `Uncategorized` group
+  when present (it is a real bucket on the page).
 
 **② Search (P1)** — client-only, visual-only (L10).
 - One search box; a minimal vanilla-JS filter hides cards whose `ticker` (and
