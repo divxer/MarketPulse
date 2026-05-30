@@ -32,7 +32,7 @@ class EvalAnalysisSummary:
     def processed(self) -> int:
         return self.analyzed_fresh + self.cache_hits + self.errors
 
-    def as_dict(self, *, status: str, error: str | None = None) -> dict:
+    def as_dict(self, *, status: str, error: str | None = None) -> dict[str, object]:
         """status ∈ {"ok", "disabled", "failed"}. `ts` is added by the
         persistence layer (record_eval_run_summary), keeping this clock-free."""
         d = {
@@ -65,7 +65,9 @@ def build_eval_universe(session) -> list[str]:
     return sorted(normalized)
 
 
-def run_eval_analysis(session, *, ai, universe, max_calls, run_date) -> EvalAnalysisSummary:
+def run_eval_analysis(
+    session, *, ai, universe: list[str], max_calls: int, run_date: date,
+) -> EvalAnalysisSummary:
     """Loop the prebuilt universe calling ai.analyze() under a FRESH-call cap.
 
     Cap semantics: cache hits and errors do NOT consume the budget; only fresh

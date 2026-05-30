@@ -2,9 +2,17 @@
 """Task #57 — eval-analysis core: summary dataclass, universe, run loop."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
+from decimal import Decimal
+from unittest.mock import MagicMock
 
-from marketpulse.ai.eval_analysis import EvalAnalysisSummary
+from marketpulse.ai.eval_analysis import (
+    EvalAnalysisSummary,
+    build_eval_universe,
+    run_eval_analysis,
+)
+from marketpulse.ai.types import AnalysisResult
+from marketpulse.db.models import PaperPosition, WatchlistItem
 
 
 def test_summary_processed_and_invariant():
@@ -36,12 +44,6 @@ def test_summary_as_dict_failed_includes_error():
     assert d["status"] == "failed"
     assert d["error"] == "boom"
 
-
-from datetime import UTC, datetime
-from decimal import Decimal
-
-from marketpulse.ai.eval_analysis import build_eval_universe
-from marketpulse.db.models import PaperPosition, WatchlistItem
 
 _order_seq = iter(range(1, 100_000))
 
@@ -107,12 +109,6 @@ def test_universe_excludes_closed_positions(db_session):
 
 def test_universe_empty(db_session):
     assert build_eval_universe(db_session) == []
-
-
-from unittest.mock import MagicMock
-
-from marketpulse.ai.eval_analysis import run_eval_analysis
-from marketpulse.ai.types import AnalysisResult
 
 
 class FakeAi:
