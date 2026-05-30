@@ -15,7 +15,7 @@ from marketpulse.db.models import (
 
 
 def test_create_watchlist_item(db_session: Session) -> None:
-    item = WatchlistItem(ticker="AAPL", notes="iphone")
+    item = WatchlistItem(ticker="AAPL")
     db_session.add(item)
     db_session.commit()
     assert item.id is not None
