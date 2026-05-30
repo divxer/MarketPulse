@@ -66,6 +66,11 @@ def test_invokes_full_pipeline_when_configured(monkeypatch):
     import marketpulse.broker.readonly_sync as sync_mod
     import marketpulse.scheduler.jobs as jobs_mod
 
+    monkeypatch.setattr(
+        "marketpulse.trading.calendar.NYTradingCalendar.is_business_day",
+        lambda self, d: True,
+    )
+
     fake_db = MagicMock()
     monkeypatch.setattr(jobs_mod, "session_scope", lambda: iter([fake_db]))
     monkeypatch.setattr(jobs_mod, "record_run_summary", lambda *a, **kw: None)
@@ -113,6 +118,11 @@ def test_db_closed_even_when_sync_raises(monkeypatch):
     import marketpulse.broker.flex_client as flex_mod
     import marketpulse.broker.readonly_sync as sync_mod
     import marketpulse.scheduler.jobs as jobs_mod
+
+    monkeypatch.setattr(
+        "marketpulse.trading.calendar.NYTradingCalendar.is_business_day",
+        lambda self, d: True,
+    )
 
     fake_db = MagicMock()
     monkeypatch.setattr(jobs_mod, "session_scope", lambda: iter([fake_db]))

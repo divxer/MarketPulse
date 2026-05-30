@@ -87,6 +87,12 @@ def lab_ai_track(
     recent = scoring.get_recent_events_with_outcomes(
         db, ticker=ticker_u, subtype=verdict, limit=20, strategy=strategy, **common,
     )
+    # Pending = the full in-flight set (≈one verdict/ticker/day), so it must not
+    # truncate a day's universe the way the matured-outcomes table (limit=20)
+    # does. Bounded by universe size; 200 leaves headroom as the universe grows.
+    pending = scoring.get_pending_verdicts(
+        db, ticker=ticker_u, subtype=verdict, limit=200, strategy=strategy, **common,
+    )
 
     best = next(
         (t for t in per_ticker if t.n_total >= 5),
@@ -158,6 +164,7 @@ def lab_ai_track(
         "trend": trend,
         "per_ticker": per_ticker,
         "recent": recent,
+        "pending": pending,
         "best": best,
         "best_strategy": best_strategy,
         "per_strategy": per_strategy,

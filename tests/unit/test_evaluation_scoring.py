@@ -325,3 +325,38 @@ def test_get_recent_events_with_outcomes_filters_by_strategy(db_session):
     rows = get_recent_events_with_outcomes(db_session, horizon=5,
                                             strategy="momentum_breakout")
     assert [r.ticker for r in rows] == ["AAA"]
+
+
+def test_get_pending_verdicts_excludes_events_with_outcome_at_horizon(db_session):
+    from marketpulse.evaluation.scoring import get_pending_verdicts
+
+    # Event WITH an h5 outcome -> must NOT appear as pending at horizon 5
+    done = _ev(db_session, ticker="DONE", subtype="bullish", days_ago=10, price=100.0)
+    _out(db_session, done, horizon=5, excess=0.05)
+    # Event with NO outcome -> must appear as pending
+    pend = _ev(db_session, ticker="PEND", subtype="bearish", days_ago=1, price=50.0)
+    pend.payload = {**pend.payload, "rationale": "why"}
+    db_session.commit()
+
+    out = get_pending_verdicts(db_session, horizon=5, limit=20)
+    tickers = [p.ticker for p in out]
+    assert "PEND" in tickers
+    assert "DONE" not in tickers
+    p = next(x for x in out if x.ticker == "PEND")
+    assert p.verdict == "bearish"
+    assert p.event_price == 50.0
+    assert p.horizon == 5
+    assert p.source == "stock_analysis"
+    assert p.rationale == "why"
+
+
+def test_get_pending_verdicts_event_with_only_other_horizon_outcome_is_pending(db_session):
+    # An event with an h1 outcome but no h5 outcome is STILL pending at horizon 5
+    from marketpulse.evaluation.scoring import get_pending_verdicts
+
+    e = _ev(db_session, ticker="PARTIAL", subtype="bullish", days_ago=2, price=10.0)
+    _out(db_session, e, horizon=1, excess=0.05)
+    db_session.commit()
+
+    out = get_pending_verdicts(db_session, horizon=5, limit=20)
+    assert "PARTIAL" in [p.ticker for p in out]

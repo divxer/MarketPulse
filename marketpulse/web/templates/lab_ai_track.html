@@ -30,6 +30,7 @@
           <a href="/recaps" class="mp-btn mp-btn--ghost" style="margin-top:16px;">浏览历史复盘</a>
         {% endif %}
       </div>
+      {% include "partials/ai_track_pending_table.html" ignore missing %}
     </div>
     <aside class="mp-ai-track-rail">
       {% include "partials/ai_track_filter_card.html" ignore missing %}
@@ -42,6 +43,7 @@
       <div class="mp-ai-track-recent-wrap">
         {% include "partials/ai_track_recent_events_table.html" ignore missing %}
       </div>
+      {% include "partials/ai_track_pending_table.html" ignore missing %}
     </div>
     <aside class="mp-ai-track-rail">
       {% include "partials/ai_track_filter_card.html" ignore missing %}

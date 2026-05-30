@@ -234,3 +234,23 @@ def test_lab_fallback_preserves_other_filters(
     # Other filters carried through in the CTA href
     assert "ticker=AAPL" in r.text
     assert "verdict=bullish" in r.text
+
+
+def test_ai_track_shows_pending_verdicts(
+    client: TestClient, monkeypatch, db_session,
+):
+    """A fresh ai_analysis event with NO outcome at the selected horizon
+    should surface in the outcome-optional Pending Verdicts section."""
+    _login(client, monkeypatch)
+    e = EvaluationEvent(
+        event_type="ai_analysis", subtype="bearish", ticker="PENDTKR",
+        event_time=datetime.now(UTC) - timedelta(days=1),
+        event_price=50.0,
+        payload={"source": "stock_analysis", "rationale": "fresh", "prompt_version": "v3"},
+    )
+    db_session.add(e)
+    db_session.commit()
+    res = client.get("/lab/ai-track")
+    assert res.status_code == 200
+    assert "待结算" in res.text
+    assert "PENDTKR" in res.text
