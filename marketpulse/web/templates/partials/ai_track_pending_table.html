@@ -1,0 +1,34 @@
+<div class="mp-ai-track-pending-wrap">
+  <h3 class="mp-section-title">待结算 Verdicts <span class="muted">(尚无 {{ filters.horizon }}d 结果)</span></h3>
+  <table class="mp-table mp-ai-track-pending">
+    <thead>
+      <tr>
+        <th>时间</th>
+        <th>Ticker</th>
+        <th>Source</th>
+        <th>Verdict</th>
+        <th class="num">入场价</th>
+        <th>状态</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in pending %}
+        <tr>
+          <td class="mono">
+            <time data-utc="{{ p.event_time.isoformat() }}">{{ p.event_time.strftime('%Y-%m-%d %H:%M') }}</time>
+          </td>
+          <td><a href="/stock/{{ p.ticker }}" class="mp-ticker-link">{{ p.ticker }}</a></td>
+          <td><span class="mp-chip">{{ p.source }}</span></td>
+          <td>
+            <span class="mp-chip mp-chip--{% if p.verdict == 'bullish' %}up{% elif p.verdict == 'bearish' %}down{% else %}neutral{% endif %}">{{ p.verdict }}</span>
+          </td>
+          <td class="num mono tnum">${{ "{:.2f}".format(p.event_price) }}</td>
+          <td><span class="mp-chip mp-chip--pending">等待 {{ p.horizon }}d</span></td>
+        </tr>
+      {% endfor %}
+      {% if not pending %}
+        <tr><td colspan="6" class="muted" style="text-align:center; padding:32px;">暂无待结算 verdict</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+</div>

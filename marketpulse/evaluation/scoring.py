@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from marketpulse.db.models import EvaluationEvent, EvaluationOutcome
@@ -364,5 +364,81 @@ def get_recent_events_with_outcomes(
             forward_return=outcome.forward_return,
             excess_return=outcome.excess_return,
             hit=_is_hit(event.subtype, outcome.excess_return),
+        ))
+    return out
+
+
+@dataclass(frozen=True)
+class PendingVerdict:
+    event_id: int
+    event_time: datetime
+    ticker: str
+    verdict: str
+    source: str
+    rationale: str
+    event_price: float
+    horizon: int
+
+
+def get_pending_verdicts(
+    db: Session,
+    *,
+    horizon: int = 5,
+    ticker: str | None = None,
+    source: str | None = None,
+    strategy: str | None = None,
+    subtype: str | None = None,
+    since: date | None = None,
+    limit: int = 20,
+) -> list[PendingVerdict]:
+    """Recent ai_analysis verdicts that have NO outcome at this horizon yet.
+
+    Outcome-OPTIONAL (LEFT JOIN + IS NULL): surfaces fresh verdicts before the
+    daily outcome-computation job matures them. Does NOT affect hit-rate stats.
+    """
+    stmt = (
+        select(EvaluationEvent)
+        .outerjoin(
+            EvaluationOutcome,
+            and_(
+                EvaluationOutcome.event_id == EvaluationEvent.id,
+                EvaluationOutcome.horizon_trading_days == horizon,
+            ),
+        )
+        .where(EvaluationEvent.event_type == "ai_analysis")
+        .where(EvaluationOutcome.id.is_(None))
+    )
+    if subtype is not None:
+        stmt = stmt.where(EvaluationEvent.subtype == subtype)
+    if ticker is not None:
+        stmt = stmt.where(EvaluationEvent.ticker == ticker)
+    if source is not None:
+        stmt = stmt.where(
+            func.json_extract(EvaluationEvent.payload, "$.source") == source,
+        )
+    if strategy is not None:
+        stmt = stmt.where(
+            func.json_extract(EvaluationEvent.payload, "$.strategy") == strategy,
+        )
+    if since is not None:
+        stmt = stmt.where(
+            EvaluationEvent.event_time >= datetime.combine(
+                since, datetime.min.time(), tzinfo=UTC,
+            ),
+        )
+    stmt = stmt.order_by(EvaluationEvent.event_time.desc()).limit(limit)
+
+    out: list[PendingVerdict] = []
+    for event in db.execute(stmt).scalars().all():
+        payload = event.payload or {}
+        out.append(PendingVerdict(
+            event_id=event.id,
+            event_time=event.event_time,
+            ticker=event.ticker,
+            verdict=event.subtype,
+            source=payload.get("source", ""),
+            rationale=payload.get("rationale", ""),
+            event_price=event.event_price,
+            horizon=horizon,
         ))
     return out

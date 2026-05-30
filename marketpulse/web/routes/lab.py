@@ -87,6 +87,9 @@ def lab_ai_track(
     recent = scoring.get_recent_events_with_outcomes(
         db, ticker=ticker_u, subtype=verdict, limit=20, strategy=strategy, **common,
     )
+    pending = scoring.get_pending_verdicts(
+        db, ticker=ticker_u, subtype=verdict, limit=20, strategy=strategy, **common,
+    )
 
     best = next(
         (t for t in per_ticker if t.n_total >= 5),
@@ -158,6 +161,7 @@ def lab_ai_track(
         "trend": trend,
         "per_ticker": per_ticker,
         "recent": recent,
+        "pending": pending,
         "best": best,
         "best_strategy": best_strategy,
         "per_strategy": per_strategy,
