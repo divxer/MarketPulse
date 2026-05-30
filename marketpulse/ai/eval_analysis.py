@@ -82,9 +82,8 @@ def run_eval_analysis(
     """
     fresh = cache_hits = errors = 0
     cap_hit = False
-    processed = 0
     skipped = 0
-    for ticker in universe:
+    for processed, ticker in enumerate(universe):  # processed = count done so far
         if fresh >= max_calls:                    # cap counts FRESH calls only
             cap_hit = True
             skipped = len(universe) - processed
@@ -104,7 +103,6 @@ def run_eval_analysis(
             session.rollback()                    # clean partial state before next
             errors += 1
             log.warning("ai_eval_ticker_failed", ticker=ticker, error=str(exc))
-        processed += 1
     return EvalAnalysisSummary(
         run_date=run_date, universe_size=len(universe),
         analyzed_fresh=fresh, cache_hits=cache_hits, skipped_cap=skipped,
