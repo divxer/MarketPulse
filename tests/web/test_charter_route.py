@@ -27,13 +27,21 @@ def test_endpoint_requires_auth(client: TestClient):
     assert r.status_code == 401
 
 
-def test_endpoint_returns_200_with_no_backup_dir(client: TestClient, monkeypatch):
+def test_endpoint_returns_200_with_no_backup_dir(
+    client: TestClient, monkeypatch, db_url: str,
+):
     _login(client, monkeypatch)
+    # Isolate the manifest lookup to the tmp test-DB directory (which has no
+    # backups/ subdir), so the route doesn't resolve against the real
+    # repo-root ./backups/latest.json that may exist on a dev machine.
+    monkeypatch.setenv("DATABASE_URL", db_url)
+    from marketpulse.config import get_settings
+    get_settings.cache_clear()
     r = client.get("/lab/charter-metrics")
     assert r.status_code == 200
     body = r.json()
     backup = body["operational_floor"]["backup"]
-    # Fresh test DB has no /data/backups dir → status=missing
+    # Tmp DB dir has no backups/latest.json → status=missing
     assert backup["status"] == "missing"
     assert backup["is_stale"] is True
 
