@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from decimal import Decimal
 
 import pytest
 
@@ -739,3 +740,118 @@ def test_positions_loader_failure_degrades_only_positions(db_session, monkeypatc
     assert dashboard.critical_events.status == "ok"
     assert dashboard.order_lifecycles.status == "ok"
     assert dashboard.audit_timeline.status == "ok"
+
+
+def _closed(
+    db_session,
+    *,
+    realized_pnl,
+    closed_at,
+    ticker="AAPL",
+    strategy="general",
+    entry_price=Decimal("100"),
+    quantity=3,
+    entry_date=date(2026, 5, 20),
+):
+    """Seed one CLOSED PaperPosition (with its parent order) with controllable
+    entry_price / quantity / realized_pnl / closed_at."""
+    from marketpulse.db.models import PaperPosition
+
+    order = _paper_order(db_session, ticker=ticker, strategy=strategy, placed_at=closed_at)
+    pos = PaperPosition(
+        order_id=order.id,
+        entry_fill_id=1,
+        exit_fill_id=2,
+        strategy=strategy,
+        ticker=ticker,
+        quantity=quantity,
+        entry_price=entry_price,
+        entry_date=entry_date,
+        horizon_date=entry_date,
+        status="CLOSED",
+        opened_at=closed_at,
+        closed_at=closed_at,
+        exit_price=Decimal("110"),
+        realized_pnl=realized_pnl,
+    )
+    db_session.add(pos)
+    db_session.flush()
+    return pos
+
+
+def test_closed_trades_orders_and_summary(db_session):
+    from marketpulse.trading.query_models import _load_closed_trades_section
+
+    _closed(db_session, ticker="AAA", realized_pnl=Decimal("30"),
+            closed_at=datetime(2026, 6, 1, 21, 30, tzinfo=UTC), entry_date=date(2026, 5, 27))
+    _closed(db_session, ticker="BBB", realized_pnl=Decimal("-15"),
+            closed_at=datetime(2026, 6, 2, 21, 30, tzinfo=UTC), entry_date=date(2026, 5, 28))
+    _closed(db_session, ticker="CCC", realized_pnl=Decimal("60"),
+            closed_at=datetime(2026, 6, 3, 21, 30, tzinfo=UTC), entry_date=date(2026, 5, 29))
+    db_session.commit()
+
+    section = _load_closed_trades_section(db_session)
+    assert section.status == "ok"
+    ct = section.data
+    assert [r.ticker for r in ct.rows] == ["CCC", "BBB", "AAA"]
+    ccc = ct.rows[0]
+    assert ccc.exit_date == date(2026, 6, 3)
+    assert ccc.days_held == (date(2026, 6, 3) - date(2026, 5, 29)).days
+    assert ccc.return_pct == pytest.approx(60.0 / 300.0)
+    s = ct.summary
+    assert s.total_count == 3
+    assert s.realized_pnl_total == Decimal("75")
+    assert s.win_rate == 2 / 3
+    assert s.avg_return_pct == pytest.approx((0.1 - 0.05 + 0.2) / 3)
+    assert ct.count_label == "Showing 3 closed trades"
+
+
+def test_closed_trades_zero_cost_return_none(db_session):
+    from marketpulse.trading.query_models import _load_closed_trades_section
+    _closed(db_session, ticker="ZZZ", realized_pnl=Decimal("5"),
+            closed_at=datetime(2026, 6, 1, 21, 30, tzinfo=UTC), entry_price=Decimal("0"))
+    db_session.commit()
+    ct = _load_closed_trades_section(db_session).data
+    assert ct.rows[0].return_pct is None
+    assert ct.summary.avg_return_pct is None
+    assert ct.summary.win_rate == 1.0
+
+
+def test_closed_trades_winrate_excludes_unpriced(db_session):
+    from marketpulse.trading.query_models import _load_closed_trades_section
+    _closed(db_session, ticker="WIN1", realized_pnl=Decimal("10"),
+            closed_at=datetime(2026, 6, 1, 21, 30, tzinfo=UTC))
+    _closed(db_session, ticker="WIN2", realized_pnl=Decimal("20"),
+            closed_at=datetime(2026, 6, 2, 21, 30, tzinfo=UTC))
+    _closed(db_session, ticker="NONE", realized_pnl=None,
+            closed_at=datetime(2026, 6, 3, 21, 30, tzinfo=UTC))
+    db_session.commit()
+    ct = _load_closed_trades_section(db_session).data
+    assert ct.summary.total_count == 3
+    assert ct.summary.win_rate == 1.0
+    assert ct.summary.realized_pnl_total == Decimal("30")
+
+
+def test_closed_trades_empty(db_session):
+    from marketpulse.trading.query_models import _load_closed_trades_section
+    section = _load_closed_trades_section(db_session)
+    assert section.status == "ok"
+    ct = section.data
+    assert ct.rows == []
+    assert ct.summary.total_count == 0
+    assert ct.summary.win_rate is None
+    assert ct.summary.avg_return_pct is None
+    assert ct.count_label == "Showing 0 closed trades"
+    assert section.empty_message == "No closed trades yet"
+
+
+def test_closed_trades_cap_50(db_session):
+    from marketpulse.trading.query_models import _load_closed_trades_section
+    for i in range(55):
+        _closed(db_session, ticker=f"T{i:02d}", realized_pnl=Decimal("1"),
+                closed_at=datetime(2026, 6, 1, 0, i, tzinfo=UTC))
+    db_session.commit()
+    ct = _load_closed_trades_section(db_session).data
+    assert len(ct.rows) == 50
+    assert ct.summary.total_count == 55
+    assert ct.count_label == "Showing latest 50 of 55 closed trades"

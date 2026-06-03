@@ -7,7 +7,7 @@ paper tables and never changes execution semantics.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Literal
 
@@ -143,6 +143,125 @@ class AuditTimeline:
     rows: list[AuditTimelineRow]
     routine_hidden_count: int
     show_routine: bool = False
+
+
+@dataclass(frozen=True)
+class ClosedTradeRow:
+    exit_date: date | None
+    ticker: str
+    strategy: str
+    quantity: int
+    entry_price: Decimal
+    exit_price: Decimal | None
+    days_held: int | None
+    realized_pnl: Decimal | None
+    return_pct: float | None
+
+
+@dataclass(frozen=True)
+class ClosedTradesSummary:
+    total_count: int
+    realized_pnl_total: Decimal
+    win_rate: float | None
+    avg_return_pct: float | None
+
+
+@dataclass(frozen=True)
+class ClosedTrades:
+    summary: ClosedTradesSummary
+    rows: list[ClosedTradeRow]
+    count_label: str
+
+
+_CLOSED_TRADES_LIMIT = 50
+
+
+def _closed_trade_return_pct(
+    entry_price: Decimal | None,
+    quantity: int,
+    realized_pnl: Decimal | None,
+) -> float | None:
+    """Cost-basis return. None when realized_pnl/entry_price missing, quantity
+    is None/<=0, or cost <= 0."""
+    if (
+        realized_pnl is None
+        or entry_price is None
+        or quantity is None
+        or quantity <= 0
+    ):
+        return None
+    cost = entry_price * quantity
+    if cost <= 0:
+        return None
+    return float(realized_pnl) / float(cost)
+
+
+def _load_closed_trades_section(db: Session) -> SectionResult[ClosedTrades]:
+    """All CLOSED paper positions, newest exit first. Summary computed over the
+    full closed set; table rows capped at _CLOSED_TRADES_LIMIT. DB-only."""
+    positions = list(
+        db.execute(
+            select(PaperPosition)
+            .where(PaperPosition.status == "CLOSED")
+            .order_by(
+                PaperPosition.closed_at.is_(None),
+                desc(PaperPosition.closed_at),
+                desc(PaperPosition.id),
+            ),
+        ).scalars().all(),
+    )
+
+    rows: list[ClosedTradeRow] = []
+    pnl_total = Decimal("0")
+    priced = 0
+    wins = 0
+    returns: list[float] = []
+    for p in positions:
+        exit_date = p.closed_at.date() if p.closed_at is not None else None
+        days_held = (
+            (exit_date - p.entry_date).days
+            if exit_date is not None and p.entry_date is not None
+            else None
+        )
+        ret = _closed_trade_return_pct(p.entry_price, p.quantity, p.realized_pnl)
+        if p.realized_pnl is not None:
+            priced += 1
+            pnl_total += p.realized_pnl
+            if p.realized_pnl > 0:
+                wins += 1
+        if ret is not None:
+            returns.append(ret)
+        rows.append(
+            ClosedTradeRow(
+                exit_date=exit_date,
+                ticker=p.ticker,
+                strategy=p.strategy,
+                quantity=p.quantity,
+                entry_price=p.entry_price,
+                exit_price=p.exit_price,
+                days_held=days_held,
+                realized_pnl=p.realized_pnl,
+                return_pct=ret,
+            ),
+        )
+
+    total = len(positions)
+    summary = ClosedTradesSummary(
+        total_count=total,
+        realized_pnl_total=pnl_total,
+        win_rate=(wins / priced) if priced > 0 else None,
+        avg_return_pct=(sum(returns) / len(returns)) if returns else None,
+    )
+    if total > _CLOSED_TRADES_LIMIT:
+        count_label = f"Showing latest {_CLOSED_TRADES_LIMIT} of {total} closed trades"
+    else:
+        count_label = f"Showing {total} closed trades"
+    closed = ClosedTrades(
+        summary=summary,
+        rows=rows[:_CLOSED_TRADES_LIMIT],
+        count_label=count_label,
+    )
+    return section_ok(closed, "No closed trades yet")
 
 
 @dataclass(frozen=True)
