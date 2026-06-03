@@ -50,21 +50,24 @@ satisfies the zero-network architecture guard.
 ```python
 @dataclass(frozen=True)
 class ClosedTradeRow:
-    exit_date: date            # closed_at.date()
+    exit_date: date | None     # closed_at.date() (None if closed_at missing)
     ticker: str
     strategy: str
-    quantity: int
+    quantity: int              # matches PaperPosition.quantity (Integer, not null);
+                               # no fractional shares — int is correct
     entry_price: Decimal
     exit_price: Decimal | None     # closed positions normally have one
-    days_held: int                 # (exit_date - entry_date).days, calendar days
+    days_held: int | None          # (exit_date - entry_date).days, calendar days;
+                                   # None if either date missing → render "—"
     realized_pnl: Decimal | None
     return_pct: float | None       # realized_pnl / (entry_price*quantity); see rules
 
 @dataclass(frozen=True)
 class ClosedTradesSummary:
     total_count: int               # ALL closed (not just the 50 shown)
-    realized_pnl_total: Decimal    # Σ realized_pnl over all closed
-    win_rate: float | None         # wins / total_count (None if total_count == 0)
+    realized_pnl_total: Decimal    # Σ realized_pnl over all closed (None → 0)
+    win_rate: float | None         # wins / count(realized_pnl is not None);
+                                   # None when no priced trades — see rules
     avg_return_pct: float | None   # mean of per-trade return_pct, skipping None
 
 @dataclass(frozen=True)
@@ -98,10 +101,15 @@ def _load_closed_trades_section(db: Session) -> SectionResult[ClosedTrades]:
 - **return_pct** = `float(realized_pnl) / float(entry_price * quantity)`.
   - **If `entry_price * quantity <= 0` or `entry_price`/`realized_pnl` is None →
     `return_pct = None`.** Such trades are **skipped** in the Avg Return mean.
-- **days_held** = `(exit_date - entry_date).days` (calendar days). If either date
-  is missing, `days_held = 0` (defensive; closed positions have both).
-- **win_rate** = `count(realized_pnl > 0) / total_count`; `None` when
-  `total_count == 0`.
+- **days_held** = `(exit_date - entry_date).days` (calendar days). **If either
+  date is missing → `days_held = None`** (rendered `—`); do NOT default to 0
+  (0 would read as "bought & sold same day").
+- **win_rate** = `count(realized_pnl > 0) / count(realized_pnl is not None)`.
+  The denominator is the **priced** closed trades only — trades with
+  `realized_pnl is None` are excluded entirely (missing data must not drag down
+  the win rate). `None` when there are no priced closed trades.
+  - Note: `total_count` (for the count line "N closed trades") still counts ALL
+    closed trades; only `win_rate`'s denominator is the priced subset.
 - **avg_return_pct** = mean of the non-None `return_pct` values; `None` when there
   are no valid values.
 - **realized_pnl_total** = `Σ realized_pnl` (treat None as 0 for the sum).
@@ -161,6 +169,10 @@ dashboard test module — match where `_load_positions_section` is tested):
 2. `test_closed_trades_zero_cost_return_none`: seed a closed position with
    `entry_price=0` (or qty 0) → its `return_pct is None` and it's excluded from
    `avg_return_pct`.
+2b. `test_closed_trades_winrate_excludes_unpriced`: among closed trades, seed one
+   with `realized_pnl=None` → it is **excluded from the win_rate denominator**
+   (e.g. 2 winners + 1 None-pnl → `win_rate == 1.0`, not `2/3`), but still
+   counted in `total_count` and the count line.
 3. `test_closed_trades_empty`: no closed positions → `section_ok` with empty rows
    and empty message; summary `total_count=0`, `win_rate is None`,
    `avg_return_pct is None`.
