@@ -226,8 +226,14 @@ def _closed_trade_return_pct(
     quantity: int,
     realized_pnl: Decimal | None,
 ) -> float | None:
-    """Cost-basis return. None when realized_pnl/entry_price missing or cost <= 0."""
-    if realized_pnl is None or entry_price is None:
+    """Cost-basis return. None when realized_pnl/entry_price missing, quantity
+    is None/<=0, or cost <= 0."""
+    if (
+        realized_pnl is None
+        or entry_price is None
+        or quantity is None
+        or quantity <= 0
+    ):
         return None
     cost = entry_price * quantity
     if cost <= 0:
@@ -242,7 +248,13 @@ def _load_closed_trades_section(db: Session) -> SectionResult[ClosedTrades]:
         db.execute(
             select(PaperPosition)
             .where(PaperPosition.status == "CLOSED")
-            .order_by(desc(PaperPosition.closed_at), desc(PaperPosition.id)),
+            # Keep ALL closed (total_count stays accurate), but make ordering
+            # deterministic + DB-portable: non-null closed_at first, NULLs last.
+            .order_by(
+                PaperPosition.closed_at.is_(None),
+                desc(PaperPosition.closed_at),
+                desc(PaperPosition.id),
+            ),
         ).scalars().all(),
     )
 
@@ -463,8 +475,12 @@ def test_paper_trading_renders_closed_trades(client, monkeypatch, db_url):
     assert "Showing 1 closed trades" in body
 
 
-def test_paper_trading_closed_trades_empty_state(client, monkeypatch):
+def test_paper_trading_closed_trades_empty_state(client, monkeypatch, db_url):
     _login(client, monkeypatch)
+    # Isolate to the fresh tmp DB so other tests' env can't pollute this one.
+    monkeypatch.setenv("DATABASE_URL", db_url)
+    from marketpulse.config import get_settings
+    get_settings.cache_clear()
     r = client.get("/lab/paper-trading")
     assert r.status_code == 200
     assert "Closed Trades" in r.text
@@ -500,7 +516,7 @@ In `marketpulse/web/templates/lab_paper_trading.html`, add **before the closing 
             <article class="mp-card mp-paper-kpi">
               <div class="mp-card__body">
                 <div class="mp-card__eyebrow">Realized P&amp;L</div>
-                <div class="mp-paper-kpi__value">{{ ct.data.summary.realized_pnl_total }}</div>
+                <div class="mp-paper-kpi__value {% if ct.data.summary.realized_pnl_total > 0 %}up{% elif ct.data.summary.realized_pnl_total < 0 %}down{% endif %}">{{ ct.data.summary.realized_pnl_total }}</div>
               </div>
             </article>
             <article class="mp-card mp-paper-kpi">
@@ -542,8 +558,8 @@ In `marketpulse/web/templates/lab_paper_trading.html`, add **before the closing 
                   <td class="num">{{ row.entry_price }}</td>
                   <td class="num">{% if row.exit_price is not none %}{{ row.exit_price }}{% else %}—{% endif %}</td>
                   <td class="num">{% if row.days_held is not none %}{{ row.days_held }}{% else %}—{% endif %}</td>
-                  <td class="num">{% if row.realized_pnl is not none %}{{ row.realized_pnl }}{% else %}—{% endif %}</td>
-                  <td class="num">{% if row.return_pct is not none %}{{ "%+.1f%%"|format(row.return_pct * 100) }}{% else %}—{% endif %}</td>
+                  <td class="num {% if row.realized_pnl is not none and row.realized_pnl > 0 %}up{% elif row.realized_pnl is not none and row.realized_pnl < 0 %}down{% endif %}">{% if row.realized_pnl is not none %}{{ row.realized_pnl }}{% else %}—{% endif %}</td>
+                  <td class="num {% if row.return_pct is not none and row.return_pct > 0 %}up{% elif row.return_pct is not none and row.return_pct < 0 %}down{% endif %}">{% if row.return_pct is not none %}{{ "%+.1f%%"|format(row.return_pct * 100) }}{% else %}—{% endif %}</td>
                 </tr>
               {% endfor %}
               </tbody>
