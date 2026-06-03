@@ -275,6 +275,7 @@ class PaperTradingDashboard:
     positions: SectionResult[list[PositionRow]]
     order_lifecycles: SectionResult[list[OrderLifecycleRow]]
     audit_timeline: SectionResult[AuditTimeline]
+    closed_trades: SectionResult[ClosedTrades]
 
 
 _COW_BOUNDARY_EVENTS = (
@@ -456,6 +457,7 @@ def _shared_fetch_error_dashboard(
         degraded_reason,
     )
     audit_timeline = section_error("Unable to load Audit Timeline", degraded_reason)
+    closed_trades = section_error("Unable to load Closed Trades", degraded_reason)
     return PaperTradingDashboard(
         generated_at=generated_at,
         generated_at_label=generated_at_label,
@@ -466,6 +468,7 @@ def _shared_fetch_error_dashboard(
         positions=positions,
         order_lifecycles=order_lifecycles,
         audit_timeline=audit_timeline,
+        closed_trades=closed_trades,
     )
 
 
@@ -946,6 +949,10 @@ def load_paper_trading_dashboard(
         "Unable to load Audit Timeline",
         lambda: _load_audit_timeline_section(db, window, projection),
     )
+    closed_trades = _safe_section(
+        "Unable to load Closed Trades",
+        lambda: _load_closed_trades_section(db),
+    )
     system_status = _compute_system_status(
         health=health,
         critical_events=critical_events,
@@ -963,4 +970,5 @@ def load_paper_trading_dashboard(
         positions=positions,
         order_lifecycles=order_lifecycles,
         audit_timeline=audit_timeline,
+        closed_trades=closed_trades,
     )

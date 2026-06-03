@@ -855,3 +855,28 @@ def test_closed_trades_cap_50(db_session):
     assert len(ct.rows) == 50
     assert ct.summary.total_count == 55
     assert ct.count_label == "Showing latest 50 of 55 closed trades"
+
+
+def test_dashboard_exposes_closed_trades(db_session):
+    from marketpulse.trading.query_models import load_paper_trading_dashboard
+
+    _closed(db_session, ticker="AAA", realized_pnl=Decimal("30"),
+            closed_at=datetime(2026, 6, 1, 21, 30, tzinfo=UTC))
+    db_session.commit()
+
+    dash = load_paper_trading_dashboard(db_session)
+    assert dash.closed_trades.status == "ok"
+    assert dash.closed_trades.data.summary.total_count == 1
+    assert dash.closed_trades.data.rows[0].ticker == "AAA"
+
+
+def test_dashboard_closed_trades_degrades(db_session, monkeypatch):
+    import marketpulse.trading.query_models as qm
+
+    def boom(_db):
+        raise RuntimeError("db blew up")
+
+    monkeypatch.setattr(qm, "_load_closed_trades_section", boom)
+    dash = qm.load_paper_trading_dashboard(db_session)
+    assert dash.closed_trades.status == "error"
+    assert dash.closed_trades.error_title == "Unable to load Closed Trades"
