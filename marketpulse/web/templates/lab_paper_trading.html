@@ -169,6 +169,74 @@
       </div>
     </article>
   </section>
+  <section class="mp-paper-closed">
+    {% set ct = dashboard.closed_trades %}
+    <article class="mp-card">
+      <div class="mp-card__head"><div class="mp-card__title">Closed Trades</div></div>
+      <div class="mp-card__body">
+        {% if ct.status == "error" %}
+          <div class="mp-paper-degraded">
+            <strong>{{ ct.error_title }}</strong>
+            {% if ct.degraded_reason %}
+              <div class="mp-paper-muted">{{ ct.degraded_reason }}</div>
+            {% endif %}
+          </div>
+        {% elif ct.data and ct.data.rows %}
+          <section class="mp-paper-kpis" aria-label="Closed Trades Summary">
+            <article class="mp-card mp-paper-kpi">
+              <div class="mp-card__body">
+                <div class="mp-card__eyebrow">Realized P&amp;L</div>
+                <div class="mp-paper-kpi__value {% if ct.data.summary.realized_pnl_total > 0 %}up{% elif ct.data.summary.realized_pnl_total < 0 %}down{% endif %}">{{ ct.data.summary.realized_pnl_total }}</div>
+              </div>
+            </article>
+            <article class="mp-card mp-paper-kpi">
+              <div class="mp-card__body">
+                <div class="mp-card__eyebrow">Closed Trades</div>
+                <div class="mp-paper-kpi__value">{{ ct.data.summary.total_count }}</div>
+              </div>
+            </article>
+            <article class="mp-card mp-paper-kpi">
+              <div class="mp-card__body">
+                <div class="mp-card__eyebrow">Win Rate</div>
+                <div class="mp-paper-kpi__value">{% if ct.data.summary.win_rate is not none %}{{ "%.0f%%"|format(ct.data.summary.win_rate * 100) }}{% else %}—{% endif %}</div>
+              </div>
+            </article>
+            <article class="mp-card mp-paper-kpi">
+              <div class="mp-card__body">
+                <div class="mp-card__eyebrow">Avg Return</div>
+                <div class="mp-paper-kpi__value">{% if ct.data.summary.avg_return_pct is not none %}{{ "%+.1f%%"|format(ct.data.summary.avg_return_pct * 100) }}{% else %}—{% endif %}</div>
+              </div>
+            </article>
+          </section>
+          <div class="mp-paper-muted">{{ ct.data.count_label }}</div>
+          <div class="mp-paper-table-wrap">
+            <table class="mp-table mp-table--paper">
+              <thead>
+                <tr><th>Exit Date</th><th>Ticker</th><th>Strategy</th><th class="num">Qty</th><th class="num">Entry</th><th class="num">Exit</th><th class="num">Days Held</th><th class="num">P&amp;L</th><th class="num">Return</th></tr>
+              </thead>
+              <tbody>
+              {% for row in ct.data.rows %}
+                <tr>
+                  <td>{{ row.exit_date if row.exit_date is not none else "—" }}</td>
+                  <td><a href="/stock/{{ row.ticker }}" class="mp-ticker-link">{{ row.ticker }}</a></td>
+                  <td>{{ row.strategy }}</td>
+                  <td class="num">{{ row.quantity }}</td>
+                  <td class="num">{{ row.entry_price }}</td>
+                  <td class="num">{% if row.exit_price is not none %}{{ row.exit_price }}{% else %}—{% endif %}</td>
+                  <td class="num">{% if row.days_held is not none %}{{ row.days_held }}{% else %}—{% endif %}</td>
+                  <td class="num {% if row.realized_pnl is not none and row.realized_pnl > 0 %}up{% elif row.realized_pnl is not none and row.realized_pnl < 0 %}down{% endif %}">{% if row.realized_pnl is not none %}{{ row.realized_pnl }}{% else %}—{% endif %}</td>
+                  <td class="num {% if row.return_pct is not none and row.return_pct > 0 %}up{% elif row.return_pct is not none and row.return_pct < 0 %}down{% endif %}">{% if row.return_pct is not none %}{{ "%+.1f%%"|format(row.return_pct * 100) }}{% else %}—{% endif %}</td>
+                </tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% else %}
+          <div class="mp-paper-empty">{{ ct.empty_message }}</div>
+        {% endif %}
+      </div>
+    </article>
+  </section>
 </section>
 
 <script>

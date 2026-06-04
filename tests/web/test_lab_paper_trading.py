@@ -161,6 +161,19 @@ def test_paper_trading_renders_zero_pnl_values(client, monkeypatch):
             qm.AuditTimeline(rows=[], routine_hidden_count=0),
             "No operational events in current cycle",
         ),
+        closed_trades=qm.section_ok(
+            qm.ClosedTrades(
+                summary=qm.ClosedTradesSummary(
+                    total_count=0,
+                    realized_pnl_total=Decimal("0.000000"),
+                    win_rate=None,
+                    avg_return_pct=None,
+                ),
+                rows=[],
+                count_label="Showing 0 closed trades",
+            ),
+            "No closed trades yet",
+        ),
     )
     monkeypatch.setattr(
         qm,
@@ -195,3 +208,85 @@ def test_paper_trading_css_reserves_stable_tab_width():
     assert "scrollbar-gutter: stable;" in text
     assert ".mp-paper-tab-panel" in text
     assert "min-width: 0;" in text
+
+
+def test_paper_trading_renders_closed_trades(client, monkeypatch, db_url):
+    from datetime import UTC, date, datetime
+    from decimal import Decimal
+
+    _login(client, monkeypatch)
+    monkeypatch.setenv("DATABASE_URL", db_url)
+    from marketpulse.config import get_settings
+
+    get_settings.cache_clear()
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from marketpulse.db.models import PaperOrder, PaperPosition
+
+    engine = create_engine(db_url)
+    with Session(engine) as s:
+        order = PaperOrder(
+            idempotency_key="ct-key-1",
+            allocation_run_id="run-1",
+            strategy="general",
+            ticker="ZQK",
+            quantity=3,
+            event_time=datetime(2026, 6, 2, 21, 30, tzinfo=UTC),
+            allocation_date=date(2026, 5, 28),
+            horizon_date=date(2026, 6, 2),
+            placed_at=datetime(2026, 6, 2, 21, 30, tzinfo=UTC),
+            filled_at=datetime(2026, 6, 2, 21, 30, tzinfo=UTC),
+            event_price=Decimal("100"),
+            status="ENTRY_FILLED",
+            strategy_version="v1",
+            allocator_version="v1",
+            execution_engine_version="v1",
+            weight=1.0,
+            contribution_multiplier=1.0,
+            effective_corr_window=60,
+            rewarded_for_negative_corr=False,
+            would_change_rank=False,
+            size_clamped_by_override=False,
+        )
+        s.add(order)
+        s.flush()
+        s.add(
+            PaperPosition(
+                order_id=order.id,
+                entry_fill_id=1,
+                exit_fill_id=2,
+                strategy="general",
+                ticker="ZQK",
+                quantity=3,
+                entry_price=Decimal("100"),
+                entry_date=date(2026, 5, 28),
+                horizon_date=date(2026, 6, 2),
+                status="CLOSED",
+                opened_at=datetime(2026, 6, 2, 21, 30, tzinfo=UTC),
+                closed_at=datetime(2026, 6, 2, 21, 30, tzinfo=UTC),
+                exit_price=Decimal("110"),
+                realized_pnl=Decimal("30"),
+            )
+        )
+        s.commit()
+
+    r = client.get("/lab/paper-trading")
+    assert r.status_code == 200
+    body = r.text
+    assert "Closed Trades" in body
+    assert "ZQK" in body
+    assert "Showing 1 closed trades" in body
+
+
+def test_paper_trading_closed_trades_empty_state(client, monkeypatch, db_url):
+    _login(client, monkeypatch)
+    monkeypatch.setenv("DATABASE_URL", db_url)
+    from marketpulse.config import get_settings
+
+    get_settings.cache_clear()
+    r = client.get("/lab/paper-trading")
+    assert r.status_code == 200
+    assert "Closed Trades" in r.text
+    assert "No closed trades yet" in r.text
