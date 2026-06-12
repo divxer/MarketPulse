@@ -147,3 +147,203 @@ def test_one_leg_empty_skipped_and_both_empty_raises():
     assert r.verdict.overall == r.verdict.fills  # gates on remaining leg only
     with pytest.raises(ValueError):
         run_pricing_audit([], [], bars)
+
+
+# --- Task 2: DB loaders ---
+
+
+def _seed_position_chain(
+    session,
+    *,
+    ticker,
+    qty,
+    opened,
+    price="100",
+    closed=None,
+):
+    """PaperOrder + PaperPosition + PaperFill chain (test_query_models shape)."""
+    from datetime import timedelta
+    from decimal import Decimal
+
+    from marketpulse.db.models import PaperFill, PaperOrder, PaperPosition
+
+    order = PaperOrder(
+        idempotency_key=f"{ticker}-{opened.isoformat()}",
+        allocation_run_id=f"test-run-{opened.date().isoformat()}",
+        strategy="general",
+        ticker=ticker,
+        quantity=qty,
+        event_time=opened,
+        allocation_date=opened.date(),
+        horizon_date=opened.date() + timedelta(days=7),
+        placed_at=opened,
+        filled_at=opened,
+        cancelled_at=None,
+        cancel_reason=None,
+        event_price=Decimal(price),
+        horizon_price=None,
+        status="ENTRY_FILLED",
+        strategy_version="v1",
+        allocator_version="v1",
+        execution_engine_version="v1",
+        weight=Decimal("1"),
+    )
+    session.add(order)
+    session.flush()
+    pos = PaperPosition(
+        order_id=order.id,
+        entry_fill_id=None, exit_fill_id=None,
+        strategy="general", ticker=ticker, quantity=qty,
+        entry_price=Decimal(price), entry_date=opened.date(),
+        horizon_date=opened.date() + timedelta(days=7),
+        status="OPEN",
+        opened_at=opened, closed_at=None,
+        exit_price=None,
+        realized_pnl=None,
+    )
+    session.add(pos)
+    session.flush()
+    entry_fill = PaperFill(
+        order_id=order.id, position_id=pos.id, side="ENTRY",
+        price=Decimal(price), quantity=qty, filled_at=opened,
+        cash_delta=-Decimal(price) * qty, realized_pnl=None,
+    )
+    session.add(entry_fill)
+    session.flush()
+    pos.entry_fill_id = entry_fill.id
+    if closed is not None:
+        exit_fill = PaperFill(
+            order_id=order.id, position_id=pos.id, side="EXIT",
+            price=Decimal("105"), quantity=qty, filled_at=closed,
+            cash_delta=Decimal("105") * qty,
+            realized_pnl=Decimal("5") * qty,
+        )
+        session.add(exit_fill)
+        session.flush()
+        pos.exit_fill_id = exit_fill.id
+        pos.status = "CLOSED"
+        pos.closed_at = closed
+        pos.exit_price = Decimal("105")
+        pos.realized_pnl = Decimal("5") * qty
+    session.flush()
+    return pos
+
+
+def _seed_nav_snapshot(session, *, trading_date, cash, mtm, nav, spy_close):
+    from datetime import UTC, datetime
+    from decimal import Decimal
+
+    from marketpulse.db.models import PaperNavSnapshot
+
+    now = datetime.now(UTC)
+    session.add(PaperNavSnapshot(
+        trading_date=trading_date,
+        cash_balance=Decimal(cash),
+        holdings_mtm=Decimal(mtm),
+        portfolio_nav=Decimal(nav),
+        anchor_portfolio_nav=Decimal(nav),
+        portfolio_index=Decimal("1"),
+        spy_close=Decimal(spy_close) if spy_close is not None else None,
+        anchor_spy_close=None,
+        spy_index=None,
+        excess_return=None,
+        trading_days_observed=1,
+        coverage_ratio=Decimal("1"),
+        is_sufficient=True,
+        created_at=now,
+        updated_at=now,
+    ))
+    session.flush()
+
+
+def test_load_fills_joins_ticker_and_ny_trading_date(db_session):
+    from datetime import UTC, datetime
+
+    from marketpulse.evaluation.pricing_audit import load_fills
+
+    # 2026-06-09 01:00 UTC == 2026-06-08 21:00 New York -> NY date 06-08.
+    opened = datetime(2026, 6, 9, 1, 0, tzinfo=UTC)
+    _seed_position_chain(
+        db_session, ticker="AAPL", qty=5, opened=opened, price="100.10",
+    )
+    db_session.commit()
+
+    fills = load_fills(db_session)
+
+    assert len(fills) == 1
+    f = fills[0]
+    assert f.ticker == "AAPL"          # joined from PaperPosition
+    assert f.side == "ENTRY"
+    assert f.quantity == 5
+    assert isinstance(f.price, float)
+    assert f.price == pytest.approx(100.10)
+    assert f.trading_date == date(2026, 6, 8)  # UTC -> NY conversion
+
+
+def test_load_fills_includes_exit_fills(db_session):
+    from datetime import UTC, datetime
+
+    from marketpulse.evaluation.pricing_audit import load_fills
+
+    opened = datetime(2026, 6, 8, 20, 0, tzinfo=UTC)   # NY 16:00 06-08
+    closed = datetime(2026, 6, 10, 20, 0, tzinfo=UTC)  # NY 16:00 06-10
+    _seed_position_chain(
+        db_session, ticker="MSFT", qty=3, opened=opened, closed=closed,
+    )
+    db_session.commit()
+
+    fills = load_fills(db_session)
+
+    assert [f.side for f in fills] == ["ENTRY", "EXIT"]
+    assert {f.ticker for f in fills} == {"MSFT"}
+    assert fills[1].trading_date == date(2026, 6, 10)
+    assert fills[1].price == pytest.approx(105.0)
+
+
+def test_load_nav_days_positions_as_of_and_floats(db_session):
+    from datetime import UTC, datetime
+
+    from marketpulse.evaluation.pricing_audit import load_nav_days
+
+    # AAPL opened 06-08; MSFT opened 06-10 -> not in 06-09 as-of set.
+    _seed_position_chain(
+        db_session, ticker="AAPL", qty=5,
+        opened=datetime(2026, 6, 8, 14, 0, tzinfo=UTC),
+    )
+    _seed_position_chain(
+        db_session, ticker="MSFT", qty=3,
+        opened=datetime(2026, 6, 10, 14, 0, tzinfo=UTC),
+    )
+    _seed_nav_snapshot(
+        db_session, trading_date=date(2026, 6, 9),
+        cash="500", mtm="500.5", nav="1000.5", spy_close="600.25",
+    )
+    _seed_nav_snapshot(
+        db_session, trading_date=date(2026, 6, 10),
+        cash="200", mtm="800", nav="1000", spy_close=None,
+    )
+    db_session.commit()
+
+    nav_days = load_nav_days(db_session)
+
+    assert [nd.trading_date for nd in nav_days] == [
+        date(2026, 6, 9), date(2026, 6, 10),
+    ]
+    d1, d2 = nav_days
+    assert isinstance(d1.cash_balance, float)
+    assert d1.cash_balance == pytest.approx(500.0)
+    assert d1.holdings_mtm == pytest.approx(500.5)
+    assert d1.portfolio_nav == pytest.approx(1000.5)
+    assert d1.spy_close == pytest.approx(600.25)
+    assert {p.ticker for p in d1.positions} == {"AAPL"}  # MSFT not yet open
+    assert all(isinstance(p.quantity, float) for p in d1.positions)
+    assert d2.spy_close is None
+    assert {p.ticker for p in d2.positions} == {"AAPL", "MSFT"}
+    assert dict((p.ticker, p.quantity) for p in d2.positions)["MSFT"] == pytest.approx(3.0)
+
+
+def test_loaders_empty_db(db_session):
+    from marketpulse.evaluation.pricing_audit import load_fills, load_nav_days
+
+    assert load_fills(db_session) == []
+    assert load_nav_days(db_session) == []

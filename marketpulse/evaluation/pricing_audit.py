@@ -339,3 +339,59 @@ def run_pricing_audit(
         adjustment_basis_analysis=tuple(adj),
         verdict=Verdict(fills=fills_verdict, nav=nav_verdict, overall=overall),
     )
+
+
+# --- DB loaders (thin; local imports per repo style) ---
+
+
+def load_fills(db) -> list[FillInput]:
+    """All paper fills with ticker joined via position; NY trading date."""
+    from sqlalchemy import select
+
+    from marketpulse.db.models import PaperFill, PaperPosition
+    from marketpulse.trading.calendar import NY
+
+    rows = db.execute(
+        select(PaperFill, PaperPosition.ticker)
+        .join(PaperPosition, PaperPosition.id == PaperFill.position_id)
+        .order_by(PaperFill.id),
+    ).all()
+    out = []
+    for fill, ticker in rows:
+        filled_at = fill.filled_at
+        if filled_at.tzinfo is None:
+            from datetime import UTC
+            filled_at = filled_at.replace(tzinfo=UTC)
+        out.append(FillInput(
+            fill_id=fill.id, ticker=ticker, side=fill.side,
+            quantity=fill.quantity, price=float(fill.price),
+            trading_date=filled_at.astimezone(NY).date(),
+        ))
+    return out
+
+
+def load_nav_days(db) -> list[NavDayInput]:
+    """One NavDayInput per recorded snapshot, positions as-of that date."""
+    from sqlalchemy import select
+
+    from marketpulse.db.models import PaperNavSnapshot
+    from marketpulse.portfolio.snapshot_runner import _read_open_positions
+
+    snaps = db.scalars(
+        select(PaperNavSnapshot).order_by(PaperNavSnapshot.trading_date),
+    ).all()
+    out = []
+    for s in snaps:
+        positions = tuple(
+            PositionInput(ticker=p.ticker, quantity=float(p.quantity))
+            for p in _read_open_positions(db, s.trading_date)
+        )
+        out.append(NavDayInput(
+            trading_date=s.trading_date,
+            cash_balance=float(s.cash_balance),
+            holdings_mtm=float(s.holdings_mtm),
+            portfolio_nav=float(s.portfolio_nav),
+            spy_close=float(s.spy_close) if s.spy_close is not None else None,
+            positions=positions,
+        ))
+    return out
