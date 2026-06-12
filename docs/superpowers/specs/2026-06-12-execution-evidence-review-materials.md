@@ -26,7 +26,7 @@ Tencent            AMSC 2026-05-28 close = 51.33   (independent vendor)
 
 Both vendors NOW agree. The fill price matches NEITHER. This is not vendor disagreement —
 it is **vendor revision over time**: yfinance's AMSC 2026-05-28 close changed from 48.27 to
-51.33 (−6%) at some point after the fill froze the then-current value. The paper ledger holds
+51.33 — a ~6% upward revision — at some point after the fill froze the then-current value. The paper ledger holds
 an entry price no vendor currently endorses; that position's P&L rests on it.
 
 This is the first production hit of the previously-theorized provenance gap
@@ -45,7 +45,8 @@ Provenance (emerging) → **Revision Tracking (first observed in production toda
 bars for AMSC — a market-suffix resolution defect in the client, not missing listings.
 Consequence: 7 of 10 NAV audit days were **unverifiable** (positions in those tickers had no
 historical Tencent bars → day kept recorded value → drift 0.000 by construction, NOT verified
-clean). Effective verified days: 3. Fix tracked as a standalone task (chip
+clean). **These days were effectively excluded from verification coverage — a 0.000 drift on
+them is absence of measurement, not evidence of agreement.** Effective verified days: 3. Fix tracked as a standalone task (chip
 "Fix TencentClient 1-bar history for some tickers"); the audit should be re-run after the fix.
 
 ## Working Hypothesis — NAV drift may be dominated by the AMSC revision cluster
@@ -55,7 +56,8 @@ high-volatility window, and recorded NAV snapshots froze MTM values from fetch-t
 bars that may since have been revised (same mechanism as the Strong Finding). Time-correlation
 only; not yet decomposed per-ticker per-day. Status: **hypothesis, not established** —
 alternative explanations (genuine vendor divergence on those dates, other tickers'
-contributions) are not excluded. Decomposition belongs to the post-fix re-run.
+contributions) are not excluded. **Confidence: low-to-moderate** — the basis is time
+correlation, not attribution decomposition. Decomposition belongs to the post-fix re-run.
 
 Supporting context: adjustment_basis_analysis shows no systematic qfq-vs-auto-adjust pattern —
 all non-AMSC tickers have small (≤20 bps) signed offsets with scattered signs. The originally
@@ -69,6 +71,23 @@ feared adjustment-basis hazard did NOT materialize in this window.
   (fixed once, gone), revision risk is systemic — today AMSC, tomorrow possibly SPY/QBTS/TQQQ.
 - Provenance fields on the price layer (`source_revision` / `correction_version`) when the
   Data Freshness & Provenance Layer next evolves — design issue, not a current work item.
+
+## Open Question — Ledger Immutability vs Historical Revisions
+
+Today exposed a structural tension that the revision-tracking idea alone does not resolve:
+**the paper ledger is immutable by design, but vendor prices revise over time.**
+
+> How should historical price revisions interact with the paper ledger's immutability
+> principle? If a fill was executed using information available at time T, should later
+> vendor revisions retroactively change the evaluation baseline, or merely be recorded as
+> provenance events?
+
+Concretely, for fill #5: the 48.27 entry was the best information available at execution
+time — arguably the "honest" fill under point-in-time semantics; 51.33 is the best current
+estimate of what that close actually was. The north-star, hit-rate outcomes, and any future
+broker reconciliation may each want a different answer. **This question does not need an
+answer today** — it is recorded so the eventual Price Provenance Layer design starts here
+instead of rediscovering the tension.
 
 ## What this does NOT change
 
