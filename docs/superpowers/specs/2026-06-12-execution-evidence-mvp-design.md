@@ -36,8 +36,9 @@ Two sub-questions, two legs:
 | NAV | mean \|drift\| | ≤ 0.10% |
 | NAV | max \|drift\| | ≤ 0.50% |
 
-Output carries `verdict: {fills, nav, overall}` (overall = PASS iff both legs PASS) and echoes
-the thresholds — the JSON is its own pre-registration proof. Fills thresholds are looser than
+Output carries `verdict: {fills, nav, overall}`. **Overall semantics (review fix, locked):
+PASS if every EXECUTED leg is PASS; FAIL if any executed leg is FAIL; SKIPPED only when both
+legs are SKIPPED.** The output echoes the thresholds — the JSON is its own pre-registration proof. Fills thresholds are looser than
 close-vs-close vendor noise on purpose: the legs compare different things (see leg semantics).
 **No post-hoc reinterpretation: a FAIL is a FAIL and becomes a finding to investigate.**
 
@@ -84,9 +85,11 @@ mirrors the recorded NAV's mark-to-last-close convention).
 Four aggregates (all reported; PASS gates on mean and max of |drift| only):
 - `mean_abs_drift_pct`
 - `max_abs_drift_pct` (with its date)
-- `weighted_mean_abs_drift_pct` — weighted by recorded `holdings_mtm` (drift originates in
-  the priced leg; near-cash days have almost no drift capacity and would otherwise dilute or
-  amplify the plain mean). Reported for interpretation; not a gate in v1.
+- `weighted_mean_abs_drift_pct` — exact formula (review fix, locked):
+  `Σ_d(|drift_d| × holdings_mtm_d) / Σ_d(holdings_mtm_d)` over recorded `holdings_mtm`
+  (explicitly NOT `portfolio_nav` weights — drift originates in the priced leg; near-cash
+  days have almost no drift capacity and would otherwise dilute or amplify the plain mean).
+  Reported for interpretation; not a gate in v1.
 - `mean_signed_drift_pct` (review fix — NOT a gate): a persistent same-sign drift that stays
   under the abs gates (e.g. +0.09% every day) would PASS yet indicate a systematic offset —
   usually adjustment-basis, not noise. The signed mean makes that pattern visible instead of
@@ -107,9 +110,12 @@ section** (not auxiliary metadata) — the most likely future FAIL is "复权口
 {"ticker": "SPY", "n_dates": 10, "mean_signed_bps": -4.3, "same_sign_ratio": 0.92}
 ```
 
-Reading: high `same_sign_ratio` (offsets consistently one direction) + non-trivial
-`mean_signed_bps` ⇒ adjustment-basis/corporate-action divergence suspected; ratio near 0.5 ⇒
-ordinary vendor noise. Fixed caveat in output. Tickers with a dividend/split inside the
+**Definition (review fix, locked):** `same_sign_ratio = max(n_positive, n_negative) /
+(n_positive + n_negative)` — the fraction of NON-ZERO observations sharing the majority sign;
+exact-zero offsets are excluded from both numerator and denominator; reported as 0.0 when
+there are no non-zero observations. Reading: high `same_sign_ratio` (offsets consistently one
+direction) + non-trivial `mean_signed_bps` ⇒ adjustment-basis/corporate-action divergence
+suspected; ratio near 0.5 ⇒ ordinary vendor noise. Fixed caveat in output. Tickers with a dividend/split inside the
 window are the first alternative explanation for any FAIL.
 
 ### Output (JSON to stdout, shape sketch)
@@ -166,8 +172,8 @@ Per-ticker Tencent failure → ticker enters `unpriceable_tickers` / fills for i
 ## Testing (`# Layer:` tags; `uv run pytest`)
 
 1. Pure core, synthetic bars with hand-computed bps/drift → exact metric values.
-2. PASS and FAIL on both legs (threshold boundary cases; anomaly > 150 bps ⇒ fills FAIL and
-   listed).
+2. PASS and FAIL on both legs (threshold boundary cases; anomaly > 200 bps ⇒ fills FAIL and
+   listed — matches the locked threshold table, P0 review fix).
 3. `vs_next_available_open` never affects the verdict (set it absurdly high → still PASS).
 4. NAV lookback convention: missing bar on trading_date → previous close used (mirror test).
 5. Unpriceable ticker → recorded value kept, listed, not silent; leg still computes.

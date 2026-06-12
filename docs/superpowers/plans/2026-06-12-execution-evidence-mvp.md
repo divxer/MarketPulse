@@ -533,11 +533,13 @@ def run_pricing_audit(
     for ticker, vals in sorted(signed_by_ticker.items()):
         pos = sum(1 for v in vals if v > 0)
         neg = sum(1 for v in vals if v < 0)
-        dominant = max(pos, neg)
+        nonzero = pos + neg
         adj.append(AdjustmentBasisRow(
             ticker=ticker, n_dates=len(vals),
             mean_signed_bps=sum(vals) / len(vals),
-            same_sign_ratio=(dominant / len(vals)) if vals else 0.0,
+            # Spec-locked: fraction of NON-ZERO observations sharing the
+            # majority sign; zeros excluded from both sides; 0.0 if none.
+            same_sign_ratio=(max(pos, neg) / nonzero) if nonzero else 0.0,
         ))
 
     legs = [v for v in (fills_verdict, nav_verdict) if v != "SKIPPED"]
