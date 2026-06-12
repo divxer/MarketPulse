@@ -32,7 +32,7 @@ Two sub-questions, two legs:
 |---|---|---|
 | Fills | mean \|bps error\| (vs same-day close) | ≤ 25 bps |
 | Fills | p95 \|bps error\| (vs same-day close) | ≤ 100 bps |
-| Fills | hard anomaly (any single fill) | > 150 bps → listed individually; any anomaly ⇒ fills leg FAIL |
+| Fills | hard anomaly (any single fill) | > 200 bps (= 2 × p95 threshold, review fix — keeps the anomaly bar a clean multiple of the distribution gate) → listed individually; any anomaly ⇒ fills leg FAIL |
 | NAV | mean \|drift\| | ≤ 0.10% |
 | NAV | max \|drift\| | ≤ 0.50% |
 
@@ -81,24 +81,36 @@ re-price holdings MTM + the SPY leg with Tencent closes (last available ≤ trad
 mirrors the recorded NAV's mark-to-last-close convention).
 `drift_pct = (nav_tencent − nav_recorded) / nav_recorded`.
 
-Three aggregates (all reported; PASS gates on mean and max of |drift|):
+Four aggregates (all reported; PASS gates on mean and max of |drift| only):
 - `mean_abs_drift_pct`
 - `max_abs_drift_pct` (with its date)
 - `weighted_mean_abs_drift_pct` — weighted by recorded `holdings_mtm` (drift originates in
   the priced leg; near-cash days have almost no drift capacity and would otherwise dilute or
   amplify the plain mean). Reported for interpretation; not a gate in v1.
+- `mean_signed_drift_pct` (review fix — NOT a gate): a persistent same-sign drift that stays
+  under the abs gates (e.g. +0.09% every day) would PASS yet indicate a systematic offset —
+  usually adjustment-basis, not noise. The signed mean makes that pattern visible instead of
+  letting the abs gates launder it.
 
 Tickers missing from Tencent entirely → that position keeps its recorded value for the
 re-priced NAV, and the ticker is listed in `unpriceable_tickers` (visible degradation, never
 silent).
 
-### Adjustment-basis hazard (known, surfaced, not corrected)
+### Adjustment-basis analysis (first-class output section, review fix)
 
 Tencent qfq vs yfinance auto-adjust differ in adjustment convention. The audit does NOT
-correct for this; it makes it visible: per-ticker **signed** mean offset is reported —
-a consistent sign across dates suggests adjustment-basis/corporate-action divergence; random
-scatter suggests ordinary vendor noise. Fixed caveat in output. Tickers with a
-dividend/split inside the window are the first alternative explanation for any FAIL.
+correct for this; it makes it diagnosable. **`adjustment_basis_analysis` is a top-level output
+section** (not auxiliary metadata) — the most likely future FAIL is "复权口径不同", not
+"价格错", so the diagnostic for it gets first-class status. Per ticker:
+
+```json
+{"ticker": "SPY", "n_dates": 10, "mean_signed_bps": -4.3, "same_sign_ratio": 0.92}
+```
+
+Reading: high `same_sign_ratio` (offsets consistently one direction) + non-trivial
+`mean_signed_bps` ⇒ adjustment-basis/corporate-action divergence suspected; ratio near 0.5 ⇒
+ordinary vendor noise. Fixed caveat in output. Tickers with a dividend/split inside the
+window are the first alternative explanation for any FAIL.
 
 ### Output (JSON to stdout, shape sketch)
 
@@ -119,10 +131,13 @@ dividend/split inside the window are the first alternative explanation for any F
     "max_abs_drift_pct": 0.21,
     "max_drift_date": "2026-06-05",
     "weighted_mean_abs_drift_pct": 0.05,
-    "per_day": [ "...date/nav_recorded/nav_tencent/drift_pct..." ],
+    "mean_signed_drift_pct": 0.02,
+    "per_day": [ "...date/nav_recorded/nav_tencent/drift_pct/spy_close_recorded/spy_close_tencent..." ],
     "unpriceable_tickers": []
   },
-  "per_ticker_signed_offset_bps": [{"ticker": "SPY", "mean_signed_bps": -1.2, "n_dates": 10}],
+  "adjustment_basis_analysis": [
+    {"ticker": "SPY", "n_dates": 10, "mean_signed_bps": -1.2, "same_sign_ratio": 0.6}
+  ],
   "verdict": {"fills": "PASS", "nav": "PASS", "overall": "PASS"},
   "caveats": [ "...fills-vs-close framing...", "...qfq adjustment basis..." ]
 }
