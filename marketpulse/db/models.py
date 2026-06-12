@@ -214,6 +214,14 @@ class PriceCacheEntry(Base):
     close: Mapped[float] = mapped_column(Float, nullable=False)
     volume: Mapped[int] = mapped_column(BigInteger, nullable=False)
     fetched_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow, nullable=False)
+    # P2 freshness spec §1: finality governance. is_final means "fetched at/
+    # after the 16:05 ET close cutoff for this bar's date"; finalized_at is
+    # the fetched_at of the fetch that produced the final bar — NEVER a job
+    # processing time (job runtime belongs in logs, not price rows).
+    is_final: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("0"),
+    )
+    finalized_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
 
 
 class NewsCacheEntry(Base):
