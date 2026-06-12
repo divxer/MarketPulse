@@ -42,10 +42,6 @@ def test_wrong_shape_regression_provisional_max_falls_back_to_final(db_session, 
         balance_after=Decimal("10000"),
     ))
     db_session.commit()
-    # tests/migration run in-process alembic commands whose env.py fileConfig()
-    # defaults to disable_existing_loggers=True, silencing this module logger
-    # for the rest of the suite — re-enable so caplog can capture.
-    logging.getLogger("marketpulse.portfolio.snapshot_runner").disabled = False
     with caplog.at_level(
         logging.INFO, logger="marketpulse.portfolio.snapshot_runner",
     ):
