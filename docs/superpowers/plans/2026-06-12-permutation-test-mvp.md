@@ -307,21 +307,26 @@ def run_permutation_test(
 
     best_strategy = best_n = best_observed = None
     if eligible:
-        # Deterministic argmax: highest rate, ties broken by name.
-        best_strategy = max(
+        # Deterministic argmax: highest rate, ties broken by SMALLEST name
+        # (review fix — max(key=(rate, s)) would pick the alphabetically
+        # LARGEST name on ties; ascending-name tie-break is the convention).
+        best_strategy = sorted(
             eligible,
-            key=lambda s: (_hit_rate(subtypes, excesses, idx_by_strategy[s]), s),
-        )
+            key=lambda s: (-_hit_rate(subtypes, excesses, idx_by_strategy[s]), s),
+        )[0]
         best_n = len(idx_by_strategy[best_strategy])
         best_observed = _hit_rate(subtypes, excesses, idx_by_strategy[best_strategy])
 
     rng = random.Random(seed)
-    labels = list(subtypes)
     ge_overall = 0
     null_overall_sum = 0.0
     ge_best = 0
     null_max_sum = 0.0
     for _ in range(n_permutations):
+        # Review-locked: copy from the ORIGINAL labels each round, then
+        # shuffle — chained in-place shuffles are statistically uniform too,
+        # but per-round copies are easier to read and audit.
+        labels = list(subtypes)
         rng.shuffle(labels)
         null_overall = _hit_rate(labels, excesses, all_idx)
         null_overall_sum += null_overall
@@ -517,7 +522,7 @@ if __name__ == "__main__":
 - [ ] **Step 1:** Append to the strategy-trust item:
 
 ```markdown
-**Recalibrated 2026-06-12 (ROI order, locked):** P1 permutation test (shipped — the
+**Recalibrated 2026-06-12 (ROI order, locked):** P1 permutation test (this PR — the
 `permutation_test` CLI answers "is there edge at all" with selection-corrected best-of-N) >
 P2 bootstrap CI > P3 shadow 2a > P4 walk-forward (last: current samples too thin to split).
 Identity note: MarketPulse is an **Evidence Engine** ("is this worth believing?"), not a
