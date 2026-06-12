@@ -89,6 +89,34 @@ broker reconciliation may each want a different answer. **This question does not
 answer today** — it is recorded so the eventual Price Provenance Layer design starts here
 instead of rediscovering the tension.
 
+## Run #2 and Run #3 (2026-06-12, same day — appended)
+
+**Run #2 (after the Tencent coverage fix, PR #157):** coverage healed (0 unpriced fills, 0
+unpriceable tickers, 10/10 verifiable days). Verdict overall FAIL again — but the drift
+pattern formed a natural experiment: the 8 pre-finality snapshots (2026-05-29 … 06-09, frozen
+before the is_final governance) drifted −0.5% … −3.6% with signed mean −0.88%, while the 2
+snapshots rebuilt on healed bars (06-10, 06-11) agreed with Tencent at exactly 0.000%. The
+run-#1 Working Hypothesis was thereby UPGRADED and generalized: not an AMSC cluster but a
+**pre-finality contamination boundary** — the frozen series held provisional/revised bar
+values that neither vendor now endorses.
+
+**Remediation (approved on the run-#2 evidence):** the FULL 10-day series was rebuilt in ONE
+transaction (delete-all → ascending rebuild so 05-29 self-anchors as inception → flag →
+single commit; rollback-safe; `rebuild_reason='post-finality-remediation'`). Scope note: the
+user approved 8 days; anchor coherence required touching all 10 — `run_nav_snapshot` anchors
+to the earliest eligible snapshot, so rebuilding 05-29 with any old/rebuilt later row present
+would inherit a wrong anchor. The 06-10/11 NAV values did not change; their anchor/excess
+columns re-derived from the new inception. Pre-rebuild values archived:
+`docs/operations/north-star-baseline-v0.json`. Headline change: latest north-star excess
+moved from −2.45% (contaminated anchor) to **−1.71%** (healed chain).
+
+**Run #3 (post-remediation): NAV leg PASS — 0.0000% drift on all 10 days.** The project's
+original question is answered for the current canonical chain: **no single-vendor price
+illusion**. Fills leg remains FAIL solely on fill #5 (frozen revised value, −596 bps) — by
+design under the fill-immutable principle; the audit will keep flagging it until the Open
+Question below is answered by the eventual Price Provenance Layer. Excluding that single
+fill, fills mean is 11.8 bps (within gates).
+
 ## What this does NOT change
 
 - Roadmap order unchanged: Shadow 2a complete (this MVP); Shadow 2b stays on its lifecycle
