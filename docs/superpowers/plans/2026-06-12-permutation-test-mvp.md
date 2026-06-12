@@ -127,7 +127,11 @@ def test_empty_eligible_set_skips_c():
 
 
 def test_determinism_same_seed_same_result():
-    rows = [("bullish", 0.05, "a")] * 5 + [("bearish", 0.05, "b")] * 5
+    # As-built fix: bearish rows use NEGATIVE excess. With all-positive
+    # excesses the overall null mean is exactly 0.5 for every seed (5 bullish
+    # labels always hit, 5 bearish never do), making the cross-seed
+    # inequality below impossible. Mixed signs let the statistic vary.
+    rows = [("bullish", 0.05, "a")] * 5 + [("bearish", -0.05, "b")] * 5
     r1 = run_permutation_test(rows, n_permutations=500, seed=42)
     r2 = run_permutation_test(rows, n_permutations=500, seed=42)
     assert r1 == r2
