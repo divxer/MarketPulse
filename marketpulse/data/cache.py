@@ -4,8 +4,14 @@ from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
+from marketpulse.data.finality import is_bar_final
 from marketpulse.data.types import Bar, NewsItem
 from marketpulse.db.models import NewsCacheEntry, PriceCacheEntry
+
+
+def _now_utc() -> datetime:
+    """Module-level for test monkeypatching."""
+    return datetime.now(UTC)
 
 
 class PriceCache:
@@ -15,19 +21,26 @@ class PriceCache:
     def upsert(self, ticker: str, bars: list[Bar]) -> None:
         if not bars:
             return
-        rows = [
-            {
-                "ticker": ticker,
-                "date": b.date,
-                "open": b.open,
-                "high": b.high,
-                "low": b.low,
-                "close": b.close,
-                "volume": b.volume,
-                "fetched_at": datetime.now(UTC),
-            }
-            for b in bars
-        ]
+        now = _now_utc()
+        rows = []
+        for b in bars:
+            final = is_bar_final(b.date, now)
+            rows.append(
+                {
+                    "ticker": ticker,
+                    "date": b.date,
+                    "open": b.open,
+                    "high": b.high,
+                    "low": b.low,
+                    "close": b.close,
+                    "volume": b.volume,
+                    "fetched_at": now,
+                    # Spec §3: finality computed at write time; finalized_at is
+                    # this fetch's timestamp ("when obtained"), never job time.
+                    "is_final": final,
+                    "finalized_at": now if final else None,
+                }
+            )
         stmt = sqlite_insert(PriceCacheEntry).values(rows)
         stmt = stmt.on_conflict_do_update(
             index_elements=["ticker", "date"],
@@ -38,6 +51,8 @@ class PriceCache:
                 "close": stmt.excluded.close,
                 "volume": stmt.excluded.volume,
                 "fetched_at": stmt.excluded.fetched_at,
+                "is_final": stmt.excluded.is_final,
+                "finalized_at": stmt.excluded.finalized_at,
             },
         )
         self.session.execute(stmt)

@@ -81,24 +81,54 @@ def _read_open_positions(
 
 
 def _read_price_lookup(session: Session, trading_date: date):
-    """Mark-to-last-available-close: latest close per ticker ON OR BEFORE
-    trading_date.
+    """Mark-to-last-available-FINAL-close per ticker ON OR BEFORE trading_date.
 
-    `price_cache` lags ~1 trading day — the daily fetch runs mid-session and
-    yfinance only publishes COMPLETED daily bars, so the current day's close
-    is not in the cache when the snapshot runs. An exact-date match
-    (`date == trading_date`) would therefore leave every same-day snapshot
-    degenerate (all positions unpriced, SPY None). Using the latest close
-    `<= trading_date` values positions/SPY at their last known close — the
-    standard EOD-NAV "mark to last available price" convention. The `<=`
-    bound (never `>`) prevents lookahead bias. Float → Decimal at the boundary.
+    P2 freshness spec §5: only `is_final = true` bars are eligible — the
+    2026-06-11 audit proved intraday (provisional) bars DO land in
+    price_cache (the old premise that yfinance only publishes completed
+    daily bars was false; SPY 06-10 was pinned at a midday price and
+    contaminated two north-star days). The finality filter applies to BOTH
+    the max(date) subquery AND the join: join-only filtering would let the
+    subquery select a provisional max(date) and resolve a ticker to None
+    even when a final yesterday-close exists.
+
+    A ticker whose latest raw bar is provisional values at its previous
+    final close — the charter-tolerated `<= trading_date` / ~1-day-lag
+    convention. The `<=` bound (never `>`) prevents lookahead bias.
+    Float → Decimal at the boundary.
+
+    Returns (lookup, spy_close, provisional_fallback_tickers) — the third
+    element lists tickers whose raw max(date) bar was excluded as
+    provisional. SEMANTICS (read carefully before building telemetry on it):
+    it includes BOTH cases — (a) fallback-to-an-older-final-close AND
+    (b) all-provisional tickers that end up unpriced (no final bar at all).
+    It answers "which tickers did the finality filter affect", not "which
+    tickers resolved to an older price". The names are spec-locked
+    (provisional_fallback_count / provisional_fallback_tickers).
     """
+    def _max_dates(*, final_only: bool) -> dict[str, date]:
+        stmt = (
+            select(
+                PriceCacheEntry.ticker,
+                func.max(PriceCacheEntry.date).label("max_date"),
+            )
+            .where(PriceCacheEntry.date <= trading_date)
+            .group_by(PriceCacheEntry.ticker)
+        )
+        if final_only:
+            stmt = stmt.where(PriceCacheEntry.is_final == True)  # noqa: E712
+        return dict(session.execute(stmt).all())
+
+    final_max = _max_dates(final_only=True)
+    raw_max = _max_dates(final_only=False)
+
     latest = (
         select(
             PriceCacheEntry.ticker,
             func.max(PriceCacheEntry.date).label("max_date"),
         )
         .where(PriceCacheEntry.date <= trading_date)
+        .where(PriceCacheEntry.is_final == True)  # noqa: E712 — subquery filter
         .group_by(PriceCacheEntry.ticker)
         .subquery()
     )
@@ -108,15 +138,21 @@ def _read_price_lookup(session: Session, trading_date: date):
             and_(
                 PriceCacheEntry.ticker == latest.c.ticker,
                 PriceCacheEntry.date == latest.c.max_date,
+                PriceCacheEntry.is_final == True,  # noqa: E712 — join filter too
             ),
         ),
     ).all()
     table = {r.ticker: Decimal(str(r.close)) for r in rows}
 
+    provisional_fallback_tickers = sorted(
+        t for t, d in raw_max.items()
+        if t not in final_max or final_max[t] < d
+    )
+
     def lookup(ticker: str) -> Decimal | None:
         return table.get(ticker)
 
-    return lookup, table.get(_SPY_TICKER)
+    return lookup, table.get(_SPY_TICKER), provisional_fallback_tickers
 
 
 def run_nav_snapshot(
@@ -143,7 +179,18 @@ def run_nav_snapshot(
 
     cash_balance = _read_cash_balance(session, trading_date)
     open_positions = _read_open_positions(session, trading_date)
-    price_lookup, spy_close = _read_price_lookup(session, trading_date)
+    price_lookup, spy_close, fallback_all = _read_price_lookup(session, trading_date)
+    consumed = {pos.ticker for pos in open_positions} | {_SPY_TICKER}
+    fallback = sorted(set(fallback_all) & consumed)
+    if fallback:
+        log.info(
+            "nav_provisional_fallback",
+            extra={
+                "tick_date": str(trading_date),
+                "provisional_fallback_count": len(fallback),
+                "provisional_fallback_tickers": fallback,
+            },
+        )
 
     # North-star anchor (PR3a + anchor-eligibility fix): anchor BOTH indices to
     # the earliest ELIGIBLE snapshot — fully priced (unpriced_positions_count==0)

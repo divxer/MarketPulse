@@ -17,6 +17,7 @@ from pathlib import Path
 from marketpulse.alerts.notifier import Notifier, get_notifier_from_settings
 from marketpulse.backtest.allocation import allocate_for_day
 from marketpulse.config import get_settings
+from marketpulse.data.finalize import finalize_provisional_bars
 from marketpulse.data.yfinance_client import YFinanceClient
 from marketpulse.db.base import session_scope
 from marketpulse.observability.paper_tick_notifier import notify_paper_tick_events
@@ -112,6 +113,16 @@ def paper_trading_tick_job(*, notifier: Notifier | None = None) -> None:
             )
         except Exception as exc:  # pragma: no cover - belt-and-braces guard
             log.warning("paper_tick_notify_failed: %s", exc)
+
+        # P2 freshness spec §4 — finalize provisional bars BEFORE the NAV
+        # snapshot reads price_cache. Structural ordering (step 0 of NAV),
+        # not clock-based: a parallel cron ordered only by wall clock is the
+        # same failure shape that produced the SPY 06-10 contamination.
+        # Never aborts the tick; SPY-failure severity handled inside the job.
+        try:
+            finalize_provisional_bars(session)
+        except Exception as exc:  # noqa: BLE001 — belt-and-braces
+            log.warning("finalize_provisional_bars_failed: %s", exc)
 
         # Charter top-3 #1 PR3a — EOD NAV snapshot. Piggybacks on tick
         # fill settlement to avoid race against in-flight fills.
