@@ -44,6 +44,10 @@ Key existing facts (verified against source — do not rediscover):
   `from marketpulse.logging import get_logger` with structured kwargs;
   `snapshot_runner.py` uses stdlib `logging` with `extra={}`;
   `paper_trading_tick.py` uses %-style args. Match each file's existing style.
+- `session_scope` (`marketpulse/db/base.py:63`) is a PLAIN GENERATOR (bare `yield` +
+  `finally: db.close()`, no `@contextmanager`) — the manual `gen = session_scope();
+  db = next(gen)` driving in the CLIs below IS the verified repo convention
+  (`scheduler/jobs.py`, `cli/refresh_sectors.py` both do it). Do NOT rewrite to `with`.
 - SQLite stores `fetched_at` as naive-UTC text (e.g. `2026-06-11 14:24:12.296942`) and `date`
   as `YYYY-MM-DD` text. Treat naive timestamps as UTC.
 
@@ -133,8 +137,11 @@ def is_bar_final(bar_date: date, fetched_at: datetime) -> bool:
     """True iff `fetched_at` is at/after 16:05 ET on `bar_date`. Naive input is UTC."""
     if fetched_at.tzinfo is None:
         fetched_at = fetched_at.replace(tzinfo=UTC)
-    cutoff = datetime.combine(bar_date, FINAL_CUTOFF_NY, tzinfo=NY)
-    return fetched_at >= cutoff
+    # Explicit UTC on BOTH sides — aware-datetime comparison would be correct
+    # anyway, but explicit conversion removes any reader doubt and keeps this
+    # textually identical to the migration's inlined copy of the rule.
+    cutoff_utc = datetime.combine(bar_date, FINAL_CUTOFF_NY, tzinfo=NY).astimezone(UTC)
+    return fetched_at.astimezone(UTC) >= cutoff_utc
 ```
 
 - [ ] **Step 4: Run, verify PASS** — same command. Expected: 7 passed.
@@ -207,7 +214,8 @@ _CUTOFF = time(16, 5)
 def _is_final(bar_date: date, fetched_at: datetime) -> bool:
     if fetched_at.tzinfo is None:
         fetched_at = fetched_at.replace(tzinfo=UTC)
-    return fetched_at >= datetime.combine(bar_date, _CUTOFF, tzinfo=_NY)
+    cutoff_utc = datetime.combine(bar_date, _CUTOFF, tzinfo=_NY).astimezone(UTC)
+    return fetched_at.astimezone(UTC) >= cutoff_utc
 
 
 def upgrade() -> None:
@@ -532,8 +540,9 @@ def _is_final(db_session, ticker: str, d: date) -> bool:
 
 def test_provisional_rows_flip_final(db_session, monkeypatch):
     _seed_provisional(db_session, "AAPL", TODAY, 291.19, monkeypatch)
-    monkeypatch.undo()  # restore real _now_utc: finalize's upserts run "now" (post-close in CI? no —)
-    # Deterministic: pin "now" AFTER today's close so refreshed bars finalize.
+    # Two-phase explicit set — NO monkeypatch.undo() (it would revert ALL
+    # patches registered so far; re-setattr on the same target is allowed
+    # and is the safe idiom). Pin "now" AFTER close so refreshed bars finalize.
     monkeypatch.setattr(
         "marketpulse.data.cache._now_utc",
         lambda: datetime(2026, 6, 11, 21, 30, tzinfo=UTC),
@@ -652,12 +661,20 @@ def _sessions_back(cal: NYTradingCalendar, d: date, n: int) -> date:
     return out
 
 
-def _count_provisional(session: Session) -> int:
-    return session.scalar(
-        select(func.count())
-        .select_from(PriceCacheEntry)
-        .where(PriceCacheEntry.is_final == False),  # noqa: E712 — SQLA expression
-    ) or 0
+def _provisional_keys(session: Session, tickers: list[str]) -> set[tuple[str, date]]:
+    """(ticker, date) keys of provisional rows for the SELECTED tickers only.
+
+    The finalized count must be a LOCAL diff over the tickers this run
+    touched — a global before/after count would be polluted by unrelated
+    provisional rows (other tickers, outside-window dates) and by SPY's
+    forced refresh, misleading later diagnostics.
+    """
+    rows = session.execute(
+        select(PriceCacheEntry.ticker, PriceCacheEntry.date)
+        .where(PriceCacheEntry.is_final == False)  # noqa: E712 — SQLA expression
+        .where(PriceCacheEntry.ticker.in_(tickers)),
+    ).all()
+    return {(t, d) for t, d in rows}
 
 
 def finalize_provisional_bars(
@@ -695,7 +712,7 @@ def finalize_provisional_bars(
     ).all()
     tickers = sorted(set(in_window) | {_SPY})
 
-    before = _count_provisional(session)
+    before_keys = _provisional_keys(session, tickers)
     cache = PriceCache(session)
     failures = 0
     for ticker in tickers:
@@ -722,10 +739,13 @@ def finalize_provisional_bars(
             else:
                 log.warning("finalize_ticker_failed", ticker=ticker, error=str(exc))
 
-    after = _count_provisional(session)
+    after_keys = _provisional_keys(session, tickers)
     result = FinalizeResult(
         tickers_attempted=len(tickers),
-        bars_finalized=max(0, before - after),
+        # Exact local diff: keys that WERE provisional for the selected
+        # tickers and no longer are. Immune to unrelated rows and to new
+        # bars added by the refresh itself.
+        bars_finalized=len(before_keys - after_keys),
         failures=failures,
     )
     log.info(
@@ -831,7 +851,12 @@ def _read_price_lookup(session: Session, trading_date: date):
 
     Returns (lookup, spy_close, provisional_fallback_tickers) — the third
     element lists tickers whose raw max(date) bar was excluded as
-    provisional (observability: how often NAV runs on day-old closes).
+    provisional. SEMANTICS (read carefully before building telemetry on it):
+    it includes BOTH cases — (a) fallback-to-an-older-final-close AND
+    (b) all-provisional tickers that end up unpriced (no final bar at all).
+    It answers "which tickers did the finality filter affect", not "which
+    tickers resolved to an older price". The names are spec-locked
+    (provisional_fallback_count / provisional_fallback_tickers).
     """
     def _max_dates(*, final_only: bool) -> dict[str, date]:
         stmt = (
@@ -1086,6 +1111,23 @@ def test_rebuild_skips_missing_date_gracefully(db_session, monkeypatch):
     # No snapshot exists for this date and no ledger → rebuild() must report,
     # not crash (NoCashLedgerForDate is caught per-date).
     rebuild(db_session, dates=(date(2026, 6, 9),))
+
+
+def test_rebuild_failure_preserves_old_snapshot(db_session, monkeypatch, <nav seed fixtures>):
+    """Transaction-per-date: seed an EXISTING snapshot for a date that has NO
+    cash ledger → delete+recompute fails with NoCashLedgerForDate → rollback
+    restores the old row untouched (is_rebuilt stays False)."""
+    monkeypatch.setattr(
+        "marketpulse.cli.rebuild_nav_snapshots.finalize_provisional_bars",
+        lambda session: None,
+    )
+    # <seed a PaperNavSnapshot row for date D via the existing seeding helper,
+    #  WITHOUT seeding paper_cash_ledger for D>
+    rebuild(db_session, dates=(D,))
+    row = db_session.scalars(
+        select(PaperNavSnapshot).where(PaperNavSnapshot.trading_date == D),
+    ).one()
+    assert row.is_rebuilt is False  # old row survived the failed rebuild
 ```
 
 (`<nav seed fixtures>`: reuse the existing `run_nav_snapshot` test module's seeding helpers —
@@ -1134,24 +1176,29 @@ def rebuild(session: Session, *, dates: tuple[date, ...] = CONTAMINATED_DATES) -
 
     # 2./3. Delete + recompute in ascending date order (run_nav_snapshot is
     # idempotent and would otherwise return the stale row without recompute).
+    # TRANSACTION-PER-DATE: delete, recompute and flag inside ONE uncommitted
+    # transaction — a recompute failure rolls back and RESTORES the old
+    # snapshot. Never commit a delete before the replacement exists.
     for d in sorted(dates):
-        deleted = session.query(PaperNavSnapshot).filter(
-            PaperNavSnapshot.trading_date == d,
-        ).delete()
-        session.commit()
         try:
+            deleted = session.query(PaperNavSnapshot).filter(
+                PaperNavSnapshot.trading_date == d,
+            ).delete()
             run_nav_snapshot(session, trading_date=d)
+            session.execute(
+                update(PaperNavSnapshot)
+                .where(PaperNavSnapshot.trading_date == d)
+                .values(is_rebuilt=True, rebuild_reason=REBUILD_REASON),
+            )
             session.commit()
+            log.info("nav_snapshot_rebuilt", trading_date=str(d), had_existing=bool(deleted))
         except NoCashLedgerForDate:
+            session.rollback()  # restores the deleted row — old data never lost
             log.warning("rebuild_skipped_no_ledger", trading_date=str(d))
-            continue
-        session.execute(
-            update(PaperNavSnapshot)
-            .where(PaperNavSnapshot.trading_date == d)
-            .values(is_rebuilt=True, rebuild_reason=REBUILD_REASON),
-        )
-        session.commit()
-        log.info("nav_snapshot_rebuilt", trading_date=str(d), had_existing=bool(deleted))
+        except Exception as exc:  # noqa: BLE001 — restore-then-surface
+            session.rollback()
+            log.error("rebuild_failed", trading_date=str(d), error=str(exc))
+            raise
 
 
 def main() -> None:
@@ -1202,6 +1249,15 @@ research-path filter is defense-in-depth once the FinalizeJob exists).
 - [ ] **Step 3: Final verification**
 
 Run: `uv run pytest -q` → ALL pass (expect ~1950+). Run `uv run ruff check` → clean.
+Then a REAL migration run against a scratch DB (the unit tests only exercise the inlined
+rule; this exercises the actual `upgrade()`):
+
+```bash
+DATABASE_URL=sqlite:///$(mktemp -d)/scratch.db uv run alembic upgrade head
+```
+
+Expected: completes cleanly; `price_cache` exists with `is_final`/`finalized_at`.
+(Adjust the env-var name to whatever `alembic/env.py` actually reads — check it first.)
 
 - [ ] **Step 4: Commit**
 
@@ -1218,6 +1274,9 @@ git commit -m "docs: CHARTER PR2 future-hardening note + spec CLI path fix (P2-T
 2. Container start runs Alembic upgrade (verify migration applied: 24 rows `is_final=0`).
 3. Run `docker exec marketpulse /app/.venv/bin/python -m marketpulse.cli.rebuild_nav_snapshots`
    (finalizes bars, rebuilds 06-10 → 06-11 in order).
-4. Verify: `paper_nav_snapshot` 06-10/06-11 rows show `is_rebuilt=1`,
-   `rebuild_reason='provisional_price_cache_fix'`, and `spy_close != 730.719970703125`;
-   `price_cache` has 0 rows where `is_final=0 AND date < today`.
+4. Verify (all four):
+   - `price_cache`: SPY 2026-06-10 row has `is_final=1` and `close != 730.719970703125`;
+   - `price_cache`: 0 rows where `is_final=0 AND date < today`;
+   - `paper_nav_snapshot` 06-10/06-11: `is_rebuilt=1`,
+     `rebuild_reason='provisional_price_cache_fix'`, `spy_close != 730.719970703125`;
+   - next nightly tick log shows `finalize_provisional_bars_done` BEFORE the NAV snapshot line.
