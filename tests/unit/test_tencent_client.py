@@ -159,3 +159,78 @@ def test_fetch_history_accepts_6m_period() -> None:
     bars = TencentClient().fetch_history("AAPL", period="6m")
     # 200 days ago is OUTSIDE 6m (180 day) window → only today kept
     assert len(bars) == 1
+
+
+@respx.mock
+def test_fetch_history_wrong_suffix_degenerate_falls_through() -> None:
+    """Wrong market suffix makes Tencent return a degenerate 1-row response
+    (observed 2026-06-12 in prod: usBAC.OQ -> 1 row, usBAC.N -> 120 rows).
+    The client must NOT accept the degenerate result — it must try the next
+    suffix and return the full history."""
+    from datetime import timedelta as _td
+    today = _date.today()
+    degenerate = [[today.isoformat(), "44.00", "44.50", "45.00", "43.50", "100"]]
+    full = [
+        [(today - _td(days=i)).isoformat(), "40", str(41 + i), "42", "39", "1000"]
+        for i in range(5, 0, -1)
+    ]
+    respx.get(
+        "https://web.ifzq.gtimg.cn/appstock/app/Usfqkline/get",
+        params={"param": "usBAC.OQ,day,,,120,qfq"},
+    ).mock(return_value=httpx.Response(200, text=_kline_envelope("usBAC.OQ", degenerate)))
+    respx.get(
+        "https://web.ifzq.gtimg.cn/appstock/app/Usfqkline/get",
+        params={"param": "usBAC.N,day,,,120,qfq"},
+    ).mock(return_value=httpx.Response(200, text=_kline_envelope("usBAC.N", full)))
+
+    bars = TencentClient().fetch_history("BAC", period="60d")
+    assert len(bars) == 5  # the .N history, not the .OQ single row
+
+
+@respx.mock
+def test_fetch_history_degenerate_on_both_suffixes_returns_best() -> None:
+    """Genuinely short histories (e.g. fresh IPO) still work: when both
+    variants are degenerate, return the larger of the two instead of raising."""
+    from datetime import timedelta as _td
+    today = _date.today()
+    one = [[today.isoformat(), "10", "11", "12", "9", "100"]]
+    two = [
+        [(today - _td(days=1)).isoformat(), "10", "10.5", "11", "9.5", "100"],
+        [today.isoformat(), "10.5", "11", "11.5", "10", "120"],
+    ]
+    respx.get(
+        "https://web.ifzq.gtimg.cn/appstock/app/Usfqkline/get",
+        params={"param": "usNEWIPO.OQ,day,,,120,qfq"},
+    ).mock(return_value=httpx.Response(200, text=_kline_envelope("usNEWIPO.OQ", one)))
+    respx.get(
+        "https://web.ifzq.gtimg.cn/appstock/app/Usfqkline/get",
+        params={"param": "usNEWIPO.N,day,,,120,qfq"},
+    ).mock(return_value=httpx.Response(200, text=_kline_envelope("usNEWIPO.N", two)))
+
+    bars = TencentClient().fetch_history("NEWIPO", period="60d")
+    assert len(bars) == 2  # best of the two degenerate results
+
+
+@respx.mock
+def test_fetch_history_ancient_frozen_series_not_trusted() -> None:
+    """A wrong symbol mapping can return >2 rows of ANCIENT data (observed
+    2026-06-12: usIWM.P serves a frozen 2009 series). All rows fall before the
+    period cutoff -> zero bars parse -> the variant must NOT early-return; the
+    degenerate-but-current result from another suffix wins instead."""
+    today = _date.today()
+    current_one = [[today.isoformat(), "280", "284", "285", "279", "100"]]
+    ancient = [
+        [f"2009-03-{d:02d}", "42", "43", "44", "41", "1000"] for d in range(1, 10)
+    ]
+    respx.get(
+        "https://web.ifzq.gtimg.cn/appstock/app/Usfqkline/get",
+        params={"param": "usIWM.OQ,day,,,120,qfq"},
+    ).mock(return_value=httpx.Response(200, text=_kline_envelope("usIWM.OQ", current_one)))
+    respx.get(
+        "https://web.ifzq.gtimg.cn/appstock/app/Usfqkline/get",
+        params={"param": "usIWM.N,day,,,120,qfq"},
+    ).mock(return_value=httpx.Response(200, text=_kline_envelope("usIWM.N", ancient)))
+
+    bars = TencentClient().fetch_history("IWM", period="60d")
+    assert len(bars) == 1                       # the current single bar
+    assert bars[0].date == today                # not a 2009 fossil
