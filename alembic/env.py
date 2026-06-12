@@ -9,7 +9,12 @@ from marketpulse.db.base import Base
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers=False: fileConfig's default (True) silently
+    # DISABLES every already-imported app logger not named in alembic.ini.
+    # tests/migration run alembic in-process, which under the default killed
+    # e.g. marketpulse.portfolio.snapshot_runner's logger for the rest of the
+    # pytest session — order-dependent caplog failures (found 2026-06-11).
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 config.set_main_option("sqlalchemy.url", get_settings().database_url)
