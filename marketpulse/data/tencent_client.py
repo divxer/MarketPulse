@@ -111,8 +111,9 @@ class TencentClient:
         """Daily OHLCV bars from Tencent's front-adjusted kline endpoint.
 
         URL: https://web.ifzq.gtimg.cn/appstock/app/Usfqkline/get?param=usTICKER.<MKT>,day,,,N,qfq
-        The symbol MUST include a market suffix (.OQ Nasdaq, .N NYSE) — without
-        it Tencent returns only the earliest+latest bar (2 rows total). Response:
+        The symbol MUST include the CORRECT market suffix (.OQ Nasdaq, .N NYSE) —
+        a wrong/absent suffix makes Tencent return a degenerate 1-2 row response
+        (latest bar only) instead of an error. Response:
         data[<symbol>].day → [[date, open, close, high, low, volume, ...], ...]
         Note (open, close, high, low) order — NOT conventional OHLC. Rows are
         oldest-first.
@@ -128,7 +129,13 @@ class TencentClient:
         cutoff = date.today() - timedelta(days=days)
 
         last_err: Exception | None = None
+        best: list[Bar] = []
         # Skip the no-suffix variant — kline endpoint requires a market suffix.
+        # Known limitation (scanned 2026-06-12): major ETFs (SPY/QQQ/IWM) have
+        # NO usable kline under any suffix — .OQ/.N return a degenerate 1-row
+        # response and .P returns an ancient frozen series (IWM.P serves bars
+        # from 2009). .P is therefore deliberately NOT tried: it can only add
+        # garbage. Callers must tolerate short results for ETFs.
         for suffix in (".OQ", ".N"):
             symbol = f"us{upper}{suffix}"
             url = (
@@ -178,9 +185,21 @@ class TencentClient:
                 except (ValueError, IndexError) as exc:
                     last_err = exc
                     continue
-            if bars:
+            # A WRONG market suffix makes Tencent answer with a degenerate
+            # 1-row (latest day only) response instead of an error (observed
+            # 2026-06-12 in prod: usBAC.OQ -> 1 row, usBAC.N -> 120 rows).
+            # Accepting it silently blinded the pricing audit's NAV coverage.
+            # Only trust a variant outright when it returned more than the
+            # degenerate row count; otherwise keep it as a fallback and try
+            # the other suffix — genuinely short histories (fresh IPOs) still
+            # resolve via the best-of-both fallback below.
+            if bars and len(rows) > 2:
                 return bars
+            if len(bars) > len(best):
+                best = bars
 
+        if best:
+            return best
         raise ValueError(
             f"no Tencent kline for {ticker!r}"
             + (f" (last error: {last_err})" if last_err else ""),
