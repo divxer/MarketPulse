@@ -245,6 +245,12 @@ def upgrade() -> None:
             ),
             final_keys,
         )
+    # P1 review: the migration must report its own stats — deploy verification
+    # should not depend on a separately-run analysis query.
+    print(
+        f"price_cache is_final backfill: total={len(rows)} "
+        f"final={len(final_keys)} provisional={len(rows) - len(final_keys)}",
+    )
 
 
 def downgrade() -> None:
@@ -596,6 +602,22 @@ def test_ticker_failure_is_warning_and_isolated(db_session, monkeypatch, caplog)
     assert _is_final(db_session, "MSFT", TODAY) is True    # others unaffected
 
 
+def test_backfill_clamped_to_max_days(db_session, monkeypatch):
+    # P1 review guard: an ancient provisional row must NOT trigger a
+    # multi-year refetch — start is clamped to today - MAX_BACKFILL_DAYS.
+    ancient = date(2019, 1, 2)
+    _seed_provisional(db_session, "SPY", ancient, 250.0, monkeypatch)
+    monkeypatch.setattr(
+        "marketpulse.data.cache._now_utc",
+        lambda: datetime(2026, 6, 11, 21, 30, tzinfo=UTC),
+    )
+    client = _StubClient()
+    finalize_provisional_bars(db_session, client=client, today_ny=TODAY)
+    (_, start, _) = next(c for c in client.calls if c[0] == "SPY")
+    assert start >= TODAY - timedelta(days=30)   # clamped, not 2019
+    assert _is_final(db_session, "SPY", ancient) is False  # honest: NOT healed
+
+
 def test_spy_failure_logs_error(db_session, monkeypatch, caplog):
     import logging
     _seed_provisional(db_session, "SPY", TODAY, 730.72, monkeypatch)
@@ -643,12 +665,17 @@ log = get_logger(__name__)
 
 _SPY = "SPY"
 
+# P1 review guard: one dirty ancient provisional row (e.g. a stray 2019 bar)
+# must never amplify into a multi-year refetch inside a nightly tick.
+MAX_BACKFILL_DAYS = 30
+
 
 @dataclass(frozen=True)
 class FinalizeResult:
     tickers_attempted: int
     bars_finalized: int
     failures: int
+    remaining_provisional: int  # provisional rows still left for the selected tickers
 
 
 def _sessions_back(cal: NYTradingCalendar, d: date, n: int) -> date:
@@ -725,6 +752,13 @@ def finalize_provisional_bars(
             start = cutoff           # forced ticker (SPY) with nothing provisional
         else:
             start = min(earliest, cutoff)
+        floor = today - timedelta(days=MAX_BACKFILL_DAYS)
+        if start < floor:
+            log.warning(
+                "finalize_backfill_clamped",
+                ticker=ticker, requested_start=str(start), clamped_to=str(floor),
+            )
+            start = floor
         try:
             # fetch_history_range: end is EXCLUSIVE — +1 day includes today.
             bars = client.fetch_history_range(
@@ -747,12 +781,14 @@ def finalize_provisional_bars(
         # bars added by the refresh itself.
         bars_finalized=len(before_keys - after_keys),
         failures=failures,
+        remaining_provisional=len(after_keys),
     )
     log.info(
         "finalize_provisional_bars_done",
         tickers_attempted=result.tickers_attempted,
         bars_finalized=result.bars_finalized,
         failures=result.failures,
+        remaining_provisional=result.remaining_provisional,
     )
     return result
 ```
@@ -1037,7 +1073,8 @@ def main() -> None:
         db.commit()
         print(
             f"finalize: attempted={r.tickers_attempted} "
-            f"finalized={r.bars_finalized} failures={r.failures}"
+            f"finalized={r.bars_finalized} failures={r.failures} "
+            f"remaining_provisional={r.remaining_provisional}"
         )
     finally:
         with contextlib.suppress(StopIteration):
@@ -1239,8 +1276,16 @@ git commit -m "feat(cli): rebuild contaminated NAV snapshots — finalize→06-1
 ```markdown
 **Future hardening (PR2):** evaluation/backtest read paths consume only-final bars
 (deferred per the 2026-06-11 review — the NAV leg was the proven production defect; the
-research-path filter is defense-in-depth once the FinalizeJob exists).
+research-path filter is defense-in-depth once the FinalizeJob exists). Also deferred to
+PR2+: split fallback telemetry into `fallback_to_older_final` vs
+`unpriced_due_to_provisional`; a `verify_freshness` CLI that scripts the deploy checks.
 ```
+
+Additionally, NAME the layer (review direction): in the same data-trust entry, label
+`is_final`/`finalized_at` as the first piece of the **Data Freshness & Provenance Layer** —
+price_cache is no longer a plain cache but cache + data-quality state; future evolution
+(upstream corrections, splits/dividend restatements) will add provenance fields like
+`correction_version`/`source_revision` to this layer rather than new ad-hoc columns.
 
 - [ ] **Step 2: Spec file-list fix** — in the spec's "Files touched", replace
   `marketpulse/jobs/finalize_prices.py` with `marketpulse/cli/finalize_prices.py` and the
