@@ -184,3 +184,26 @@ def run_permutation_test(
         interpretation=interpretation,
         interpretation_note=note,
     )
+
+
+def load_rows(db, *, horizon: int = 5) -> list[Row]:
+    """A-sample per spec: ai_analysis events at `horizon`, subtype and
+    excess_return non-null; strategy (payload.$.strategy) may be null."""
+    from sqlalchemy import func, select
+
+    from marketpulse.db.models import EvaluationEvent, EvaluationOutcome
+
+    stmt = (
+        select(
+            EvaluationEvent.subtype,
+            EvaluationOutcome.excess_return,
+            func.json_extract(EvaluationEvent.payload, "$.strategy"),
+        )
+        .join(EvaluationOutcome, EvaluationOutcome.event_id == EvaluationEvent.id)
+        .where(EvaluationEvent.event_type == "ai_analysis")
+        .where(EvaluationOutcome.horizon_trading_days == horizon)
+        .where(EvaluationEvent.subtype.is_not(None))
+        .where(EvaluationOutcome.excess_return.is_not(None))
+    )
+    # excess_return may round-trip as Decimal; float() keeps _is_hit semantics.
+    return [(s, float(e), st) for s, e, st in db.execute(stmt).all()]

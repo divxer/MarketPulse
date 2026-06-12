@@ -131,3 +131,31 @@ def test_invalid_inputs_raise():
         run_permutation_test([("bullish", 0.05, None)], n_permutations=0, seed=1)
     with pytest.raises(ValueError):
         run_permutation_test([("bullish", 0.05, None)], n_permutations=10, seed=1, alpha=1.5)
+
+
+def test_load_rows_filters_and_strategy_extraction(db_session):
+    """A-sample query: h5 ai_analysis rows; strategy from payload may be None;
+    other horizons excluded."""
+    from marketpulse.evaluation.permutation import load_rows
+    from tests.unit.test_evaluation_scoring import _ev, _out
+
+    # h5 event+outcome WITH payload.strategy="s1" -> included, strategy "s1"
+    e1 = _ev(db_session, ticker="AAA", subtype="bullish")
+    e1.payload = {**e1.payload, "strategy": "s1"}
+    _out(db_session, e1, horizon=5, excess=0.03)
+    # h5 event+outcome WITHOUT strategy in payload -> included, strategy None
+    e2 = _ev(db_session, ticker="BBB", subtype="bearish")
+    _out(db_session, e2, horizon=5, excess=-0.04)
+    # h1 event+outcome -> excluded (horizon filter)
+    e3 = _ev(db_session, ticker="CCC", subtype="neutral")
+    _out(db_session, e3, horizon=1, excess=0.005)
+    db_session.commit()
+
+    rows = load_rows(db_session, horizon=5)
+    assert len(rows) == 2
+    assert all(len(r) == 3 for r in rows)
+    assert all(isinstance(r[1], float) for r in rows)
+    strategies = {r[2] for r in rows}
+    assert "s1" in strategies and None in strategies
+    subtypes = {r[0] for r in rows}
+    assert subtypes == {"bullish", "bearish"}
