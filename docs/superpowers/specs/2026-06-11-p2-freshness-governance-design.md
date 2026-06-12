@@ -189,15 +189,20 @@ paths consume only-final bars.*
 
 ## Files touched
 
-- `alembic/versions/<new>_price_cache_is_final.py` — create
+(As-built paths — `marketpulse/cli/` per repo CLI convention, superseding the draft's
+`marketpulse/jobs/`; the tick mount landed in `paper_trading_tick.py`, the tick's actual body,
+not `scheduler/jobs.py`.)
+
+- `alembic/versions/f43156b7577f_price_cache_is_final.py` — create
 - `marketpulse/db/models.py` — `PriceCacheEntry` + 2 columns
+- `marketpulse/data/finality.py` — create (shared finality rule)
 - `marketpulse/data/cache.py` — write-time finality in `upsert`
 - `marketpulse/data/finalize.py` — create (FinalizeJob)
-- `marketpulse/jobs/finalize_prices.py` — create (CLI)
-- `marketpulse/scheduler/jobs.py` — finalize as NAV-tick step 0
+- `marketpulse/cli/finalize_prices.py` — create (CLI)
+- `marketpulse/scheduler/paper_trading_tick.py` — finalize as NAV-tick step 0
 - `marketpulse/portfolio/snapshot_runner.py` — `is_final` filter in `_read_price_lookup`
-- `scripts/` or `marketpulse/jobs/` — one-off rebuild entrypoint for 06-10/06-11
-- `docs/CHARTER.md` — PR2 future-hardening note
+- `marketpulse/cli/rebuild_nav_snapshots.py` — one-off rebuild for 06-10/06-11
+- `docs/CHARTER.md` — PR2 future-hardening note + Data Freshness & Provenance Layer naming
 - tests per section above
 
 No new dependencies. No new routes. One Alembic migration.
