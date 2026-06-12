@@ -5,6 +5,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _no_network_finalize(monkeypatch):
+    """P2F-T6: the tick now runs finalize_provisional_bars before the NAV
+    snapshot; no-op it so the DI tests below never reach yfinance."""
+    import marketpulse.scheduler.paper_trading_tick as m
+
+    monkeypatch.setattr(m, "finalize_provisional_bars", lambda session: None)
+
 
 def test_scheduler_entrypoint_is_thin():
     """No SQL, no business logic, no state mutation inside the scheduler
@@ -30,9 +41,11 @@ def test_scheduler_entrypoint_is_thin():
     # (lock 6b-L15) requires constructing 4 risk gates + RiskConfigProvider,
     # which legitimately grows the DI wiring. PR3a raised it from <90 to
     # <92 to accommodate the post-tick NAV snapshot hook
-    # (_run_nav_snapshot_safely import + single call). Still small —
+    # (_run_nav_snapshot_safely import + single call). P2F-T6 raised it
+    # from <92 to <97 for the finalize-provisional-bars step 0 of the
+    # NAV snapshot (import + guarded call). Still small —
     # no business logic.
-    assert line_count < 92, (
+    assert line_count < 97, (
         f"scheduler entrypoint too thick: {line_count} non-comment lines"
     )
 

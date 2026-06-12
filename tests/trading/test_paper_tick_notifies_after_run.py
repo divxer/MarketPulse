@@ -71,6 +71,9 @@ def patched_scheduler(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(module.daily_cycle, "run", fake_run)
+    # P2F-T6: the tick now runs finalize_provisional_bars before the NAV
+    # snapshot; no-op it here so these tests never reach yfinance.
+    monkeypatch.setattr(module, "finalize_provisional_bars", lambda session: None)
     yield module, call_order
     get_settings.cache_clear()
 
