@@ -34,9 +34,12 @@ def _seed_cash(session, balance: str, ts: datetime, reason: str = "INITIAL_DEPOS
 
 
 def _seed_price(session, ticker: str, d: date, close: float):
+    # These rows model SETTLED closes — P2 freshness: NAV consumes only
+    # is_final=True bars, so the fixture must seed final ones.
     session.add(PriceCacheEntry(
         ticker=ticker, date=d, open=close, high=close, low=close,
         close=close, volume=1, fetched_at=datetime(d.year, d.month, d.day, tzinfo=UTC),
+        is_final=True, finalized_at=datetime(d.year, d.month, d.day, tzinfo=UTC),
     ))
 
 
