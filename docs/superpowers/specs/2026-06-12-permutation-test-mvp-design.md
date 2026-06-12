@@ -112,7 +112,10 @@ the output — the numbers stand on their own.
     "p_value": 0.118,
     "eligible_strategies": ["..."]
   },
-  "per_strategy": [{"strategy": "...", "n": 19, "observed_hit_rate": 0.684}],
+  "per_strategy": [
+    {"strategy": "...", "n": 19, "observed_hit_rate": 0.684, "eligible_for_best": true},
+    {"strategy": "...", "n": 4, "observed_hit_rate": 0.75, "eligible_for_best": false}
+  ],
   "interpretation": "system_only",
   "interpretation_note": null,
   "caveats": [
@@ -125,6 +128,9 @@ the output — the numbers stand on their own.
 `interpretation_note` carries the suspicious message iff interpretation is `best_only`.
 Degenerate inputs: A-sample empty → exit with a clear message, no JSON; eligible strategy set
 empty → `best_strategy: null`, interpretation computed from A only (`system_only`/`neither`).
+**Implementation contract (review fix): when the eligible set is empty the shuffle engine
+SKIPS the C statistic entirely — `max()` over an empty strategy set is never evaluated, in
+the observed pass or any permutation.** C is conditionally computed, not computed-then-dropped.
 
 ## Architecture
 
@@ -150,14 +156,20 @@ human-readable line to stderr with exit 1. No partial JSON ever printed.
 
 1. **Exact small-N:** 3-4 rows where all permutations are enumerable by hand → p-value matches
    the exact enumeration within add-one convention.
-2. **Perfect predictor:** all verdicts hit, shuffles can't beat it → p ≈ 1/(N+1).
+2. **Perfect predictor:** all verdicts hit. NOTE (review fix): permutations CAN tie a perfect
+   assignment when the shuffled label multiset happens to reproduce one, so the assertion is
+   NOT `p == 1/(N+1)`. Correct contract: `p = (ties + 1) / (N + 1)` where ties = permutations
+   matching the observed perfect hit rate; the fixture is constructed so ties are
+   combinatorially rare (mixed verdict labels over distinct outcomes), and the test asserts
+   `p < alpha`, not an exact value.
 3. **Null calibration:** random verdicts vs random outcomes → p roughly uniform (sample a few
    seeds; assert p not concentrated below 0.05 — sanity, not strict distribution test).
 4. **Hit-definition delegation:** monkeypatch `scoring._is_hit` → permutation module's results
    change accordingly (proves reuse, not reimplementation).
-5. **Eligible-set freeze:** strategy with n=4 excluded from C in both observed and null;
-   appears in per_strategy report? — no: excluded entirely from C, present in `per_strategy`
-   list with its n (visibility without eligibility).
+5. **Eligible-set freeze:** strategy with n=4 excluded from C in both observed and null, but
+   PRESENT in `per_strategy` with `"eligible_for_best": false` (review fix: visibility without
+   eligibility must be explicit — a reader seeing its 75% must not mistake it for a champion-
+   test participant).
 6. **Null-strategy rows:** count toward A, excluded from C, reported in
    `rows_excluded_null_strategy_from_C`.
 7. **Determinism:** same seed → identical JSON; different seed → different null stats.
