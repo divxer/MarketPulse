@@ -86,14 +86,17 @@ class HttpVibeSwarmProvider:
         self._goal = goal
         self._poll = poll_interval
         self._clock = clock
-        self._client = client or httpx.Client(
-            headers={"Authorization": f"Bearer {api_key}"}, timeout=30,
-        )
+        # Review (Minor): auth is applied PER REQUEST (not only on the default
+        # client's headers) so an INJECTED client without auth headers still
+        # authenticates.
+        self._auth = {"Authorization": f"Bearer {api_key}"}
+        self._client = client or httpx.Client(timeout=30)
         self._backend = self._fetch_backend()
 
     def _fetch_backend(self) -> str:
         try:
-            r = self._client.get(f"{self._base}/settings/llm", timeout=10)
+            r = self._client.get(
+                f"{self._base}/settings/llm", headers=self._auth, timeout=10)
             r.raise_for_status()
             data = r.json()
             for k in _BACKEND_KEYS:
@@ -131,7 +134,8 @@ class HttpVibeSwarmProvider:
         body = {"preset_name": self._preset,
                 "user_vars": {"target": ticker, "market": "US",
                               "goal": self._goal + _GOAL_SUFFIX}}
-        r = self._client.post(f"{self._base}/swarm/runs", json=body)
+        r = self._client.post(
+            f"{self._base}/swarm/runs", json=body, headers=self._auth)
         r.raise_for_status()
         data = r.json()
         # swarm_size: only if the POST/preset response carries it; else None.
@@ -141,7 +145,8 @@ class HttpVibeSwarmProvider:
     def _poll_report(self, run_id: str) -> str | None:
         deadline = self._clock.monotonic() + self._timeout
         while self._clock.monotonic() < deadline:
-            r = self._client.get(f"{self._base}/swarm/runs/{run_id}")
+            r = self._client.get(
+                f"{self._base}/swarm/runs/{run_id}", headers=self._auth)
             r.raise_for_status()
             data = r.json()
             status = str(data.get("status", "")).lower()

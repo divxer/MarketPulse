@@ -77,3 +77,28 @@ def test_collect_skips_events_with_null_strategy(session):
     bids = agg.collect_for_date(date(2026, 5, 21))
     tickers = {b.ticker for b in bids}
     assert tickers == {"OK"}
+
+
+def test_collect_skips_research_only_events(session):
+    """Critical isolation: a research_only event (e.g. swarm_research) carries a
+    strategy label for the permutation pipeline but MUST NOT become a bid."""
+    from marketpulse.db.models import EvaluationEvent
+    from marketpulse.trading.bid_aggregator import BidAggregator
+    from marketpulse.trading.calendar import NYTradingCalendar
+
+    # executable arm — collected
+    _seed_event(session, ticker="OK",
+                event_time=datetime(2026, 5, 21, 14, 0, tzinfo=UTC),
+                strategy="momentum")
+    # research-only swarm arm, same day, has a strategy — must be EXCLUDED
+    session.add(EvaluationEvent(
+        event_type="ai_analysis", subtype="bullish", ticker="SWARM",
+        event_time=datetime(2026, 5, 21, 14, 5, tzinfo=UTC), event_price=150.0,
+        payload={"source": "swarm", "strategy": "swarm_research",
+                 "research_only": True, "provenance": {"engine": "vibe-trading"}},
+    ))
+    session.commit()
+
+    agg = BidAggregator(session=session, calendar=NYTradingCalendar())
+    tickers = {b.ticker for b in agg.collect_for_date(date(2026, 5, 21))}
+    assert tickers == {"OK"}, f"research_only must not become a bid; got {tickers}"

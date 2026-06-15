@@ -1,4 +1,9 @@
-# Phase 8c-1 — Swarm Research Arm (Shadow Strategy) — Design
+# Research Sandbox Experiment 1 — Swarm Research Arm (Shadow Strategy) — Design
+
+> Formerly drafted as **Phase 8c-1**; renamed before merge because this arm is **independent
+> of the Phase 8a/8b ML work** — a parallel research-sandbox experiment, not a step in the
+> main ML feature/prediction dependency chain. The code strategy label stays `swarm_research`
+> (unchanged). "Phase number = main-line dependency chain; research sandbox = parallel arm."
 
 **Date:** 2026-06-12
 **Status:** Approved (design locked)

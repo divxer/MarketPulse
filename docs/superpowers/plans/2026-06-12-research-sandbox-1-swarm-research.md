@@ -1,5 +1,9 @@
-# Phase 8c-1 — Swarm Research Arm — Implementation Plan
+# Research Sandbox Experiment 1 — Swarm Research Arm — Implementation Plan
 
+> Formerly drafted as **Phase 8c-1**; renamed before merge (independent of Phase 8a/8b ML
+> work). Code strategy label stays `swarm_research`. PR slice labels (8c-1a..d) are retained
+> in commit messages as historical markers only.
+>
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development
 > (recommended) or superpowers:executing-plans. Steps use checkbox (`- [ ]`) syntax.
 

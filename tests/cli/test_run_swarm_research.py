@@ -86,7 +86,7 @@ def test_records_ai_analysis_event_reachable_by_load_rows(db_session: Session):
     assert ev.event_price == 190.0
     # record_event was passed a tz-aware UTC EOD datetime (debug log shows
     # +00:00); SQLite drops tzinfo on read-back, so compare the wall value.
-    assert ev.event_time.replace(tzinfo=None) == datetime(2026, 6, 15, 0, 0)
+    assert ev.event_time.replace(tzinfo=None) == datetime(2026, 6, 15, 23, 59, 59)
     assert ev.payload["source"] == "swarm"
     assert ev.payload["strategy"] == "swarm_research"
     assert ev.payload["provenance"] == {
@@ -277,3 +277,71 @@ def test_main_happy_path_records_and_secret_hygiene(db_url: str, monkeypatch):
             return obj != api_key
         assert _no_secret(ev.payload)
     db_base.reset_engine()
+
+
+# --------------------------------------------------------------------------
+# Review-fix tests (PR #159): EOD timestamp, research_only flag, per-ticker
+# record isolation, recorded==0 → non-zero exit.
+# --------------------------------------------------------------------------
+
+def test_event_time_is_eod_not_midnight(db_session: Session):
+    from marketpulse.cli.run_swarm_research import run_batch
+    from marketpulse.db.models import EvaluationEvent
+
+    provider = StubSwarmVerdictProvider({"AAPL": _verdict("bullish")})
+    price_provider = _StubPriceProvider({"AAPL": _close("190.00")})
+    run_batch(db_session, tickers=["AAPL"], as_of=AS_OF,
+              provider=provider, price_provider=price_provider)
+    ev = db_session.query(EvaluationEvent).one()
+    # EOD, not 00:00 (SQLite drops tzinfo on read-back; compare wall time)
+    assert (ev.event_time.hour, ev.event_time.minute) == (23, 59)
+
+
+def test_event_payload_marks_research_only(db_session: Session):
+    from marketpulse.cli.run_swarm_research import run_batch
+    from marketpulse.db.models import EvaluationEvent
+
+    provider = StubSwarmVerdictProvider({"AAPL": _verdict("bullish")})
+    price_provider = _StubPriceProvider({"AAPL": _close("190.00")})
+    run_batch(db_session, tickers=["AAPL"], as_of=AS_OF,
+              provider=provider, price_provider=price_provider)
+    ev = db_session.query(EvaluationEvent).one()
+    assert ev.payload["research_only"] is True
+    assert ev.payload["strategy"] == "swarm_research"
+
+
+def test_record_failure_isolated_does_not_lose_prior(db_session: Session):
+    """A record/price failure on one ticker must not roll back an earlier
+    recorded ticker (per-ticker commit)."""
+    from marketpulse.cli.run_swarm_research import run_batch
+    from marketpulse.db.models import EvaluationEvent
+
+    class _BoomPrice(_StubPriceProvider):
+        def close_on_date(self, *, ticker, on_date):  # noqa: ARG002
+            if ticker == "BAD":
+                raise RuntimeError("price service down")
+            return self._prices.get(ticker)
+
+    provider = StubSwarmVerdictProvider(
+        {"GOOD": _verdict("bullish"), "BAD": _verdict("bearish")})
+    price_provider = _BoomPrice({"GOOD": _close("100.00")})
+    res = run_batch(db_session, tickers=["GOOD", "BAD"], as_of=AS_OF,
+                    provider=provider, price_provider=price_provider)
+    assert (res.recorded, res.failed) == (1, 1)
+    tickers = {e.ticker for e in db_session.query(EvaluationEvent).all()}
+    assert tickers == {"GOOD"}   # earlier record survived the later failure
+
+
+def test_all_abstained_exits_nonzero(db_url: str, monkeypatch):
+    from marketpulse.cli.run_swarm_research import main
+    from marketpulse.config import get_settings
+    monkeypatch.setenv("DATABASE_URL", db_url)
+    monkeypatch.setenv("SWARM_RESEARCH_ENABLED", "true")
+    monkeypatch.setenv("SWARM_RESEARCH_API_KEY", "tok")
+    get_settings.cache_clear()
+    provider = StubSwarmVerdictProvider({})          # everything abstains
+    price_provider = _StubPriceProvider({"AAPL": _close("190.00")})
+    with pytest.raises(SystemExit) as ei:
+        main(["--tickers", "AAPL", "--as-of", "2026-06-15"],
+             provider=provider, price_provider=price_provider)
+    assert ei.value.code == 1

@@ -184,3 +184,28 @@ def test_backend_unknown_on_settings_error() -> None:
     v = _provider(handler).verdict_for(ticker="META", as_of=_AS_OF)
     assert v is not None
     assert v.provenance["backend"] == "unknown"
+
+
+def test_bare_injected_client_still_authenticates() -> None:
+    """Minor fix: auth is applied per-request, so a client injected WITHOUT
+    auth headers still sends the Bearer token on every call."""
+    seen: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("authorization"))
+        if request.url.path == "/settings/llm":
+            return httpx.Response(200, json={"model": "qwen"})
+        if request.method == "POST":
+            return httpx.Response(200, json={"id": "r1", "status": "running"})
+        return httpx.Response(200, json={"status": "completed",
+                                         "final_report": "VERDICT: bullish"})
+
+    bare = httpx.Client(transport=httpx.MockTransport(handler))  # NO auth headers
+    p = HttpVibeSwarmProvider(
+        base_url=_BASE, api_key=_KEY, preset="investment_committee",
+        timeout_seconds=300, goal="Assess.", client=bare, clock=_FakeClock(),
+    )
+    v = p.verdict_for(ticker="AAPL", as_of=date(2026, 6, 15))
+    assert v is not None and v.verdict == "bullish"
+    # every request carried the bearer token despite the bare client
+    assert seen and all(h == f"Bearer {_KEY}" for h in seen)

@@ -10,7 +10,7 @@ import argparse
 import contextlib
 import sys
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 
 from marketpulse.config import get_settings
 from marketpulse.db.base import session_scope
@@ -34,10 +34,12 @@ def run_batch(db, *, tickers, as_of, provider, price_provider) -> BatchResult:
                   record_event rejected it).
       recorded  = event written.
     """
+    # Review #4: event_time is the as-of END-OF-DAY in UTC (not 00:00), matching
+    # the spec's "as_of EOD UTC" and the event_price (as_of close).
+    event_time = datetime.combine(as_of, time(23, 59, 59), tzinfo=UTC)
     res = BatchResult()
     for ticker in tickers:
-        # Per-ticker isolation belt-and-braces (review): even though providers
-        # are designed not to raise, a stub/future provider might.
+        # Provider isolation: a stub/future provider might raise.
         try:
             v = provider.verdict_for(ticker=ticker, as_of=as_of)
         except Exception as exc:  # noqa: BLE001
@@ -48,19 +50,34 @@ def run_batch(db, *, tickers, as_of, provider, price_provider) -> BatchResult:
             res.abstained += 1
             log.info("swarm_research_abstained", ticker=ticker)
             continue
-        close = price_provider.close_on_date(ticker=ticker, on_date=as_of)
-        if close is None:
-            res.failed += 1   # had a verdict, lost it to a missing price
-            log.warning("swarm_research_no_price", ticker=ticker)
+        # Review (Important): price lookup AND record_event can raise too —
+        # isolate them per ticker and COMMIT per recorded ticker so a later
+        # failure never rolls back earlier-recorded verdicts.
+        try:
+            close = price_provider.close_on_date(ticker=ticker, on_date=as_of)
+            if close is None:
+                res.failed += 1   # had a verdict, lost it to a missing price
+                log.warning("swarm_research_no_price", ticker=ticker)
+                continue
+            record_event(
+                event_type="ai_analysis", subtype=v.verdict, ticker=ticker,
+                event_time=event_time,
+                event_price=float(close.price),
+                # Critical fix: research_only=True keeps this arm out of the
+                # paper-trading allocator. BidAggregator.collect_for_date skips
+                # research_only events; permutation.load_rows ignores the flag,
+                # so the arm is still measured. Without this a same-day swarm
+                # event becomes an executable BidCandidate (broken isolation).
+                payload={"source": "swarm", "strategy": "swarm_research",
+                         "research_only": True, "provenance": v.provenance},
+                db=db,
+            )
+            db.commit()
+        except Exception as exc:  # noqa: BLE001 — per-ticker isolation
+            db.rollback()
+            res.failed += 1
+            log.warning("swarm_research_record_failed", ticker=ticker, error=str(exc))
             continue
-        record_event(
-            event_type="ai_analysis", subtype=v.verdict, ticker=ticker,
-            event_time=datetime.combine(as_of, datetime.min.time(), tzinfo=UTC),
-            event_price=float(close.price),
-            payload={"source": "swarm", "strategy": "swarm_research",
-                     "provenance": v.provenance},
-            db=db,
-        )
         res.recorded += 1
         log.info("swarm_research_recorded", ticker=ticker, verdict=v.verdict)
     return res
@@ -118,11 +135,18 @@ def main(argv: list[str] | None = None, *, provider=None, price_provider=None) -
     gen = session_scope()
     db = next(gen)
     try:
+        # run_batch commits per recorded ticker (per-ticker isolation); no
+        # batch-level commit needed.
         res = run_batch(db, tickers=tickers, as_of=as_of,
                         provider=provider, price_provider=price_provider)
-        db.commit()
         print(f"swarm_research {as_of}: recorded={res.recorded} "
               f"abstained={res.abstained} failed={res.failed}")
+        # Review (Important): total failure must NOT exit 0 — recorded=0 means
+        # the run produced no samples (all abstained/failed); surface it.
+        if res.recorded == 0:
+            print("swarm_research: no verdicts recorded (all abstained/failed)",
+                  file=sys.stderr)
+            raise SystemExit(1)
     finally:
         with contextlib.suppress(StopIteration):
             next(gen)
