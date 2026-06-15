@@ -209,3 +209,18 @@ def test_bare_injected_client_still_authenticates() -> None:
     assert v is not None and v.verdict == "bullish"
     # every request carried the bearer token despite the bare client
     assert seen and all(h == f"Bearer {_KEY}" for h in seen)
+
+
+def test_default_client_ignores_ambient_proxy_env() -> None:
+    """Vibe is an internal NAS host. The default httpx.Client MUST be built with
+    trust_env=False so it never inherits the marketpulse container's
+    HTTP_PROXY/HTTPS_PROXY (a CN-data Clash proxy on :7892) — routing the Vibe
+    call through that proxy returns a bare 502. No client is injected here, so
+    the provider builds its own; that one must not trust the environment."""
+    # Unreachable local port: __init__'s _fetch_backend probe fails fast
+    # (connection refused, caught → backend "unknown"); no real NAS call.
+    p = HttpVibeSwarmProvider(
+        base_url="http://127.0.0.1:9", api_key=_KEY,
+        preset="investment_committee", timeout_seconds=300, goal="Assess.",
+    )
+    assert p._client.trust_env is False
