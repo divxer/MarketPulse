@@ -63,10 +63,9 @@ def test_happy_path_running_then_completed() -> None:
         if request.method == "POST" and request.url.path == "/swarm/runs":
             body = json.loads(request.content)
             assert body["preset_name"] == "investment_committee"
-            # goal + suffix must not run on: a blank line separates them.
-            goal = body["user_vars"]["goal"]
-            assert "\n\n" in goal
-            assert goal.rstrip().endswith("VERDICT: bullish|neutral|bearish")
+            # The preset now owns the VERDICT contract; the provider sends the
+            # caller's goal verbatim (no appended VERDICT suffix).
+            assert body["user_vars"]["goal"] == "Assess the stock."
             return httpx.Response(200, json={"id": "run-42", "status": "running",
                                              "agent_count": 7})
         if request.url.path == "/swarm/runs/run-42":

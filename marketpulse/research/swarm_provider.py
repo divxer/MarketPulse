@@ -57,12 +57,6 @@ class StubSwarmVerdictProvider:
 
 
 _TERMINAL = {"completed", "failed", "cancelled", "error"}
-# Review fix: explicit blank line so goal + suffix never concatenate into one
-# run-on sentence in the prompt.
-_GOAL_SUFFIX = (
-    "\n\nEnd your report with a single final line exactly in the form:\n"
-    "VERDICT: bullish|neutral|bearish"
-)
 # Review fix #6: tolerant backend identity — try these keys in order, else unknown.
 _BACKEND_KEYS = ("model", "backend", "provider", "llm_model", "model_name")
 
@@ -137,9 +131,13 @@ class HttpVibeSwarmProvider:
         return SwarmVerdict(verdict=verdict, run_id=run_id, provenance=prov)
 
     def _start(self, ticker: str) -> tuple[str, int | None]:
+        # The dedicated preset (swarm_research_investment_committee) owns the
+        # VERDICT final-line contract at the PM system_prompt level and consumes
+        # {goal} as caller context, so the provider sends the goal verbatim — no
+        # appended VERDICT instruction (which the stock preset silently dropped).
         body = {"preset_name": self._preset,
                 "user_vars": {"target": ticker, "market": "US",
-                              "goal": self._goal + _GOAL_SUFFIX}}
+                              "goal": self._goal}}
         r = self._client.post(
             f"{self._base}/swarm/runs", json=body, headers=self._auth)
         r.raise_for_status()
