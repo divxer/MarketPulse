@@ -66,19 +66,20 @@ from marketpulse.research.swarm_provider import (
 
 def test_parse_verdict_basic():
     assert parse_verdict("...thesis...\nVERDICT: bullish") == "bullish"
-    assert parse_verdict("VERDICT: bearish\n") == "bearish"
-    assert parse_verdict("VERDICT:neutral") == "neutral"        # no space
+    assert parse_verdict("VERDICT: bearish") == "bearish"
     assert parse_verdict("verdict: BULLISH") == "bullish"        # case-insensitive
+    assert parse_verdict("VERDICT:neutral") == "neutral"         # no space, own line
 
 
-def test_parse_verdict_takes_last_match():
-    # Protection 1: a mid-report quote of a prior verdict must not win.
-    report = (
-        "Yesterday we said VERDICT: bearish.\n"
-        "Today after analysis...\n"
-        "VERDICT: bullish\n"
-    )
+def test_parse_verdict_line_anchored_ignores_prose():
+    # Protection 1 (tightened): a mid-sentence quote is NOT a verdict line.
+    assert parse_verdict("Yesterday we said VERDICT: bearish in passing.") is None
+    # final anchored line wins over an earlier anchored line
+    report = "VERDICT: bearish\n...revised...\nVERDICT: bullish\n"
     assert parse_verdict(report) == "bullish"
+    # prose mention + a real final line → the final line
+    report2 = "We noted VERDICT: bearish earlier.\nVERDICT: neutral\n"
+    assert parse_verdict(report2) == "neutral"
 
 
 def test_parse_verdict_unparseable_returns_none():
@@ -112,20 +113,20 @@ from typing import Protocol
 
 from marketpulse.evaluation.constants import AIVerdict
 
-# Protection 1: capture every VERDICT line, take the LAST valid one.
-_VERDICT_RE = re.compile(r"VERDICT:\s*([A-Za-z]+)", re.IGNORECASE)
+# Protection 1 (review-tightened): a VERDICT must be its OWN final-style line —
+# `^ VERDICT: <label> $` anchored, multiline — so a mid-sentence quote like
+# "Yesterday we said VERDICT: bearish." is NOT caught. Take the LAST such line.
+_VERDICT_RE = re.compile(
+    r"(?im)^\s*VERDICT:\s*(bullish|neutral|bearish)\s*$",
+)
 
 
 def parse_verdict(report: str) -> str | None:
-    """Last `VERDICT: <label>` whose label is a valid AIVerdict; else None.
-    Unparseable/invalid → None (caller abstains; never a forced neutral)."""
-    valid = AIVerdict.all()
-    last: str | None = None
-    for m in _VERDICT_RE.finditer(report or ""):
-        label = m.group(1).lower()
-        if label in valid:
-            last = label
-    return last
+    """Last anchored `VERDICT: <label>` LINE with a valid label; else None.
+    Mid-report prose mentions never match (line-anchored). Unparseable/invalid
+    → None (caller abstains; never a forced neutral)."""
+    matches = _VERDICT_RE.findall(report or "")
+    return matches[-1].lower() if matches else None
 
 
 @dataclass(frozen=True)
@@ -200,19 +201,26 @@ from marketpulse.logging import get_logger
 log = get_logger(__name__)
 
 _TERMINAL = {"completed", "failed", "cancelled", "error"}
+# Review fix: explicit blank line so goal + suffix never concatenate into one
+# run-on sentence in the prompt.
 _GOAL_SUFFIX = (
-    " End your report with a single final line exactly in the form: "
+    "\n\nEnd your report with a single final line exactly in the form:\n"
     "VERDICT: bullish|neutral|bearish"
 )
+# Review fix #6: tolerant backend identity — try these keys in order, else unknown.
+_BACKEND_KEYS = ("model", "backend", "provider", "llm_model", "model_name")
 
 
 class HttpVibeSwarmProvider:
     """Real adapter against the NAS Vibe-Trading service (Bearer auth).
     Async poll model. Any failure for a ticker → None (abstain); never raises
-    out to the batch, never touches a MarketPulse production path."""
+    out to the batch, never touches a MarketPulse production path.
+
+    Review fix: an httpx.Client is INJECTED (default constructs one) so tests
+    drive a mock transport instead of patching module-global httpx.get/post."""
 
     def __init__(self, *, base_url: str, api_key: str, preset: str,
-                 timeout_seconds: int, goal: str,
+                 timeout_seconds: int, goal: str, client: httpx.Client | None = None,
                  poll_interval: float = 5.0, clock=time) -> None:
         self._base = base_url.rstrip("/")
         self._host = urlparse(base_url).netloc or base_url   # Protection 2
@@ -222,24 +230,26 @@ class HttpVibeSwarmProvider:
         self._goal = goal
         self._poll = poll_interval
         self._clock = clock
+        self._client = client or httpx.Client(
+            headers={"Authorization": f"Bearer {api_key}"}, timeout=30,
+        )
         self._backend = self._fetch_backend()
-
-    def _headers(self) -> dict:
-        return {"Authorization": f"Bearer {self._key}"}
 
     def _fetch_backend(self) -> str:
         try:
-            r = httpx.get(f"{self._base}/settings/llm",
-                          headers=self._headers(), timeout=10)
+            r = self._client.get(f"{self._base}/settings/llm", timeout=10)
             r.raise_for_status()
             data = r.json()
-            return str(data.get("model") or data.get("backend") or "unknown")
+            for k in _BACKEND_KEYS:
+                if data.get(k):
+                    return str(data[k])
+            return "unknown"
         except Exception:  # noqa: BLE001 — provenance is best-effort
             return "unknown"
 
     def verdict_for(self, *, ticker: str, as_of: date) -> SwarmVerdict | None:
         try:
-            run_id = self._start(ticker)
+            run_id, swarm_size = self._start(ticker)
             report = self._poll_report(run_id)
         except Exception as exc:  # noqa: BLE001 — per-ticker isolation
             log.warning("swarm_run_failed", ticker=ticker, error=str(exc))
@@ -256,22 +266,26 @@ class HttpVibeSwarmProvider:
             "backend": self._backend, "preset": self._preset,
             "run_id": run_id, "adapter_version": "8c-1",
         }
+        # Review fix #1: swarm_size is OPTIONAL — recorded only if the API exposed it.
+        if swarm_size is not None:
+            prov["swarm_size"] = swarm_size
         return SwarmVerdict(verdict=verdict, run_id=run_id, provenance=prov)
 
-    def _start(self, ticker: str) -> str:
+    def _start(self, ticker: str) -> tuple[str, int | None]:
         body = {"preset_name": self._preset,
                 "user_vars": {"target": ticker, "market": "US",
                               "goal": self._goal + _GOAL_SUFFIX}}
-        r = httpx.post(f"{self._base}/swarm/runs", json=body,
-                       headers=self._headers(), timeout=30)
+        r = self._client.post(f"{self._base}/swarm/runs", json=body)
         r.raise_for_status()
-        return str(r.json()["id"])
+        data = r.json()
+        # swarm_size: only if the POST/preset response carries it; else None.
+        size = data.get("agent_count") or data.get("swarm_size")
+        return str(data["id"]), (int(size) if size else None)
 
     def _poll_report(self, run_id: str) -> str | None:
         deadline = self._clock.monotonic() + self._timeout
         while self._clock.monotonic() < deadline:
-            r = httpx.get(f"{self._base}/swarm/runs/{run_id}",
-                          headers=self._headers(), timeout=30)
+            r = self._client.get(f"{self._base}/swarm/runs/{run_id}")
             r.raise_for_status()
             data = r.json()
             status = str(data.get("status", "")).lower()
@@ -283,9 +297,9 @@ class HttpVibeSwarmProvider:
         return None  # timeout → abstain
 ```
 
-(Adjust `data.get("model")` to the real `/settings/llm` field once a key is available; until
-then `"unknown"` is the correct recorded value. If `swarm_size` is exposed on the run detail,
-add it to provenance; otherwise omit — do not hardcode 4.)
+Notes: `/settings/llm`'s real field shape is unknown until a key is in hand — the tolerant
+`_BACKEND_KEYS` scan returns `"unknown"` rather than guessing; the dry run (8c-1d) records the
+actual response shape so a follow-up can pin the exact key. `swarm_size` is never hardcoded.
 
 - [ ] **Step 4: run → pass. ruff clean.**
 - [ ] **Step 5: commit** — `feat(research): HttpVibeSwarmProvider + config (8c-1b)`
@@ -348,16 +362,29 @@ class BatchResult:
 
 
 def run_batch(db, *, tickers, as_of, provider, price_provider) -> BatchResult:
+    """Three-state semantics (review fix #3):
+      abstained = provider returned no verdict (None, or raised — isolated here).
+      failed    = HAD a verdict but couldn't record it (no event_price, or
+                  record_event rejected it).
+      recorded  = event written.
+    """
     res = BatchResult()
     for ticker in tickers:
-        v = provider.verdict_for(ticker=ticker, as_of=as_of)
+        # Per-ticker isolation belt-and-braces (review): even though providers
+        # are designed not to raise, a stub/future provider might.
+        try:
+            v = provider.verdict_for(ticker=ticker, as_of=as_of)
+        except Exception as exc:  # noqa: BLE001
+            res.abstained += 1
+            log.warning("swarm_research_provider_error", ticker=ticker, error=str(exc))
+            continue
         if v is None:
             res.abstained += 1
             log.info("swarm_research_abstained", ticker=ticker)
             continue
         close = price_provider.close_on_date(ticker=ticker, on_date=as_of)
         if close is None:
-            res.failed += 1
+            res.failed += 1   # had a verdict, lost it to a missing price
             log.warning("swarm_research_no_price", ticker=ticker)
             continue
         record_event(
@@ -408,11 +435,20 @@ def main(argv: list[str] | None = None, *, provider=None, price_provider=None) -
     if provider is None:
         provider = _build_provider(settings, args.goal)
     if price_provider is None:
-        # production price path; tests inject a stub
+        # Review #5: reuse the SAME close_on_date provider the paper engine uses
+        # (marketpulse/trading/price_provider.YFinancePriceProvider) so event_price
+        # is drawn from the identical price path as other evaluation events — keeps
+        # the swarm arm's prices comparable, no separate ad-hoc quote source. It
+        # resolves last-final-close ≤ as_of (post-P2F), the right reference price.
         from marketpulse.data.yfinance_client import YFinanceClient
         from marketpulse.trading.price_provider import YFinancePriceProvider
         price_provider = YFinancePriceProvider(client=YFinanceClient())
 
+    # NOTE (review #4): session_scope is a PLAIN GENERATOR in this repo
+    # (marketpulse/db/base.py — bare yield + finally, NOT @contextmanager).
+    # Manual `next(gen)` driving is the verified convention (finalize_prices,
+    # refresh_sectors, rebuild_nav_snapshots all do this). Do NOT rewrite to
+    # `with session_scope() as db:` — it would raise.
     gen = session_scope()
     db = next(gen)
     try:
@@ -461,6 +497,12 @@ if __name__ == "__main__":
   `payload.strategy=swarm_research` + provenance (no token), counts print recorded/abstained/
   failed, Vibe `/swarm/runs` shows the runs. This seeds the arm toward the ≥30-h5 permutation
   gate. Verdict accrual is then passive (re-run the batch on a cadence you choose).
+  - **Also record the actual `/settings/llm` response shape** observed during the dry run
+    (with the key) so a follow-up can pin the exact backend field name (review #6).
+  - **Read-only verification (review suggestion):** after the dry run, confirm via a quick
+    query — count of `ai_analysis` events with `payload.$.strategy='swarm_research'` and their
+    subtype distribution — to verify accrual and that no forced-neutral skew appeared. (Same
+    in-container sqlite/`/app/.venv/bin/python` one-liner pattern used for prior audits.)
 
 ---
 
