@@ -6,9 +6,14 @@
 > (unchanged). "Phase number = main-line dependency chain; research sandbox = parallel arm."
 
 **Date:** 2026-06-12
-**Status:** **Technical validation complete ✅ (2026-06-15)** — waiting on (1) preset
-persistence in the Vibe repo and (2) the MarketPulse default-flip PR. No core logic changes
-pending; the design is proven end-to-end.
+**Status:** **COMPLETE ✅ (2026-06-15).** Production default path validated — event 264
+recorded successfully on a no-override run (preset/timeout from container defaults). The
+question RS-1 set out to de-risk ("can a swarm verdict be produced and enter the evaluation
+system?") is answered yes. **Next gate:** accumulate ≥30 resolved h5 outcomes, then run the
+pre-registered permutation test — `p < 0.05` ⇒ the swarm arm has edge worth pursuing; else
+archive the arm. Verdict *collection* engineering (the timeout fragility) is split out as a
+separate experiment, **Research Sandbox 1.1 — Swarm Async Finalizer** (not started here; goes
+through its own brainstorm → spec → plan).
 **Charter link:** strategy-trust chain — a NEW verdict source put through the EXISTING
 permutation pipeline. Pure research arm: **must not touch the allocator, execution, the
 North Star, or introduce any new statistics.**
