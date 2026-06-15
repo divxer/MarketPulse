@@ -159,7 +159,7 @@ SWARM_RESEARCH_ENABLED=false                         # default MUST be false
 SWARM_RESEARCH_BASE_URL=http://192.168.50.29:8899
 SWARM_RESEARCH_API_KEY=                              # Bearer token; NEVER logged or persisted
 SWARM_RESEARCH_PRESET=swarm_research_investment_committee   # dedicated VERDICT-enforcing preset (owns the final-line contract; consumes {goal})
-SWARM_RESEARCH_TIMEOUT_SECONDS=1500                  # 25 min; measured single-ticker 4-agent run ~16.5 min, 900s timed out just short
+SWARM_RESEARCH_TIMEOUT_SECONDS=2400                  # 40 min STOPGAP; runtime varies (measured 16.5 & 27.5 min) — durable fix is an async finalizer (Research Sandbox 1.1)
 SWARM_RESEARCH_MAX_TICKERS_PER_RUN=5
 ```
 

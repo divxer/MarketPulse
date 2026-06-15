@@ -128,11 +128,16 @@ class Settings(BaseSettings):
     # never appears there (validated 2026-06-15 — would mean 100% abstained).
     swarm_research_preset: str = Field(
         "swarm_research_investment_committee", alias="SWARM_RESEARCH_PRESET")
-    # 1500s (25 min): a swarm run is a multi-agent research task, not a plain
-    # HTTP call. Measured live: a single ticker's 4-agent DAG runs ~16.5 min;
-    # 300s/900s timed out right before completion into abstain.
+    # 2400s (40 min): STOPGAP. A swarm run is a multi-agent research task, not a
+    # plain HTTP call, and its runtime varies a lot — measured 16.5 min and
+    # 27.5 min for the same single-ticker 4-agent DAG, so 900s/1500s timed out
+    # just before completion into abstain. A fixed synchronous poll timeout is
+    # inherently fragile to this variance; the durable fix is an async finalizer
+    # (POST → record run_id → exit → a later job polls completed runs and writes
+    # the event), tracked as the next experiment (Research Sandbox 1.1). 2400s
+    # buys reliable recording in the interim without blocking longer than needed.
     swarm_research_timeout_seconds: int = Field(
-        1500, alias="SWARM_RESEARCH_TIMEOUT_SECONDS")
+        2400, alias="SWARM_RESEARCH_TIMEOUT_SECONDS")
     swarm_research_max_tickers_per_run: int = Field(
         5, alias="SWARM_RESEARCH_MAX_TICKERS_PER_RUN")
 
