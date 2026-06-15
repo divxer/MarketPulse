@@ -471,15 +471,16 @@ if __name__ == "__main__":
 
 ---
 
-## PR 8c-1d — strategy YAML + CHARTER pointer + first dry run
+## PR 8c-1d — CHARTER pointer + first dry run
 
-**Files:** `marketpulse/strategies/definitions/swarm_research.yaml`; `docs/CHARTER.md`.
+**Files:** `docs/CHARTER.md` only.
 
-- [ ] **Step 1: strategy definition** (so the arm is named/visible like the others; its
-  `instructions` double as the swarm `goal` text). Mirror the existing YAML shape; add an
-  `engine: vibe-trading` marker and verdict-line instruction. If the YAML loader rejects
-  unknown keys, add `engine` to the loader's allowed set (check
-  `marketpulse/strategies/` loader first; keep it backward-compatible).
+- [ ] **Step 1: NO strategy YAML (corrected).** The original plan added
+  `definitions/swarm_research.yaml`, but `definitions/` is loaded by
+  `RiskConfigProvider.from_yaml(strategies_dir=...)` and fed to the paper-trading risk
+  gate/allocator (jobs.py / paper_trading_tick.py). Placing the shadow arm there would couple
+  it into the execution path — a violation of the locked isolation invariant. **Do not add a
+  strategy YAML.** The arm is identified solely by `payload.strategy="swarm_research"`.
 
 - [ ] **Step 2: CHARTER pointer** (strategy-trust chain): one line —
   `8c-1 swarm_research shadow arm (spec 2026-06-12): verdicts from NAS Vibe-Trading over HTTP,

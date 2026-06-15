@@ -163,8 +163,12 @@ feature.
 - `marketpulse/research/verdict_parse.py` — VERDICT-line extraction (or inline in provider)
 - `marketpulse/cli/run_swarm_research.py` — batch CLI
 - `marketpulse/config.py` — 6 SWARM_RESEARCH_* settings
-- `marketpulse/strategies/definitions/swarm_research.yaml` — arm definition (display name,
-  description, `engine: vibe-trading` marker; instructions used as the swarm `goal`)
+- ~~`marketpulse/strategies/definitions/swarm_research.yaml`~~ — **DROPPED (corrected during
+  8c-1d implementation).** The `definitions/` dir is loaded by `RiskConfigProvider.from_yaml(
+  strategies_dir=...)` and fed to the paper-trading risk gate / allocator — placing the arm
+  there would COUPLE this shadow arm into the execution path, violating the locked
+  "isolated from allocator/execution" invariant. The arm identity lives solely in the CLI's
+  `payload.strategy="swarm_research"`; the swarm `goal` is the CLI `--goal` arg, not a YAML.
 - `docs/CHARTER.md` — strategy-trust chain: 8c-1 pointer (shadow arm, permutation-gated,
   isolated; results stay in run output)
 - tests per section above
