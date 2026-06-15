@@ -88,11 +88,21 @@ as `skipped`/`failed` with a reason; it produces no evaluation row.
 
 ### Verdict source (decision A, locked)
 
-Vibe's `investment_committee` preset returns a free-text `final_report`, not a structured
-verdict. The adapter instructs the swarm (via `user_vars.goal`) to **end its report with a
-single line `VERDICT: bullish|neutral|bearish`**, then extracts it. The verdict is the SWARM's
+Vibe returns a free-text `final_report`, not a structured verdict. The verdict is the SWARM's
 own conclusion — MarketPulse's own LLM is deliberately NOT inserted into the path (that would
 test a different thing). Extraction failure → abstain (no event), never a default.
+
+**Revised 2026-06-15 (validated):** the original plan appended a `VERDICT:` instruction to
+`user_vars.goal`. That is **architecturally ineffective** — the stock `investment_committee`
+preset declares only `target`/`market` and templates no `{goal}`, so Vibe's
+`format_map(_FallbackDict(...))` silently discards it and no agent ever sees the instruction →
+the PM ends in trade prose → 100% abstain. The VERDICT contract therefore lives in a **dedicated
+preset, `swarm_research_investment_committee`** (clone of `investment_committee`): its
+`portfolio_manager.system_prompt` mandates a standalone final line `VERDICT: bullish|neutral|bearish`
+(BUY/ADD/LONG→bullish, SELL/SHORT/REDUCE→bearish, HOLD/WAIT→neutral), the `task-decision`
+template repeats it, and a declared `goal` variable is consumed by every task. MarketPulse now
+sends `goal` as plain context only (`_GOAL_SUFFIX` removed); the preset owns the contract.
+`parse_verdict` extracts the last `VERDICT:` line; failure → abstain.
 
 ### Provider Protocol (replaceable; tests never hit the network)
 
@@ -148,8 +158,8 @@ run_swarm_research CLI (manual/cron; OFF by default)
 SWARM_RESEARCH_ENABLED=false                         # default MUST be false
 SWARM_RESEARCH_BASE_URL=http://192.168.50.29:8899
 SWARM_RESEARCH_API_KEY=                              # Bearer token; NEVER logged or persisted
-SWARM_RESEARCH_PRESET=investment_committee
-SWARM_RESEARCH_TIMEOUT_SECONDS=900                   # 15 min; a swarm run is multi-agent research, not a plain HTTP call
+SWARM_RESEARCH_PRESET=swarm_research_investment_committee   # dedicated VERDICT-enforcing preset (owns the final-line contract; consumes {goal})
+SWARM_RESEARCH_TIMEOUT_SECONDS=1500                  # 25 min; measured single-ticker 4-agent run ~16.5 min, 900s timed out just short
 SWARM_RESEARCH_MAX_TICKERS_PER_RUN=5
 ```
 

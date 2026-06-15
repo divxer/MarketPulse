@@ -122,13 +122,17 @@ class Settings(BaseSettings):
     swarm_research_base_url: str = Field(
         "http://192.168.50.29:8899", alias="SWARM_RESEARCH_BASE_URL")
     swarm_research_api_key: str = Field("", alias="SWARM_RESEARCH_API_KEY")
+    # swarm_research_investment_committee: the dedicated preset whose PM agent
+    # owns the VERDICT final-line contract and consumes {goal}. The stock
+    # investment_committee preset templates no {goal}, so a self-report VERDICT
+    # never appears there (validated 2026-06-15 — would mean 100% abstained).
     swarm_research_preset: str = Field(
-        "investment_committee", alias="SWARM_RESEARCH_PRESET")
-    # 900s (15 min): a swarm run is a multi-agent research task, not a plain
-    # HTTP call — live NAS runs routinely exceed several minutes. 300s was too
-    # short and timed out into abstain.
+        "swarm_research_investment_committee", alias="SWARM_RESEARCH_PRESET")
+    # 1500s (25 min): a swarm run is a multi-agent research task, not a plain
+    # HTTP call. Measured live: a single ticker's 4-agent DAG runs ~16.5 min;
+    # 300s/900s timed out right before completion into abstain.
     swarm_research_timeout_seconds: int = Field(
-        900, alias="SWARM_RESEARCH_TIMEOUT_SECONDS")
+        1500, alias="SWARM_RESEARCH_TIMEOUT_SECONDS")
     swarm_research_max_tickers_per_run: int = Field(
         5, alias="SWARM_RESEARCH_MAX_TICKERS_PER_RUN")
 
