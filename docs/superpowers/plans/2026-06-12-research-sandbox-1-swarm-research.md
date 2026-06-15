@@ -7,6 +7,13 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development
 > (recommended) or superpowers:executing-plans. Steps use checkbox (`- [ ]`) syntax.
 
+> **Status: COMPLETE ✅ (2026-06-15).** All four PR slices landed (#159) plus follow-ups
+> #160 (trust_env proxy fix), #162 (default preset `swarm_research_investment_committee` +
+> drop `_GOAL_SUFFIX`), #163 (timeout 2400 stopgap). Production default path validated end to
+> end (event 264, no overrides). Remaining work is data accrual (≥30 h5 → permutation gate),
+> not implementation. The async-finalizer fix for swarm timeout fragility is a separate
+> experiment (Research Sandbox 1.1).
+
 **Goal:** A `swarm_research` shadow strategy whose bullish/neutral/bearish verdicts come from
 the NAS-hosted Vibe-Trading swarm over HTTP, recorded as ordinary `ai_analysis` events
 (`payload.strategy="swarm_research"`) and graded by the existing permutation pipeline. No
