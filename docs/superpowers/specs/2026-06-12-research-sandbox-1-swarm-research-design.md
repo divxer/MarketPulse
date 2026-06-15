@@ -6,10 +6,47 @@
 > (unchanged). "Phase number = main-line dependency chain; research sandbox = parallel arm."
 
 **Date:** 2026-06-12
-**Status:** Approved (design locked)
+**Status:** **Technical validation complete ✅ (2026-06-15)** — waiting on (1) preset
+persistence in the Vibe repo and (2) the MarketPulse default-flip PR. No core logic changes
+pending; the design is proven end-to-end.
 **Charter link:** strategy-trust chain — a NEW verdict source put through the EXISTING
 permutation pipeline. Pure research arm: **must not touch the allocator, execution, the
 North Star, or introduce any new statistics.**
+
+## Technical validation (2026-06-15, live NAS, single AAPL run)
+
+The full chain was proven end-to-end:
+
+```
+MarketPulse → HttpVibeSwarmProvider → Vibe Swarm → VERDICT contract
+→ parse_verdict → EvaluationEvent (payload.strategy="swarm_research") → permutation pipeline
+```
+
+Confirmed: provider architecture (Stub/HTTP); `trust_env=False` defeats the container's
+ambient `HTTP_PROXY` (the real cause of the "intermittent 502s"); long-running task completes
+(~16.5 min); the dedicated preset reliably emits a machine-parsable verdict; `parse_verdict`
+hit a real report (`VERDICT: neutral`, event 263); `research_only=True` keeps it out of the
+allocator; provenance recorded in full.
+
+**The decisive finding** was not the network: the stock `investment_committee` preset declares
+only `target`/`market` and templates **no `{goal}`**, so the appended VERDICT suffix was
+**architecturally dropped** (`format_map(_FallbackDict(...))` silently discards unused vars).
+Without this end-to-end test the arm would have collected **100% abstained** for a month while
+we blamed the parser, timeout, or model. Fix: a dedicated `swarm_research_investment_committee`
+preset that owns the VERDICT contract at the PM `system_prompt` level and actually consumes `{goal}`.
+
+### Swarm throughput & cost (first real measurement)
+
+| Metric | Observed (AAPL, investment_committee 4-agent DAG) |
+|---|---|
+| Wall-clock | ≈ 16.5 min |
+| LLM round-trips | ≈ 48 (bull 13–16, bear 11–16, risk 5, PM 13) |
+| Backend | OpenRouter · `deepseek/deepseek-v4-pro` |
+| Est. cost / ticker | ~$0.2–1 (token usage not exposed by the run API; estimate from iterations + report sizes) |
+| Default timeout | **1500s** (300s/900s were too short — a run runs right up to ~16 min) |
+
+Planning implication: 30 outcomes ≈ 1–2 weeks at a small daily basket; a daily universe (50–100
+names) becomes a real throughput/cost question. These are the first measured numbers, not guesses.
 
 ## Problem / the one question
 
