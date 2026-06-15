@@ -47,6 +47,12 @@ class BidAggregator:
         bids: list[BidCandidate] = []
         for r in rows:
             payload = r.payload or {}
+            # Research-only events (e.g. the swarm_research shadow arm) carry a
+            # strategy label so the permutation pipeline measures them, but they
+            # MUST NOT become executable bids. Skip them here — the allocator-side
+            # half of the research/execution isolation invariant.
+            if payload.get("research_only"):
+                continue
             strategy = payload.get("strategy")
             if not strategy:
                 continue  # skip NULL-strategy rows (no audit in 6a)

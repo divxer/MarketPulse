@@ -117,6 +117,18 @@ class Settings(BaseSettings):
         ge=1,
     )
 
+    # Phase 8c-1: swarm research arm (NAS-hosted Vibe-Trading service).
+    swarm_research_enabled: bool = Field(False, alias="SWARM_RESEARCH_ENABLED")
+    swarm_research_base_url: str = Field(
+        "http://192.168.50.29:8899", alias="SWARM_RESEARCH_BASE_URL")
+    swarm_research_api_key: str = Field("", alias="SWARM_RESEARCH_API_KEY")
+    swarm_research_preset: str = Field(
+        "investment_committee", alias="SWARM_RESEARCH_PRESET")
+    swarm_research_timeout_seconds: int = Field(
+        300, alias="SWARM_RESEARCH_TIMEOUT_SECONDS")
+    swarm_research_max_tickers_per_run: int = Field(
+        5, alias="SWARM_RESEARCH_MAX_TICKERS_PER_RUN")
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
