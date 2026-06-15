@@ -90,7 +90,13 @@ class HttpVibeSwarmProvider:
         # client's headers) so an INJECTED client without auth headers still
         # authenticates.
         self._auth = {"Authorization": f"Bearer {api_key}"}
-        self._client = client or httpx.Client(timeout=30)
+        # trust_env=False: Vibe is an INTERNAL NAS host. The marketpulse
+        # container sets HTTP_PROXY/HTTPS_PROXY (a CN-data Clash proxy on :7892
+        # for gtimg.cn/IBKR); httpx would otherwise route this call through that
+        # proxy, which can't reach the docker-internal host and returns a bare
+        # 502. An internal service call must never inherit the ambient proxy.
+        # (Injected clients — tests — are used as-is.)
+        self._client = client or httpx.Client(timeout=30, trust_env=False)
         self._backend = self._fetch_backend()
 
     def _fetch_backend(self) -> str:

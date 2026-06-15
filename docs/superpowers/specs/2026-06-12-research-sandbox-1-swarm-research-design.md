@@ -112,7 +112,7 @@ SWARM_RESEARCH_ENABLED=false                         # default MUST be false
 SWARM_RESEARCH_BASE_URL=http://192.168.50.29:8899
 SWARM_RESEARCH_API_KEY=                              # Bearer token; NEVER logged or persisted
 SWARM_RESEARCH_PRESET=investment_committee
-SWARM_RESEARCH_TIMEOUT_SECONDS=300
+SWARM_RESEARCH_TIMEOUT_SECONDS=900                   # 15 min; a swarm run is multi-agent research, not a plain HTTP call
 SWARM_RESEARCH_MAX_TICKERS_PER_RUN=5
 ```
 

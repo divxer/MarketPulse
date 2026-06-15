@@ -124,8 +124,11 @@ class Settings(BaseSettings):
     swarm_research_api_key: str = Field("", alias="SWARM_RESEARCH_API_KEY")
     swarm_research_preset: str = Field(
         "investment_committee", alias="SWARM_RESEARCH_PRESET")
+    # 900s (15 min): a swarm run is a multi-agent research task, not a plain
+    # HTTP call — live NAS runs routinely exceed several minutes. 300s was too
+    # short and timed out into abstain.
     swarm_research_timeout_seconds: int = Field(
-        300, alias="SWARM_RESEARCH_TIMEOUT_SECONDS")
+        900, alias="SWARM_RESEARCH_TIMEOUT_SECONDS")
     swarm_research_max_tickers_per_run: int = Field(
         5, alias="SWARM_RESEARCH_MAX_TICKERS_PER_RUN")
 
